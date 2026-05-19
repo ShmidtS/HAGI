@@ -62,6 +62,10 @@ The project is in the architectural design phase.
 
 The first milestone (toy model, ~8 layers, 256 hidden, single-GPU forward parity) is in planning.
 
+### Platform Note
+
+This project targets [cuda-oxide](https://github.com/NVlabs/cuda-oxide) for GPU kernel compilation. cuda-oxide is Linux-only. On Windows, use WSL2 — see [`docs/WSL2-SETUP.md`](docs/WSL2-SETUP.md) for installation instructions.
+
 ---
 
 ## License
