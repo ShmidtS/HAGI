@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/core-types",
+  "crates/tensor-runtime",
+  "crates/clifford-core",
+  "crates/hrm-model",
+  "crates/hdim-model",
+  "crates/cuda-kernels",
+  "crates/data",
+  "crates/losses",
+  "crates/config",
+  "crates/ffi-compat",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+core-types = { path = "crates/core-types" }
+tensor-runtime = { path = "crates/tensor-runtime" }
+clifford-core = { path = "crates/clifford-core" }
+hrm-model = { path = "crates/hrm-model" }
+hdim-model = { path = "crates/hdim-model" }
+config = { path = "crates/config" }
+data = { path = "crates/data" }
+losses = { path = "crates/losses" }
+
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+approx = "0.5"
+rand = "0.8"
+rand_chacha = "0.3"
+ndarray-npy = "0.9"
+ndarray = "0.15"
