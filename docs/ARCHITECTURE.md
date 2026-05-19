@@ -2,7 +2,7 @@
 
 ## Overview
 
-HAGI (Hypercomplex Adaptive Geometric Intelligence) is a unified deep learning system that merges two architectural paradigms:
+HAGI (Hypercomplex Artificial General Intelligence) is a unified deep learning system that merges two architectural paradigms:
 
 - **HRM (Hierarchical Recurrent Model)**: A two-level recurrent Transformer where a fast L-module performs local token-level refinement and a slow H-module integrates global context. This creates a compute-efficient backbone that reuses parameters across depth through recurrence.
 - **HDIM (Hypercomplex Domain Isomorphism Machine)**: A structural reasoning layer that operates in Clifford algebra, extracting domain-invariant encodings via rotor sandwich products and enabling cross-domain knowledge transfer.
