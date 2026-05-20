@@ -137,7 +137,10 @@ impl ModelConfig {
                 self.hrm.h_layers, self.hrm.l_layers, self.hrm.total_layers
             ));
         }
-        if self.hrm.hidden_size % self.hrm.num_heads != 0 {
+        if self.hrm.num_heads == 0 {
+            return Err("num_heads must be positive".to_string());
+        }
+        if !self.hrm.hidden_size.is_multiple_of(self.hrm.num_heads) {
             return Err(format!(
                 "hidden_size ({}) must be divisible by num_heads ({})",
                 self.hrm.hidden_size, self.hrm.num_heads
