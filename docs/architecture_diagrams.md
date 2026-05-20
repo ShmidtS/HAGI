@@ -24,7 +24,7 @@ flowchart TB
 
     subgraph HDIM["HDIM — Domain-Invariant Mapping"]
         direction TB
-        PROJ[HiddenToMultivector<br/>[B,T,hidden] -> [B,T,heads,blades]]
+        PROJ["HiddenToMultivector<br/>[B,T,hidden] -> [B,T,heads,blades]"]
         EXTR[InvariantExtractor<br/>U = R^-1 * G * R]
         XFER[DomainTransfer<br/>G_target = R_target * U * R_target^-1]
         FUSE[GatedFusion<br/>gated residual -> hidden]
