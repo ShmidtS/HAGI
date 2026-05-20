@@ -5,6 +5,12 @@ pub struct CliffordAlgebra<A: AlgebraSignature> {
     _algebra: std::marker::PhantomData<A>,
 }
 
+impl<A: AlgebraSignature> Default for CliffordAlgebra<A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<A: AlgebraSignature> CliffordAlgebra<A> {
     pub fn new() -> Self {
         Self {

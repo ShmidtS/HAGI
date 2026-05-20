@@ -25,9 +25,6 @@ meta.json
 .context-mode/
 
 # untracked / wip artifacts
-/crates/hagi-cli/
-/crates/**/tests/
-/crates/hrm-model/src/attention.rs
-/crates/hrm-model/src/integration.rs
-/crates/hrm-model/src/state.rs
-/formalization/
+formalization/.lake/config/\[anonymous]/lakefile.olean
+formalization/.lake/config/\[anonymous]/lakefile.olean.trace
+formalization/.lake-build.log

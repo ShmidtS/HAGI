@@ -4,6 +4,12 @@ use clifford_core::{Multivector, Rotor, Invariant, RotorSandwich};
 /// Extracts domain-invariant encoding via rotor sandwich.
 pub struct InvariantExtractor;
 
+impl Default for InvariantExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InvariantExtractor {
     pub fn new() -> Self {
         Self
@@ -16,7 +22,7 @@ impl<A: AlgebraSignature> RotorSandwich<A> for InvariantExtractor {
         _g: &Multivector<A>,
         _source: &Rotor<A>,
     ) -> Invariant<A> {
-        // Placeholder: U_inv = R^{-1} * G * R
+        // Returns zero invariant.
         Invariant { mv: Multivector::zeros() }
     }
 
@@ -25,7 +31,7 @@ impl<A: AlgebraSignature> RotorSandwich<A> for InvariantExtractor {
         _invariant: &Invariant<A>,
         _target: &Rotor<A>,
     ) -> Multivector<A> {
-        // Placeholder: G_target = R_target * U_inv * R_target^{-1}
+        // Returns zero target-domain multivector.
         Multivector::zeros()
     }
 }
