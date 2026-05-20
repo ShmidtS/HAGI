@@ -4,7 +4,7 @@
 
 HAGI unifies three architectural lines into a single system: HRM provides hierarchical reasoning via recurrent high-level/low-level states, HDIM adds structural analogy transfer across domains through Clifford algebra, and MSA extends accessible context via a sparse memory mechanism for documents and active queries. In this composition HRM handles step-by-step reasoning dynamics, HDIM extracts domain-independent structure, and MSA scales memory to long-context mode without full dense attention over all tokens.
 
-The systemic idea: the HRM hidden state does not only pass through the transformer stack but also receives a structural channel. This channel projects the hidden representation into multivector `G` in `Cl(p,q,r)`, extracts invariant `U = R⁻¹ ⊗ G ⊗ R`, matches it with other domains, and transfers it back as a gated residual. MSA memory slots are treated as additional domains: each document/slot may have a domain rotor and participate in HDIM matching/transfer.
+The systemic idea: the HRM hidden state does not only pass through the transformer stack but also receives a structural channel. This channel projects the hidden representation into multivector `G` in `Cl(p,q,r)`, extracts invariant `U = R⁻¹ ⊗ G ⊗ R`, matches it with other domains, and transfers it back as a gated residual. Memory slots are treated as additional HDIM domains in the formal model; routing uses the same `DomainRotor` mechanism.
 
 ## Target Architecture
 
@@ -47,7 +47,7 @@ The MSA Adapter connects sparse memory for long-context inference. Architectural
 2. online routing/context assembly;
 3. sparse generation.
 
-Memory Parallel stores routing keys on GPU shards, while content K/V may reside in host DRAM. In HAGI every memory slot receives a `DomainId`, so sparse memory becomes not just a retrieval source but a set of structural domains for HDIM transfer.
+K/V content pages are stored in host DRAM; routing keys `K̄ᵣ` are GPU-resident shards. The transfer contract is async fetch via CUDA stream ordering. In HAGI every memory slot receives a `DomainId`, so sparse memory becomes not just a retrieval source but a set of structural domains for HDIM transfer.
 
 - memory slot as domain;
 - route-within-slots invariant;
@@ -81,11 +81,11 @@ After `extractInvariant` and optional `domainTransfer` the result returns to the
 
 ### MSA memory slots → HDIM domains
 
-Every MSA memory slot receives a `DomainId`. Routing selects a subset of slots, after which HDIM may treat the selected memory documents as domains with separate rotors. This creates a shared mechanism for cross-document structural analogy transfer: the active query is one domain, the memory document is another.
+Every MSA memory slot receives a `DomainId`. HDIM invariant extraction applies to memory-slot content after routing selection. The selected slot's domain rotor is used for transfer into the active query domain. This creates a shared mechanism for cross-document structural analogy transfer: the active query is one domain, the memory document is another.
 
 ### Tensor Runtime boundary
 
-HRM, HDIM, and MSA operate only through the `TensorSpec`/runtime boundary. Backend dispatch must not change the shape/dtype/layout contract. CUDA-oxide kernels may optimize execution but must not alter the formal semantics of the CPU reference path.
+HRM, HDIM, and MSA operate only through the `TensorSpec`/runtime boundary. Backend dispatch must not change the shape/dtype/layout contract. CUDA-oxide kernels are required to preserve formal semantics. CPU-vs-CUDA parity tests with tolerance `ε` are the acceptance gate; equivalence is not yet proven for all kernels.
 
 ## Lean4 Formalization Roadmap
 
