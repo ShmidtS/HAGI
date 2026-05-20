@@ -23,3 +23,11 @@ meta.json
 .crates.toml
 .crates2.json
 .context-mode/
+
+# untracked / wip artifacts
+/crates/hagi-cli/
+/crates/**/tests/
+/crates/hrm-model/src/attention.rs
+/crates/hrm-model/src/integration.rs
+/crates/hrm-model/src/state.rs
+/formalization/
