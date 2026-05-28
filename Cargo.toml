@@ -2,37 +2,74 @@
 resolver = "2"
 members = [
   "crates/core-types",
+  "crates/nars-core",
+  "crates/nars-hrm",
   "crates/tensor-runtime",
   "crates/clifford-core",
   "crates/hrm-model",
   "crates/hdim-model",
+  "crates/nars-hdim",
   "crates/cuda-kernels",
   "crates/data",
   "crates/losses",
   "crates/config",
   "crates/ffi-compat",
+  "crates/msa-adapter",
+  "crates/nars-msa",
+  "crates/hagi-train",
+  "crates/hagi-eval",
 ]
+exclude = ["crates/cuda-oxide"]
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.78"
 license = "Apache-2.0"
+authors = ["HAGI contributors"]
+repository = "https://github.com/ShmidtS/HAGI"
 
 [workspace.dependencies]
 core-types = { path = "crates/core-types" }
+nars-core = { path = "crates/nars-core" }
 tensor-runtime = { path = "crates/tensor-runtime" }
 clifford-core = { path = "crates/clifford-core" }
 hrm-model = { path = "crates/hrm-model" }
 hdim-model = { path = "crates/hdim-model" }
+nars-hrm = { path = "crates/nars-hrm" }
+nars-hdim = { path = "crates/nars-hdim" }
+cuda-kernels = { path = "crates/cuda-kernels" }
 config = { path = "crates/config" }
 data = { path = "crates/data" }
 losses = { path = "crates/losses" }
+msa-adapter = { path = "crates/msa-adapter" }
+nars-msa = { path = "crates/nars-msa" }
+hagi-train = { path = "crates/hagi-train" }
+hagi-eval = { path = "crates/hagi-eval" }
 
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 thiserror = "1"
+smallvec = "1"
 approx = "0.5"
 rand = "0.8"
 rand_chacha = "0.3"
 ndarray-npy = "0.9"
 ndarray = "0.15"
+
+cuda-device = { path = "crates/cuda-oxide/crates/cuda-device" }
+cuda-host = { path = "crates/cuda-oxide/crates/cuda-host" }
+cuda-async = { path = "crates/cuda-oxide/crates/cuda-async" }
+cuda-macros = { path = "crates/cuda-oxide/crates/cuda-macros" }
+cuda-core = { path = "crates/cuda-oxide/crates/cuda-core" }
+cuda-bindings = { path = "crates/cuda-oxide/crates/cuda-bindings" }
+libnvvm-sys = { path = "crates/cuda-oxide/crates/libnvvm-sys" }
+nvjitlink-sys = { path = "crates/cuda-oxide/crates/nvjitlink-sys" }
+oxide-artifacts = { path = "crates/cuda-oxide/crates/oxide-artifacts" }
+reserved-oxide-symbols = { path = "crates/cuda-oxide/crates/reserved-oxide-symbols" }
+anyhow = "1.0"
+half = "2.7"
+libloading = "0.8"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "visit", "visit-mut"] }
+proc-macro2 = { version = "1.0", features = ["span-locations"] }

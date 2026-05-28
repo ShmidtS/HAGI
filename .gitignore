@@ -25,6 +25,5 @@ meta.json
 .context-mode/
 
 # untracked / wip artifacts
-formalization/.lake/config/\[anonymous]/lakefile.olean
-formalization/.lake/config/\[anonymous]/lakefile.olean.trace
+formalization/.lake/
 formalization/.lake-build.log
