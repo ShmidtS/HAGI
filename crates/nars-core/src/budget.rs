@@ -45,6 +45,12 @@ impl BudgetValue {
         let threshold = clamp01(threshold);
         self.priority >= threshold && self.quality >= threshold
     }
+
+    pub fn is_valid(&self) -> bool {
+        (0.0..=1.0).contains(&self.priority)
+            && (0.0..=1.0).contains(&self.durability)
+            && (0.0..=1.0).contains(&self.quality)
+    }
 }
 
 fn clamp01(value: f64) -> f64 {
@@ -90,5 +96,30 @@ mod tests {
     fn above_threshold_requires_priority_and_quality_to_meet_threshold() {
         assert!(BudgetValue::new(0.6, 0.1, 0.7).above_threshold(0.5));
         assert!(!BudgetValue::new(0.6, 0.1, 0.4).above_threshold(0.5));
+    }
+
+    #[test]
+    fn is_valid_reports_all_components_in_unit_interval() {
+        assert!(BudgetValue::new(2.0, -1.0, 0.5).is_valid());
+    }
+
+    #[test]
+    fn decay_with_unit_factor_or_less_never_increases_priority_or_durability() {
+        let budget = BudgetValue::new(0.4, 0.7, 0.2);
+        let decayed = budget.decay(0.8);
+        assert!(decayed.priority() <= budget.priority());
+        assert!(decayed.durability() <= budget.durability());
+    }
+
+    #[test]
+    fn merge_output_is_componentwise_at_least_each_input() {
+        let left = BudgetValue::new(0.2, 0.8, 0.4);
+        let right = BudgetValue::new(0.7, 0.3, 0.9);
+        let merged = left.merge(right);
+        assert!(merged.priority() >= left.priority() && merged.priority() >= right.priority());
+        assert!(
+            merged.durability() >= left.durability() && merged.durability() >= right.durability()
+        );
+        assert!(merged.quality() >= left.quality() && merged.quality() >= right.quality());
     }
 }

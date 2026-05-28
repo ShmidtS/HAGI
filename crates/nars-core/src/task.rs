@@ -19,6 +19,18 @@ impl Task {
     pub fn set_budget(&mut self, budget: BudgetValue) {
         self.budget = budget;
     }
+
+    pub fn decay_budget(&mut self, factor: f64) {
+        self.budget = self.budget.decay(factor);
+    }
+
+    pub fn merge_budget(&mut self, other: BudgetValue) {
+        self.budget = self.budget.merge(other);
+    }
+
+    pub fn is_budget_valid(&self) -> bool {
+        self.budget.is_valid()
+    }
 }
 
 #[cfg(test)]
@@ -42,5 +54,22 @@ mod tests {
         let budget = BudgetValue::new(0.7, 0.8, 0.9);
         task.set_budget(budget);
         assert_eq!(task.budget(), budget);
+    }
+
+    #[test]
+    fn decay_budget_updates_inner_budget() {
+        let sentence = Sentence::question(Term::atom("bird"));
+        let mut task = Task::new(sentence, BudgetValue::new(0.8, 0.6, 0.4));
+        task.decay_budget(0.5);
+        assert_eq!(task.budget(), BudgetValue::new(0.4, 0.3, 0.4));
+    }
+
+    #[test]
+    fn merge_budget_updates_inner_budget() {
+        let sentence = Sentence::question(Term::atom("bird"));
+        let mut task = Task::new(sentence, BudgetValue::new(0.2, 0.8, 0.4));
+        task.merge_budget(BudgetValue::new(0.7, 0.3, 0.9));
+        assert_eq!(task.budget(), BudgetValue::new(0.7, 0.8, 0.9));
+        assert!(task.is_budget_valid());
     }
 }
