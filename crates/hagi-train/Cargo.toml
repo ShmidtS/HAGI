@@ -1,0 +1,27 @@
+[package]
+name = "hagi-train"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+core-types = { workspace = true }
+tensor-runtime = { workspace = true }
+config = { workspace = true }
+hrm-model = { workspace = true }
+hdim-model = { workspace = true }
+clifford-core = { workspace = true }
+losses = { workspace = true }
+data = { workspace = true }
+msa-adapter = { workspace = true }
+nars-hdim = { workspace = true }
+nars-msa = { workspace = true }
+nars-hrm = { workspace = true }
+nars-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

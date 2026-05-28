@@ -1,0 +1,23 @@
+[package]
+name = "hagi-eval"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+core-types = { workspace = true }
+tensor-runtime = { workspace = true }
+config = { workspace = true }
+hrm-model = { workspace = true }
+hdim-model = { workspace = true }
+cuda-kernels = { workspace = true }
+clifford-core = { workspace = true }
+losses = { workspace = true }
+hagi-train = { workspace = true }
+msa-adapter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

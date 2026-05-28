@@ -1,0 +1,17 @@
+[package]
+name = "msa-adapter"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+tensor-runtime = { workspace = true }
+core-types = { workspace = true }
+hdim-model = { path = "../hdim-model" }
+config = { path = "../config" }
+rand = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rand_chacha = { workspace = true }
