@@ -1,0 +1,14 @@
+[package]
+name = "nars-msa"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+nars-core = { path = "../nars-core" }
+msa-adapter = { workspace = true }
+config = { workspace = true }
+core-types = { workspace = true }
+tensor-runtime = { workspace = true }
+thiserror = { workspace = true }
+smallvec = { workspace = true }
