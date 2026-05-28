@@ -9,4 +9,6 @@ core-types = { workspace = true }
 tensor-runtime = { workspace = true }
 clifford-core = { workspace = true }
 config = { workspace = true }
+hrm-model = { workspace = true }
 thiserror = { workspace = true }
+rand = { workspace = true }

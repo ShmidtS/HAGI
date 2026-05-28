@@ -10,3 +10,4 @@ tensor-runtime = { workspace = true }
 config = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
+thiserror = { workspace = true }
