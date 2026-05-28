@@ -325,6 +325,34 @@ sequenceDiagram
 - Training: HRM -> HDIM -> HRM -> Loss (no MSA needed per step, MSA is inference-optional for M4-M6).
 - Inference with memory: HRM -> HDIM (parallel) -> MSA -> HRM -> logits.
 
+**NARS control plane edges**
+- HRM -> NARS-HRM Controller -> HRM Control Policy -> HRM Backbone.
+- HDIM -> NARS-HDIM Reasoner -> Transfer Recommendation -> HDIM Transfer.
+- MSA -> NARS-MSA Reasoner -> Truth-Weighted Routing -> MSA Router.
+- Control plane edges run asynchronously or synchronously per training step.
+
+---
+
+## NARS Control Plane
+
+### NARS-HRM Control
+- `NarsHrmController` observes training loss and gradient norms.
+- Produces `HrmControlPolicy`; `policy.resolve()` applies `h_cycles`, `l_cycles`, `convergence_eps`, and `bp_steps`.
+- Applied via `hrm_runtime_control` before each training step.
+- Feedback loop: `train_step_report -> controller.observe_train_step() -> updated budgets/truth values`.
+
+### NARS-HDIM Domain Reasoning
+- `NarsHdimReasoner` maintains `domain_concepts` and `transfer_beliefs`.
+- Recommends optimal source/target domain pairs for HDIM transfer.
+- `transfer_domain_reasoned_or_fallback` resolves missing hints via NARS inference.
+- Feedback loop: `transfer outcome -> observe_transfer_feedback -> updated transfer_beliefs`.
+
+### NARS-MSA Memory Routing
+- `NarsMsaReasoner` maintains slot beliefs with truth/confidence.
+- Blends dot-product routing scores with NARS truth and recency weights (default 0.6/0.3/0.1).
+- `route_top_k_with_nars` replaces standard routing when reasoner is present.
+- Feedback loop: `retrieval outcome -> observe_route_feedback -> revised slot truth values`.
+
 ---
 
 ## 8. HDIM Transfer State
@@ -452,6 +480,9 @@ flowchart TD
     M4["M4: MSA Sparse Memory<br/>Routing, Top-k, RoPE, K/V Cache"]
     M5["M5: Composite Loss & Training<br/>L_CE + L_aux + L_iso, MagicNorm"]
     M6["M6: CUDA-Oxide Kernels<br/>Geometric product, rotor sandwich, sparse attn"]
+    NHRM["NARS-HRM<br/>control adapter"]
+    NHDIM["NARS-HDIM<br/>reasoning adapter"]
+    NMSA["NARS-MSA<br/>routing adapter"]
 
     M0 --> M1
     M0 --> M2
@@ -462,11 +493,15 @@ flowchart TD
     M4 --> M5
     M1 --> M6
     M4 --> M6
+    M2 --> NHRM
+    M3 --> NHDIM
+    M4 --> NMSA
 
 ```
 
 **Critical path (training)**: M0 -> M1 -> M3 -> M5
 **Secondary path (inference scaling)**: M0 -> M2 -> M4 -> M6
+**NARS adapters**: NARS-HRM, NARS-HDIM, and NARS-MSA enhance M2/M3/M4 but do not block the critical training path.
 
 ---
 
@@ -512,6 +547,14 @@ flowchart LR
     RL --> T7
     RM --> T8
 ```
+
+**Lean4 ↔ Rust ↔ Test traceability**
+
+| Lean theorem / contract | Rust module / function | Test / golden fixture |
+|---|---|---|
+| `nars_hrm_control_preserves_shape` | `nars-hrm::controller::begin_step` | `nars-hrm/tests/controller_readiness.rs` |
+| `nars_hdim_transfer_reasoned_safe` | `nars-hdim::registry_ext::transfer_domain_reasoned_or_fallback` | `nars-hdim/tests/reasoned_transfer.rs` |
+| `nars_msa_route_truth_bounded` | `nars-msa::reasoner::route_top_k_with_nars` | `nars-msa/tests/reasoner_behavior.rs` |
 
 ---
 
