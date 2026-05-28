@@ -13,14 +13,23 @@ prototype/
 │   ├── transformer.py   # RMSNorm, RoPE, GQA, SwiGLU, TransformerBlock
 │   ├── gdr.py           # Grade-Decomposed Recurrence (the novel mechanism)
 │   └── hagi.py          # Full model — all 4 ablation variants via flags
-├── data/                # Data pipeline (TODO Stage 0)
+├── data/
+│   ├── tokenizer.py     # SmolLM2 (49K) wrapper
+│   ├── tokenize.py      # datatrove -> .bin shards (FineWeb-Edu/code/math)
+│   ├── dataset.py       # memmap get_batch (nanoGPT-style)
+│   └── toy.py           # in-memory toy corpus for overfit test
 ├── training/
 │   ├── config.py        # YAML -> typed config
-│   └── train.py         # Training driver
+│   ├── optim.py         # AdamW + Muon hybrid optimizer
+│   ├── loop.py          # core training loop (bf16, accum, cosine LR, ckpt, eval)
+│   └── train.py         # CLI driver
 ├── evaluation/
-│   └── evaluate.py      # Benchmark harness + intelligence-density metrics
-└── tests/               # Clifford + model smoke tests
+│   ├── lm_eval_wrapper.py  # HAGI adapter for lm-eval-harness
+│   └── evaluate.py         # benchmark CLI + intelligence-density metrics
+└── tests/               # Clifford + model + overfit tests
 ```
+
+See [../docs/TRAINING.md](../docs/TRAINING.md) for the full training workflow.
 
 ## Ablation Models
 
@@ -54,9 +63,18 @@ python -m prototype.training.train --config configs/gdr.yaml
 - [x] Transformer blocks (GQA, SwiGLU, RoPE, RMSNorm)
 - [x] Grade-Decomposed Recurrence module
 - [x] Full model — all 4 variants instantiate, forward + backward verified
-- [ ] Data pipeline (tokenizer, sharding, PrefixLM packing)
-- [ ] Training loop (skeleton exists, needs data)
-- [ ] Benchmark runners (metric helpers exist, need lm-eval integration)
+- [x] Optimizer — AdamW + Muon hybrid (orthogonalized updates)
+- [x] Training loop — nanoGPT-adapted, overfit test passes (AdamW + Muon)
+- [x] Data loader — memmap shards + toy corpus
+- [x] lm-eval-harness adapter — loglikelihood + generate_until
+- [ ] Run datatrove tokenization on FineWeb-Edu (needs data download)
+- [ ] Stage 0 baseline training run
+
+## Optimizer Note
+
+Baselines use AdamW (clean control). Muon (orthogonalized updates, powers the
+nanoGPT speedrun) is a separate ablation — set `optimizer: muon` in the config.
+Do not change optimizer and architecture in the same comparison.
 
 ## Tests Mirror Lean4
 

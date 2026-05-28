@@ -7,6 +7,18 @@ versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Training stack** (SmolLM-aligned, composed not hand-rolled):
+  - `prototype/training/optim.py` — AdamW + **Muon** hybrid (orthogonalized updates via Newton-Schulz; Muon for core matrices, AdamW for embeddings/norms/gates).
+  - `prototype/training/loop.py` — nanoGPT-adapted loop: bf16/fp16 AMP, grad accumulation, cosine+warmup LR, grad clip, checkpointing, eval interval, data-source-agnostic `get_batch`.
+  - `prototype/data/` — SmolLM2 tokenizer wrapper, datatrove tokenization script (FineWeb-Edu→.bin shards), memmap dataset loader, toy corpus.
+  - `prototype/evaluation/lm_eval_wrapper.py` — HAGI adapter for EleutherAI lm-eval-harness (`loglikelihood`, `generate_until`).
+  - `prototype/tests/test_overfit.py` — overfit sanity test (loop correctness for AdamW + Muon). 16 tests pass total.
+  - `configs/overfit.yaml`; `docs/TRAINING.md` (workflow + the stack).
+- `HAGI.forward(targets=...)` now optionally returns cross-entropy loss (nanoGPT-compatible).
+
+### Changed
+- Tokenizer set to **SmolLM2 (~49K vocab)** across configs (was inconsistent Llama-3.2/32K). Right vocab size for 100M scale — embedding ~33% of params, not ~50%.
+- `requirements.txt` adds `datatrove` and `lm-eval`.
 - Complete repository revamp around **Grade-Decomposed Recurrence (GDR)** architecture.
 - `docs/ARCHITECTURE.md` — full GDR specification (Perception → Reasoning → Expression).
 - `docs/RESEARCH.md` — literature review with evidence classification (proven / promising / weak / marketing / none).

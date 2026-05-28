@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .gdr import GradeConfig, GradeDecomposedRecurrence
@@ -69,7 +70,17 @@ class HAGI(nn.Module):
             self._rope[key] = build_rope_cache(T, head_dim, self.cfg.transformer.rope_theta, device, dtype)
         return self._rope[key]
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        targets: torch.Tensor | None = None,
+        ignore_index: int = -100,
+    ):
+        """Returns logits, or (logits, loss) when targets are provided.
+
+        nanoGPT-compatible. Targets are next-token labels aligned to input_ids
+        (caller does the shift, or passes -100 for masked positions).
+        """
         B, T = input_ids.shape
         h = self.embed(input_ids)
         cos, sin = self._rope_cache(T, h.device, h.dtype)
@@ -89,7 +100,17 @@ class HAGI(nn.Module):
             h = block(h, cos, sin)
 
         h = self.final_norm(h)
-        return self.lm_head(h)
+        logits = self.lm_head(h)
+
+        if targets is None:
+            return logits
+
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)).float(),
+            targets.reshape(-1),
+            ignore_index=ignore_index,
+        )
+        return logits, loss
 
     def num_parameters(self, unique: bool = True) -> int:
         # Reasoning core params count once (shared) regardless of loop_count.
