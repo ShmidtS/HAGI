@@ -1,6 +1,6 @@
 use core_types::shape::Shape;
 use msa_adapter::{MemorySlot, RoutingQueryView, SlotRegistry};
-use nars_core::{Term, TruthValue};
+use nars_core::{BudgetValue, Concept, Sentence, Task, Term, TruthValue};
 use nars_msa::{
     compute_reward_from_retrieval_outcome, route_top_k_with_nars, NarsMsaReasoner, NarsRoutePolicy,
     ScoreBlend,
@@ -25,13 +25,27 @@ fn make_registry() -> SlotRegistry {
     registry
 }
 
+fn slot_feedback_term(slot_id: u16) -> Term {
+    Term::atom(format!("slot_{slot_id}_route_feedback"))
+}
+
+fn concept_with_truth(slot_id: u16, truth: TruthValue) -> Concept {
+    let term = slot_feedback_term(slot_id);
+    let mut concept = Concept::with_capacity(term.clone(), 1, 0, 0);
+    concept.accept(Task::new(
+        Sentence::judgment(term, truth, 0),
+        BudgetValue::new(1.0, truth.confidence(), truth.confidence()),
+    ));
+    concept
+}
+
 #[test]
 fn default_policy_weights_are_blended_and_change_dot_ranking() {
     let registry = make_registry();
     let mut reasoner = NarsMsaReasoner::default();
     reasoner
         .slot_concepts
-        .insert(1, vec![(Term::atom("slot_1"), TruthValue::new(1.0, 1.0))]);
+        .insert(1, concept_with_truth(1, TruthValue::new(1.0, 1.0)));
 
     let selection = route_top_k_with_nars(
         &registry,
@@ -89,15 +103,24 @@ fn blended_negative_scores_normalize_to_probability_weights() {
 }
 
 #[test]
-fn repeated_positive_feedback_increases_frequency() {
+fn repeated_positive_feedback_revises_core_belief_task() {
     let mut reasoner = NarsMsaReasoner::default();
     reasoner.observe_route_feedback(3, 0.5, 1);
-    let first = reasoner.slot_concepts.get(&3).unwrap()[0].1.frequency();
+    let first = *reasoner
+        .slot_concepts
+        .get(&3)
+        .unwrap()
+        .latest_belief_truth()
+        .unwrap();
 
     reasoner.observe_route_feedback(3, 1.0, 2);
-    let second = reasoner.slot_concepts.get(&3).unwrap()[0].1.frequency();
+    let concept = reasoner.slot_concepts.get(&3).unwrap();
+    let second = *concept.latest_belief_truth().unwrap();
 
-    assert!(second > first);
+    assert_eq!(concept.beliefs().len(), 1);
+    assert_eq!(concept.beliefs().capacity_limit(), Some(1));
+    assert_eq!(second, first.revision(TruthValue::new(1.0, 0.9)));
+    assert!(second.frequency() > first.frequency());
 }
 
 #[test]
@@ -121,11 +144,11 @@ fn query_quality_increases_with_strong_beliefs() {
     };
     let mut weak = NarsMsaReasoner::default();
     weak.slot_concepts
-        .insert(0, vec![(Term::atom("slot_0"), TruthValue::new(0.2, 0.2))]);
+        .insert(0, concept_with_truth(0, TruthValue::new(0.2, 0.2)));
     let mut strong = NarsMsaReasoner::default();
     strong
         .slot_concepts
-        .insert(0, vec![(Term::atom("slot_0"), TruthValue::new(1.0, 1.0))]);
+        .insert(0, concept_with_truth(0, TruthValue::new(1.0, 1.0)));
 
     assert!(
         strong.score_query_quality(&query, &policy) > weak.score_query_quality(&query, &policy)

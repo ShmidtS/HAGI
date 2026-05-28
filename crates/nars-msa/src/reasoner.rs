@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use msa_adapter::{route_top_k, MsaError, RouteSelection, RoutingQueryView, SlotRegistry};
-use nars_core::{Term, TruthValue};
+use nars_core::{BudgetValue, Concept, Sentence, Task, Term, TruthValue};
 
 use crate::policy::{NarsRoutePolicy, ScoreBlend};
 
@@ -21,7 +21,7 @@ impl Default for NarsMsaConfig {
 
 #[derive(Debug, Clone)]
 pub struct NarsMsaReasoner {
-    pub slot_concepts: HashMap<u16, Vec<(Term, TruthValue)>>,
+    pub slot_concepts: HashMap<u16, Concept>,
     pub config: NarsMsaConfig,
 }
 
@@ -40,22 +40,28 @@ impl NarsMsaReasoner {
         }
     }
 
-    pub fn observe_route_feedback(&mut self, slot_id: u16, reward: f32, _step: usize) {
+    pub fn observe_route_feedback(&mut self, slot_id: u16, reward: f32, step: usize) {
         let clamped_reward = reward.clamp(-1.0, 1.0);
-        let reward_truth = TruthValue::new(
+        let observed_truth = TruthValue::new(
             ((clamped_reward + 1.0) * 0.5) as f64,
             self.config.default_feedback_confidence,
         );
-        let concepts = self.slot_concepts.entry(slot_id).or_insert_with(|| {
-            vec![(
-                Term::atom(format!("slot_{slot_id}_route_feedback")),
-                TruthValue::new(0.5, 0.0),
-            )]
-        });
-
-        if let Some((_, truth)) = concepts.first_mut() {
-            *truth = revise_truth(*truth, reward_truth);
-        }
+        let concept = self
+            .slot_concepts
+            .entry(slot_id)
+            .or_insert_with(|| Concept::with_capacity(slot_feedback_term(slot_id), 1, 0, 0));
+        let existing_truth = concept
+            .latest_belief_truth()
+            .copied()
+            .unwrap_or_else(|| TruthValue::new(0.5, 0.0));
+        let revised_truth = existing_truth.revision(observed_truth);
+        let budget = BudgetValue::new(
+            clamped_reward.abs() as f64,
+            self.config.default_feedback_confidence,
+            revised_truth.confidence(),
+        );
+        let sentence = Sentence::judgment(slot_feedback_term(slot_id), revised_truth, step as u64);
+        concept.accept(Task::new(sentence, budget));
     }
 
     pub fn score_query_quality(
@@ -69,10 +75,15 @@ impl NarsMsaReasoner {
 
         self.slot_concepts
             .iter()
-            .filter_map(|(slot_id, concepts)| {
+            .filter_map(|(slot_id, concept)| {
                 let dot_score = query.data.get(*slot_id as usize).copied()?;
-                let truth = concepts.first().map(|(_, truth)| truth);
-                Some(score_slot(dot_score, truth, 0, 0, policy.blend()))
+                Some(score_slot(
+                    dot_score,
+                    concept.latest_belief_truth(),
+                    0,
+                    0,
+                    policy.blend(),
+                ))
             })
             .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
             .unwrap_or(0.0)
@@ -81,8 +92,12 @@ impl NarsMsaReasoner {
     fn slot_truth(&self, slot_id: u16) -> Option<&TruthValue> {
         self.slot_concepts
             .get(&slot_id)
-            .and_then(|concepts| concepts.first().map(|(_, truth)| truth))
+            .and_then(Concept::latest_belief_truth)
     }
+}
+
+fn slot_feedback_term(slot_id: u16) -> Term {
+    Term::atom(format!("slot_{slot_id}_route_feedback"))
 }
 
 impl Default for NarsMsaReasoner {
@@ -105,21 +120,6 @@ pub fn compute_reward_from_retrieval_outcome(retrieved_count: usize, total_selec
         return 0.2;
     }
     -0.3
-}
-
-fn revise_truth(existing: TruthValue, observed: TruthValue) -> TruthValue {
-    let existing_confidence = existing.confidence();
-    let observed_confidence = observed.confidence();
-    let total_confidence = existing_confidence + observed_confidence;
-    if total_confidence == 0.0 {
-        return TruthValue::new(0.5, 0.0);
-    }
-
-    TruthValue::new(
-        (existing.frequency() * existing_confidence + observed.frequency() * observed_confidence)
-            / total_confidence,
-        (total_confidence / (1.0 + total_confidence)).clamp(0.0, 1.0),
-    )
 }
 
 pub fn score_slot(
@@ -323,6 +323,16 @@ mod tests {
         registry
     }
 
+    fn concept_with_truth(slot_id: u16, truth: TruthValue) -> Concept {
+        let term = slot_feedback_term(slot_id);
+        let mut concept = Concept::with_capacity(term.clone(), 1, 0, 0);
+        concept.accept(Task::new(
+            Sentence::judgment(term, truth, 0),
+            BudgetValue::new(1.0, truth.confidence(), truth.confidence()),
+        ));
+        concept
+    }
+
     #[test]
     fn score_slot_blends_dot_truth_and_recency() {
         let truth = TruthValue::new(0.8, 0.5);
@@ -341,7 +351,7 @@ mod tests {
         let mut reasoner = NarsMsaReasoner::default();
         reasoner
             .slot_concepts
-            .insert(2, vec![(Term::atom("slot_2"), TruthValue::new(1.0, 1.0))]);
+            .insert(2, concept_with_truth(2, TruthValue::new(1.0, 1.0)));
         let policy = NarsRoutePolicy::FixedTopK {
             top_k: 1,
             blend: ScoreBlend {
@@ -370,7 +380,10 @@ mod tests {
     fn positive_feedback_increases_confidence() {
         let mut reasoner = NarsMsaReasoner::default();
         reasoner.observe_route_feedback(7, 1.0, 1);
-        let truth = &reasoner.slot_concepts.get(&7).unwrap()[0].1;
+        let concept = reasoner.slot_concepts.get(&7).unwrap();
+        let truth = concept.latest_belief_truth().unwrap();
+        assert_eq!(concept.beliefs().len(), 1);
+        assert_eq!(concept.beliefs().capacity_limit(), Some(1));
         assert!(truth.frequency() > 0.0);
         assert!(truth.confidence() > 0.0);
     }

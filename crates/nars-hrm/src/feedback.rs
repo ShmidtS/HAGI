@@ -1,4 +1,4 @@
-use nars_core::{Term, TruthValue};
+use nars_core::{BudgetValue, Sentence, Task, Term, TruthValue};
 
 pub trait HrmTrainStepFeedback {
     fn total_loss(&self) -> f32;
@@ -19,7 +19,7 @@ pub struct HrmExecutionObservation {
     pub bp_steps: usize,
 }
 
-pub fn train_step_judgments(report: &impl HrmTrainStepFeedback) -> Vec<(Term, TruthValue)> {
+pub fn train_step_tasks(report: &impl HrmTrainStepFeedback, default_durability: f64) -> Vec<Task> {
     let prediction_error = report.total_loss();
     let mut judgments = vec![
         (
@@ -44,11 +44,19 @@ pub fn train_step_judgments(report: &impl HrmTrainStepFeedback) -> Vec<(Term, Tr
     }
 
     judgments
+        .into_iter()
+        .map(|(term, truth)| judgment_task(term, truth, prediction_error, default_durability))
+        .collect()
 }
 
-pub fn execution_observation_judgments(
+pub fn train_step_judgments(report: &impl HrmTrainStepFeedback) -> Vec<(Term, TruthValue)> {
+    task_judgments(train_step_tasks(report, 0.7))
+}
+
+pub fn execution_observation_tasks(
     observation: &HrmExecutionObservation,
-) -> Vec<(Term, TruthValue)> {
+    default_durability: f64,
+) -> Vec<Task> {
     vec![
         (
             stable_state_term(),
@@ -59,6 +67,15 @@ pub fn execution_observation_judgments(
             TruthValue::new(efficiency_frequency(observation), 0.75),
         ),
     ]
+    .into_iter()
+    .map(|(term, truth)| judgment_task(term, truth, observation.efficiency, default_durability))
+    .collect()
+}
+
+pub fn execution_observation_judgments(
+    observation: &HrmExecutionObservation,
+) -> Vec<(Term, TruthValue)> {
+    task_judgments(execution_observation_tasks(observation, 0.7))
 }
 
 pub fn loss_to_frequency(loss: f32) -> f64 {
@@ -71,6 +88,39 @@ pub fn grad_norm_to_frequency(grad_norm: f32) -> f64 {
 
 pub fn eval_loss_to_frequency(eval_loss: f32) -> f64 {
     bounded_inverse(eval_loss, 1.0)
+}
+
+pub fn task_judgments(tasks: Vec<Task>) -> Vec<(Term, TruthValue)> {
+    tasks
+        .into_iter()
+        .filter_map(|task| match task.sentence() {
+            Sentence::Judgment { term, truth, .. } => Some((term.clone(), *truth)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn judgment_task(term: Term, truth: TruthValue, reward: f32, default_durability: f64) -> Task {
+    let sentence = Sentence::Judgment {
+        term,
+        truth,
+        stamp: 0,
+    };
+    Task::new(
+        sentence,
+        BudgetValue::new(
+            reward_confidence(reward),
+            default_durability,
+            truth.confidence(),
+        ),
+    )
+}
+
+fn reward_confidence(reward: f32) -> f64 {
+    if !reward.is_finite() {
+        return 0.0;
+    }
+    (reward.abs() / (1.0 + reward.abs())).clamp(0.0, 1.0) as f64
 }
 
 pub fn low_prediction_error_term() -> Term {

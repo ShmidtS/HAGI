@@ -3,14 +3,24 @@ use rand::Rng;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bag<T> {
     entries: Vec<(T, f64)>,
+    capacity_limit: usize,
 }
 
 impl<T> Bag<T> {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            capacity_limit: usize::MAX,
         }
     }
+
+    pub fn with_capacity_limit(capacity: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            capacity_limit: capacity,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -18,9 +28,18 @@ impl<T> Bag<T> {
         self.entries.is_empty()
     }
 
+    pub fn capacity_limit(&self) -> Option<usize> {
+        (self.capacity_limit != usize::MAX).then_some(self.capacity_limit)
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.len() >= self.capacity_limit
+    }
+
     pub fn put(&mut self, item: T, priority: f64) {
-        self.entries.push((item, priority.max(0.0)));
+        self.entries.push((item, priority.clamp(0.0, 1.0)));
         self.sort_by_priority();
+        self.entries.truncate(self.capacity_limit);
     }
 
     pub fn take(&mut self) -> Option<T> {
@@ -100,6 +119,30 @@ mod tests {
     }
 
     #[test]
+    fn with_capacity_limit_drops_lowest_priority_overflow() {
+        let mut bag = Bag::with_capacity_limit(2);
+        bag.put("low", 0.1);
+        bag.put("high", 1.5);
+        bag.put("mid", 0.5);
+        assert_eq!(bag.capacity_limit(), Some(2));
+        assert!(bag.is_full());
+        assert_eq!(bag.len(), 2);
+        assert_eq!(bag.take(), Some("high"));
+        assert_eq!(bag.take(), Some("mid"));
+    }
+
+    #[test]
+    fn equal_priority_overflow_evicts_newest_tail_first() {
+        let mut bag = Bag::with_capacity_limit(2);
+        bag.put("first", 0.5);
+        bag.put("second", 0.5);
+        bag.put("third", 0.5);
+        assert_eq!(bag.len(), 2);
+        assert_eq!(bag.take(), Some("first"));
+        assert_eq!(bag.take(), Some("second"));
+    }
+
+    #[test]
     fn take_returns_none_when_bag_is_empty() {
         let mut bag: Bag<i32> = Bag::new();
         assert_eq!(bag.take(), None);
@@ -123,8 +166,8 @@ mod tests {
         let trials = 10_000;
         for _ in 0..trials {
             let mut bag = Bag::new();
-            bag.put("low", 1.0);
-            bag.put("high", 3.0);
+            bag.put("low", 0.25);
+            bag.put("high", 0.75);
             if bag.take_with_rng(&mut rng) == Some("high") {
                 high_count += 1;
             }

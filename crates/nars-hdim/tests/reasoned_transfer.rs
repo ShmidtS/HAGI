@@ -1,7 +1,7 @@
 use clifford_core::{Multivector, Rotor};
 use core_types::{algebra::Cl, ids::DomainId, shape::Shape};
 use hdim_model::{MultivectorBatch, TransferRegistry};
-use nars_core::{Term, TruthValue};
+use nars_core::{Sentence, Term, TruthValue};
 use nars_hdim::{transfer_domain_reasoned_or_fallback, NarsHdimConfig, NarsHdimReasoner};
 use tensor_runtime::Tensor;
 
@@ -128,4 +128,79 @@ fn update_domain_concept_affects_target_ranking() {
 
     assert_eq!(recommendation.source, source);
     assert_eq!(recommendation.target, target_a);
+}
+
+#[test]
+fn transfer_feedback_creates_concept_tasks_for_both_domains() {
+    let source = DomainId(0);
+    let target = DomainId(1);
+    let mut reasoner = NarsHdimReasoner::default();
+
+    reasoner.observe_transfer_feedback(source, target, true);
+
+    let source_concept = reasoner
+        .domain_concepts
+        .get(&source)
+        .expect("source feedback should create a source concept");
+    let target_concept = reasoner
+        .domain_concepts
+        .get(&target)
+        .expect("target feedback should create a target concept");
+    let source_task = source_concept
+        .beliefs()
+        .iter()
+        .next()
+        .expect("source concept should receive transfer task");
+    let target_task = target_concept
+        .beliefs()
+        .iter()
+        .next()
+        .expect("target concept should receive transfer task");
+
+    assert_eq!(source_task.sentence(), target_task.sentence());
+    assert!(
+        matches!(source_task.sentence(), Sentence::Judgment { term, .. } if matches!(term, Term::Compound(operator, terms) if operator == "transfer" && terms.len() == 2))
+    );
+}
+
+#[test]
+fn transfer_feedback_respects_concept_bag_capacity() {
+    let mut reasoner = NarsHdimReasoner::default();
+    let source = DomainId(0);
+
+    for target in 1..20 {
+        reasoner.observe_transfer_feedback(source, DomainId(target), target % 2 == 0);
+    }
+
+    let source_concept = reasoner
+        .domain_concepts
+        .get(&source)
+        .expect("feedback should create bounded source concept");
+    assert_eq!(source_concept.beliefs().capacity_limit(), Some(16));
+    assert_eq!(source_concept.beliefs().len(), 16);
+}
+
+#[test]
+fn repeated_transfer_feedback_uses_revision_and_syncs_cache() {
+    let source = DomainId(0);
+    let target = DomainId(1);
+    let mut reasoner = NarsHdimReasoner::default();
+
+    reasoner.observe_transfer_feedback(source, target, true);
+    reasoner.observe_transfer_feedback(source, target, false);
+
+    let cached = reasoner
+        .transfer_beliefs
+        .get(&(source, target))
+        .copied()
+        .expect("transfer cache should stay populated");
+    let concept_truth = reasoner
+        .domain_concepts
+        .get(&source)
+        .and_then(|concept| concept.latest_belief_truth())
+        .copied()
+        .expect("source concept should keep latest revised belief");
+
+    assert_eq!(cached, concept_truth);
+    assert!((cached.frequency() - 0.5).abs() < 1e-12);
 }

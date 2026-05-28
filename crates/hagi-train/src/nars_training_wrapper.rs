@@ -222,7 +222,7 @@ mod tests {
             .controller
             .concept_store
             .values()
-            .any(|items| items.len() > 1));
+            .any(|concept| concept.beliefs().len() > 0));
         assert_eq!(loop_.last_policy, Some(second.policy));
         assert!(
             first.policy != second.policy

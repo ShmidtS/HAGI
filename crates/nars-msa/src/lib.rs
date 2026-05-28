@@ -11,7 +11,7 @@ pub use reasoner::{
 mod tests {
     use core_types::shape::Shape;
     use msa_adapter::{route_top_k, MemorySlot, RoutingQueryView, SlotRegistry};
-    use nars_core::{Term, TruthValue};
+    use nars_core::{BudgetValue, Concept, Sentence, Task, Term, TruthValue};
     use tensor_runtime::Tensor;
 
     use super::*;
@@ -35,13 +35,27 @@ mod tests {
         registry
     }
 
+    fn slot_feedback_term(slot_id: u16) -> Term {
+        Term::atom(format!("slot_{slot_id}_route_feedback"))
+    }
+
+    fn concept_with_truth(slot_id: u16, truth: TruthValue) -> Concept {
+        let term = slot_feedback_term(slot_id);
+        let mut concept = Concept::with_capacity(term.clone(), 1, 0, 0);
+        concept.accept(Task::new(
+            Sentence::judgment(term, truth, 0),
+            BudgetValue::new(1.0, truth.confidence(), truth.confidence()),
+        ));
+        concept
+    }
+
     #[test]
     fn route_with_zero_truth_weight_falls_back_to_dot_scores() {
         let registry = make_registry();
         let mut reasoner = NarsMsaReasoner::default();
         reasoner
             .slot_concepts
-            .insert(0, vec![(Term::atom("slot_0"), TruthValue::new(1.0, 1.0))]);
+            .insert(0, concept_with_truth(0, TruthValue::new(1.0, 1.0)));
         let policy = NarsRoutePolicy::FixedTopK {
             top_k: 2,
             blend: ScoreBlend {
@@ -114,7 +128,9 @@ mod tests {
         let mut reasoner = NarsMsaReasoner::default();
         reasoner.observe_route_feedback(3, 1.0, 7);
 
-        let truth = reasoner.slot_concepts.get(&3).unwrap()[0].1;
+        let concept = reasoner.slot_concepts.get(&3).unwrap();
+        let truth = concept.latest_belief_truth().unwrap();
+        assert_eq!(concept.beliefs().len(), 1);
         assert!(truth.frequency() > 0.0);
         assert!(truth.confidence() > 0.0);
     }
