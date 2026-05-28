@@ -7,3 +7,4 @@ license = "Apache-2.0"
 [dependencies]
 core-types = { workspace = true }
 thiserror = { workspace = true }
+smallvec = { workspace = true }

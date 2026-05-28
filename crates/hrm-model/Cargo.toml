@@ -8,4 +8,10 @@ license = "Apache-2.0"
 core-types = { workspace = true }
 tensor-runtime = { workspace = true }
 config = { workspace = true }
+data = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+core-types = { workspace = true }
+tensor-runtime = { workspace = true }
+config = { workspace = true }
