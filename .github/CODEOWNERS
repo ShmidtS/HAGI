@@ -1,0 +1,49 @@
+# CODEOWNERS for HAGI
+#
+# These owners are automatically requested for review when someone opens a PR
+# touching the matching files. Owners listed later take precedence.
+#
+# Syntax: <pattern> <owner1> <owner2> ...
+# Owners must be GitHub usernames (@user) or teams (@org/team).
+#
+# TODO: Replace placeholders below with actual collaborator GitHub usernames.
+#       To grant repo access: Settings → Collaborators and teams → Add people.
+
+# ----------------------------------------------------------------------------
+# Default owners for everything in the repo
+# ----------------------------------------------------------------------------
+*                           @ShmidtS
+
+# ----------------------------------------------------------------------------
+# PyTorch prototype (primary development)
+# ----------------------------------------------------------------------------
+/prototype/                 @ShmidtS
+# /prototype/model/         @TODO-ml-lead
+# /prototype/training/      @TODO-training-lead
+# /prototype/evaluation/    @TODO-eval-lead
+
+# ----------------------------------------------------------------------------
+# Rust implementation
+# ----------------------------------------------------------------------------
+/crates/                    @ShmidtS
+# /crates/clifford-core/    @TODO-rust-lead
+# /crates/cuda-kernels/     @TODO-cuda-lead
+
+# ----------------------------------------------------------------------------
+# Formal verification
+# ----------------------------------------------------------------------------
+/formalization/             @ShmidtS
+# /formalization/           @TODO-lean-lead
+
+# ----------------------------------------------------------------------------
+# Documentation
+# ----------------------------------------------------------------------------
+/docs/                      @ShmidtS
+*.md                        @ShmidtS
+
+# ----------------------------------------------------------------------------
+# CI / infrastructure / project config
+# ----------------------------------------------------------------------------
+/.github/                   @ShmidtS
+/Cargo.toml                 @ShmidtS
+/requirements.txt           @ShmidtS
