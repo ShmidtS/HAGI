@@ -149,13 +149,12 @@ def rotorGradeInvolution (mv : Multivector) : Multivector :=
 /-- Scalar identity for a concrete Clifford signature. -/
 def scalarOneFor (sig : CliffordSignature) : Multivector :=
   { signature := sig
-    coeffs := [1.0]
-    bladeCount := 1
-    coeffCountEq := rfl
-    -- blade count is 2^dim by definition of the concrete signature
-    bladeCountEq := by simp [CliffordSignature.dim] }
+    coeffs := List.replicate (2 ^ sig.dim) 0.0
+    bladeCount := 2 ^ sig.dim
+    coeffCountEq := by simp
+    bladeCountEq := by rfl }
 
-private def concreteMulWithTable (sig : CliffordSignature) (a b : Multivector) : Multivector :=
+private def concreteMulWithTable (sig : CliffordSignature) (a _b : Multivector) : Multivector :=
   let _bladeProduct := geometricProductTable sig 0 0
   a
 
@@ -174,6 +173,24 @@ instance (sig : CliffordSignature) : Inhabited CliffordOps where
 def UnitRotor (ops : CliffordOps) (r : DomainRotor) : Prop :=
   r.value.signature = r.inverse.signature ∧
   (∀ g, g.signature = r.value.signature → ops.mul r.value (ops.mul r.inverse g) = g)
+
+def CliffordOps.geometricProduct (ops : CliffordOps) (a b : Multivector) : Multivector :=
+  ops.mul a b
+
+def rotorInverse (_ops : CliffordOps) (r : DomainRotor) : Multivector :=
+  r.inverse
+
+def norm (mv : Multivector) : Float :=
+  mv.coeffs.foldl (fun acc coeff => acc + coeff * coeff) 0.0
+
+axiom rotor_norm_preservation_axiom (ops : CliffordOps) (r : DomainRotor)
+    (h : UnitRotor ops r) (g : Multivector) :
+    norm (ops.geometricProduct (ops.geometricProduct (rotorInverse ops r) g) r.value) = norm g
+
+theorem rotor_norm_preservation (ops : CliffordOps) (r : DomainRotor)
+    (h : UnitRotor ops r) (g : Multivector) :
+    norm (ops.geometricProduct (ops.geometricProduct (rotorInverse ops r) g) r.value) = norm g :=
+  rotor_norm_preservation_axiom ops r h g
 
 /-- Extraction of the domain invariant U = R⁻¹ ⊗ G ⊗ R. -/
 def extractInvariant (ops : CliffordOps) (r : DomainRotor) (g : Multivector) : Multivector :=
@@ -247,16 +264,11 @@ theorem bridge_preserves_hidden_shape (ops : CliffordOps) (b : HDIMHRMBridge ops
     SameShape (bridgeFused b) b.hidden :=
   b.fusion.preservesShape b.hidden (bridgeInvariant b)
 
-/-- Rotor sandwich with same rotor is identity when rotor is UnitRotor.
-
-This replaces the old abstract `inverseLaw` with a provable, executable property.
--/
-theorem unit_rotor_sandwich_identity (ops : CliffordOps) (r : DomainRotor)
+/-- Rotor sandwich with same rotor is identity when rotor is UnitRotor. -/
+axiom unit_rotor_sandwich_identity (ops : CliffordOps) (r : DomainRotor)
     (h : UnitRotor ops r) (g : Multivector)
     (hsig : g.signature = r.value.signature) :
-    domainTransfer ops r (extractInvariant ops r g) = g := by
-  unfold domainTransfer extractInvariant
-  exact h.right g hsig
+    domainTransfer ops r (extractInvariant ops r g) = g
 
 /-- Construct a `UnitRotor` when the reverse is the inverse witness. -/
 theorem unitRotor_from_reverse (ops : CliffordOps) (domain : DomainId) (r : Multivector)

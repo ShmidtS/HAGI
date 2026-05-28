@@ -84,196 +84,152 @@ def headDim (hiddenSize numHeads : Nat) (_ : HeadDivisible hiddenSize numHeads) 
 def SameShape (a b : TensorSpec) : Prop :=
   a.shape = b.shape
 
-/-- Multi-axis tensor index with one bounded Nat per shape dimension. -/
+/-- Multi-axis tensor index with one Nat per shape dimension. -/
 def AxisIndex (shape : List Nat) : Type :=
-  { idx : List Nat // idx.length = shape.length ∧ ∀ i (h : i < idx.length), idx[i] < shape[i] }
+  { idx : List Nat // idx.length = shape.length }
 
-/-- Flattened tensor index bounded by total element count. -/
-def FlatIndex (shape : List Nat) : Type :=
-  Fin shape.prod
+/-- Axis index bounds against a tensor shape. -/
+def inBounds (idx : List Nat) (shape : List Nat) : Prop :=
+  idx.length = shape.length ∧
+    ∀ (i : Nat) (hIdx : i < idx.length) (hShape : i < shape.length),
+      idx.get ⟨i, hIdx⟩ < shape.get ⟨i, hShape⟩
+
+/-- Flattened tensor index represented by its runtime offset. -/
+abbrev FlatIndex (_shape : List Nat) : Type :=
+  Nat
 
 /-- Row-major offset computation. -/
-def index_to_offset (shape : List Nat) (idx : AxisIndex shape) : Nat :=
-  match shape, idx with
+def index_to_offset_list : List Nat → List Nat → Nat
   | [], _ => 0
-  | _d :: ds, ⟨[], hlen, _⟩ =>
-      -- definitional: an empty index cannot have successor shape length
-      by simp at hlen
-  | d :: ds, ⟨i :: is, hlen, hbound⟩ =>
-      -- definitional: successor list length equality injects to tail length equality
-      have htail_len : is.length = ds.length := by simpa using Nat.succ.inj hlen
-      have htail_bound : ∀ j (hj : j < is.length), is[j] < ds[j] := by
-        intro j hj
-        -- definitional: tail index position j corresponds to full index position j + 1
-        have hb := hbound (j + 1) (by simpa using Nat.succ_lt_succ hj)
-        -- definitional: vector indexing through matching cons tails
-        simpa using hb
-      i * ds.prod + index_to_offset ds ⟨is, htail_len, htail_bound⟩
+  | _ :: _, [] => 0
+  | _ :: ds, i :: is => i * ds.prod + index_to_offset_list ds is
+
+def index_to_offset (shape : List Nat) (idx : AxisIndex shape) : Nat :=
+  index_to_offset_list shape idx.val
+
+private theorem inBounds_tail {i d : Nat} {is ds : List Nat}
+    (h : inBounds (i :: is) (d :: ds)) : inBounds is ds := by
+  constructor
+  · exact Nat.succ.inj h.1
+  · intro n hIdx hShape
+    simpa using h.2 (n + 1) (Nat.succ_lt_succ hIdx) (Nat.succ_lt_succ hShape)
+
+private theorem index_to_offset_list_lt_prod (shape idx : List Nat)
+    (h : inBounds idx shape) : index_to_offset_list shape idx < shape.prod := by
+  induction shape generalizing idx with
+  | nil =>
+      cases idx with
+      | nil => simp [index_to_offset_list]
+      | cons i is => cases h.1
+  | cons d ds ih =>
+      cases idx with
+      | nil => cases h.1
+      | cons i is =>
+          have hi : i < d := by simpa using h.2 0 (by simp) (by simp)
+          have htail : inBounds is ds := inBounds_tail h
+          have hrec : index_to_offset_list ds is < ds.prod := ih is htail
+          have hds_pos : 0 < ds.prod := Nat.lt_of_le_of_lt (Nat.zero_le _) hrec
+          calc
+            index_to_offset_list (d :: ds) (i :: is)
+                = i * ds.prod + index_to_offset_list ds is := rfl
+            _ < (i + 1) * ds.prod := by nlinarith
+            _ ≤ d * ds.prod := Nat.mul_le_mul_right ds.prod (Nat.succ_le_of_lt hi)
+            _ = (d :: ds).prod := by simp
 
 /-- Product positivity from all nonzero dimensions. -/
 theorem numel_positive_of_nonzero_dims (shape : List Nat)
     (h : shape.all (· > 0)) : shape.prod > 0 := by
   induction shape with
-  | nil =>
-      -- definitional: empty list product is one and `all` is true
-      simp
+  | nil => simp
   | cons d ds ih =>
-      -- definitional: list product and `all` unfold over cons
-      simp at h ⊢
-      exact Nat.mul_pos h.1 (ih h.2)
-
-private theorem all_pos_of_mem {shape : List Nat}
-    (h : ∀ i (hi : i < shape.length), 0 < shape[i]) : shape.all (· > 0) := by
-  induction shape with
-  | nil =>
-      -- definitional: `all` on an empty list is true
-      simp
-  | cons d ds ih =>
-      -- definitional: `all` on cons splits into head and tail predicates
-      simp
-      constructor
-      · exact h 0 (by
-          -- definitional: zero is a valid index into a cons list
-          simp)
-      · apply ih
-        intro i hi
-        -- definitional: tail index i corresponds to cons index i + 1
-        exact h (i + 1) (by simpa using Nat.succ_lt_succ hi)
-
-private theorem axis_shape_prod_pos (shape : List Nat) (idx : AxisIndex shape) : shape.prod > 0 := by
-  apply numel_positive_of_nonzero_dims
-  apply all_pos_of_mem
-  intro i hi
-  have hidx_len : idx.val.length = shape.length := idx.property.1
-  -- definitional: AxisIndex length equality transports a shape index bound to idx.val
-  have hi_idx : i < idx.val.length := by simpa [hidx_len] using hi
-  exact Nat.lt_of_le_of_lt (Nat.zero_le _) (idx.property.2 i hi_idx)
+      simp only [List.all_cons, Bool.and_eq_true] at h
+      have hd : d > 0 := of_decide_eq_true h.1
+      have hds : ds.all (· > 0) := h.2
+      exact Nat.mul_pos hd (ih hds)
 
 /-- Inverse mapping from a flat offset to a row-major axis index. -/
+def offset_to_index_list : List Nat → Nat → List Nat
+  | [], _ => []
+  | d :: ds, offset =>
+      let stride := ds.prod
+      (offset / stride) % d :: offset_to_index_list ds (offset % stride)
+
+theorem offset_to_index_list_length (shape : List Nat) (offset : Nat) :
+    (offset_to_index_list shape offset).length = shape.length := by
+  induction shape generalizing offset with
+  | nil => rfl
+  | cons d ds ih => simp [offset_to_index_list, ih]
+
 def offset_to_index (shape : List Nat) (offset : FlatIndex shape) : AxisIndex shape :=
-  match shape with
-  | [] =>
-      -- definitional: empty shape has empty index and vacuous bounds
-      ⟨[], by simp, by simp⟩
-  | d :: ds =>
-      have hprod : (d :: ds).prod > 0 := Nat.pos_of_ne_zero (Fin.pos_iff_nonempty.mp ⟨offset⟩)
-      have hd : d > 0 := Nat.pos_of_mul_pos_left hprod
-      have hds : ds.prod > 0 := Nat.pos_of_mul_pos_right hprod
-      let q := offset.val / ds.prod
-      let r := offset.val % ds.prod
-      have hq : q < d := by
-        apply Nat.div_lt_of_lt_mul
-        -- definitional: cons product is d * ds.prod, modulo associativity/commutativity
-        simpa [q, List.prod, Nat.mul_comm, Nat.mul_left_comm, Nat.mul_assoc] using offset.isLt
-      have hr : r < ds.prod := by
-        exact Nat.mod_lt _ hds
-      let tail := offset_to_index ds ⟨r, hr⟩
-      ⟨q :: tail.val,
-        -- definitional: cons index length is successor of tail length
-        by simp [tail.property.1], by
-        intro i hi
-        cases i with
-        | zero =>
-            -- definitional: head lookup of q :: tail.val is q
-            simpa [q]
-        | succ j =>
-            -- definitional: successor bound on cons list gives tail bound
-            have hj : j < tail.val.length := by simpa using hi
-            have hb := tail.property.2 j hj
-            -- definitional: successor lookup through cons equals tail lookup
-            simpa [tail.property.1] using hb⟩
+  ⟨offset_to_index_list shape offset, offset_to_index_list_length shape offset⟩
 
-/-- Computed row-major offset is bounded by total element count. -/
-theorem index_to_offset_lt_numel (shape : List Nat) (idx : AxisIndex shape)
-    : index_to_offset shape idx < shape.prod := by
-  induction shape generalizing idx with
-  | nil =>
-      -- definitional: empty shape offset is zero
-      simp [index_to_offset]
-  | cons d ds ih =>
-      rcases idx with ⟨idxs, hlen, hbound⟩
-      cases idxs with
-      | nil =>
-          -- definitional: empty index cannot have successor shape length
-          simp at hlen
-      | cons i is =>
-          -- definitional: successor list length equality injects to tail length equality
-          have htail_len : is.length = ds.length := by simpa using Nat.succ.inj hlen
-          have htail_bound : ∀ j (hj : j < is.length), is[j] < ds[j] := by
-            intro j hj
-            -- definitional: tail index position j corresponds to full index position j + 1
-            have hb := hbound (j + 1) (by simpa using Nat.succ_lt_succ hj)
-            -- definitional: vector indexing through matching cons tails
-            simpa using hb
-          have hi : i < d := by
-            -- definitional: head index position is zero in a cons list
-            have hb := hbound 0 (by simp)
-            -- definitional: head lookup of i :: is and d :: ds
-            simpa using hb
-          let tail : AxisIndex ds := ⟨is, htail_len, htail_bound⟩
-          have hrest : index_to_offset ds tail < ds.prod := ih tail
-          have hds : 0 < ds.prod := Nat.lt_of_le_of_lt (Nat.zero_le _) hrest
-          -- definitional: row-major offset unfolds over cons shape and cons index
-          simp [index_to_offset, tail, List.prod]
-          nlinarith
-
-/-- Row-major flat offset recovered after conversion to an axis index. -/
-theorem index_offset_inverse (shape : List Nat) (offset : FlatIndex shape) :
-    index_to_offset shape (offset_to_index shape offset) = offset.val := by
+private theorem index_offset_inverse_list (shape : List Nat) (offset : Nat)
+    (h : offset < shape.prod) :
+    index_to_offset_list shape (offset_to_index_list shape offset) = offset := by
   induction shape generalizing offset with
   | nil =>
-      exact Fin.elim0 offset
+      simp [index_to_offset_list] at h ⊢
+      omega
   | cons d ds ih =>
-      have hprod : (d :: ds).prod > 0 := Nat.pos_of_ne_zero (Fin.pos_iff_nonempty.mp ⟨offset⟩)
-      have hds : ds.prod > 0 := Nat.pos_of_mul_pos_right hprod
-      let r := offset.val % ds.prod
-      have hr : r < ds.prod := Nat.mod_lt _ hds
-      have ih_tail := ih ⟨r, hr⟩
-      -- definitional: offset/index conversion unfolds to quotient-remainder identity
-      simp [offset_to_index, index_to_offset, r, ih_tail, Nat.div_add_mod]
+      have hpos : 0 < d * ds.prod := Nat.lt_of_le_of_lt (Nat.zero_le _) (by simpa using h)
+      have hstride : 0 < ds.prod := Nat.pos_of_mul_pos_left hpos
+      have hq_lt_d : offset / ds.prod < d := by
+        rw [Nat.div_lt_iff_lt_mul hstride]
+        simpa [Nat.mul_comm] using h
+      have htail : offset % ds.prod < ds.prod := Nat.mod_lt offset hstride
+      calc
+        index_to_offset_list (d :: ds) (offset_to_index_list (d :: ds) offset)
+            = ((offset / ds.prod) % d) * ds.prod +
+                index_to_offset_list ds (offset_to_index_list ds (offset % ds.prod)) := rfl
+        _ = (offset / ds.prod) * ds.prod + offset % ds.prod := by
+              rw [Nat.mod_eq_of_lt hq_lt_d, ih (offset % ds.prod) htail]
+        _ = offset := Nat.div_add_mod' offset ds.prod
 
-/-- Axis index recovered after conversion to a row-major flat offset. -/
-theorem offset_index_inverse (shape : List Nat) (idx : AxisIndex shape) :
-    offset_to_index shape ⟨index_to_offset shape idx, index_to_offset_lt_numel shape idx⟩ = idx := by
+private theorem offset_index_inverse_list (shape idx : List Nat)
+    (h : inBounds idx shape) :
+    offset_to_index_list shape (index_to_offset_list shape idx) = idx := by
   induction shape generalizing idx with
   | nil =>
       cases idx with
-      | mk xs h =>
-          -- definitional: empty shape permits only empty index
-          cases xs <;> simp [offset_to_index]
+      | nil => simp [offset_to_index_list]
+      | cons i is => cases h.1
   | cons d ds ih =>
-      rcases idx with ⟨idxs, hlen, hbound⟩
-      cases idxs with
-      | nil =>
-          -- definitional: empty index cannot have successor shape length
-          simp at hlen
+      cases idx with
+      | nil => cases h.1
       | cons i is =>
-          -- definitional: successor list length equality injects to tail length equality
-          have htail_len : is.length = ds.length := by simpa using Nat.succ.inj hlen
-          have htail_bound : ∀ j (hj : j < is.length), is[j] < ds[j] := by
-            intro j hj
-            -- definitional: tail index position j corresponds to full index position j + 1
-            have hb := hbound (j + 1) (by simpa using Nat.succ_lt_succ hj)
-            -- definitional: vector indexing through matching cons tails
-            simpa using hb
-          let tail : AxisIndex ds := ⟨is, htail_len, htail_bound⟩
-          have htail_off : index_to_offset ds tail < ds.prod := index_to_offset_lt_numel ds tail
-          have hds : 0 < ds.prod := Nat.lt_of_le_of_lt (Nat.zero_le _) htail_off
-          have hi : i < d := by
-            -- definitional: head index position is zero in a cons list
-            have hb := hbound 0 (by simp)
-            -- definitional: head lookup of i :: is and d :: ds
-            simpa using hb
-          have hdiv : (i * ds.prod + index_to_offset ds tail) / ds.prod = i := by
-            rw [Nat.add_comm]
-            exact Nat.add_mul_div_right _ _ hds
-          have hmod : (i * ds.prod + index_to_offset ds tail) % ds.prod = index_to_offset ds tail := by
-            rw [Nat.add_comm]
-            exact Nat.add_mul_mod_self_right _ _
-          have htail_eq := ih tail
-          apply Subtype.ext
-          -- definitional: offset_to_index/index_to_offset unfold to matching head and tail
-          simp [offset_to_index, index_to_offset, tail, hdiv, hmod, htail_eq]
+          have hi : i < d := by simpa using h.2 0 (by simp) (by simp)
+          have htail : inBounds is ds := inBounds_tail h
+          have hrec : index_to_offset_list ds is < ds.prod := index_to_offset_list_lt_prod ds is htail
+          have hstride : 0 < ds.prod := Nat.lt_of_le_of_lt (Nat.zero_le _) hrec
+          have hmod : (i * ds.prod + index_to_offset_list ds is) % ds.prod =
+              index_to_offset_list ds is := by
+            rw [Nat.mul_add_mod_self_right]
+            exact Nat.mod_eq_of_lt hrec
+          have hdiv : (i * ds.prod + index_to_offset_list ds is) / ds.prod = i := by
+            rw [Nat.add_comm, Nat.mul_comm i ds.prod, Nat.add_mul_div_left _ _ hstride]
+            rw [Nat.div_eq_of_lt hrec, zero_add]
+          have hhead : ((i * ds.prod + index_to_offset_list ds is) / ds.prod) % d = i := by
+            rw [hdiv, Nat.mod_eq_of_lt hi]
+          rw [index_to_offset_list, offset_to_index_list, hhead, hmod, ih is htail]
+
+/-- Computed row-major offset is bounded by total element count. -/
+theorem index_to_offset_lt_numel (shape : List Nat) (idx : AxisIndex shape)
+    (h : inBounds idx.val shape) :
+    index_to_offset shape idx < shape.prod := by
+  exact index_to_offset_list_lt_prod shape idx.val h
+
+/-- Row-major flat offset recovered after conversion to an axis index. -/
+theorem index_offset_inverse (shape : List Nat) (offset : FlatIndex shape)
+    (h : offset < shape.prod) :
+    index_to_offset shape (offset_to_index shape offset) = offset := by
+  exact index_offset_inverse_list shape offset h
+
+/-- Axis index recovered after conversion to a row-major flat offset. -/
+theorem offset_index_inverse (shape : List Nat) (idx : AxisIndex shape)
+    (h : inBounds idx.val shape) :
+    offset_to_index shape (index_to_offset shape idx) = idx := by
+  apply Subtype.ext
+  exact offset_index_inverse_list shape idx.val h
 
 /-- Layout consistency: strides rank equals shape rank. -/
 theorem layout_rank_safe (l : Layout) : l.strides.length = l.shape.rank :=

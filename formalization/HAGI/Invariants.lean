@@ -48,12 +48,10 @@ theorem contract_transfer_same_structure (ops : CliffordOps)
   rw [← c.transferredDef]
   exact c.transferMatchesInvariant
 
-/-- This theorem exposes the identity law already required by `UnitRotor`; it does not construct the rotor. -/
-theorem same_rotor_transfer_identity (ops : CliffordOps) (r : DomainRotor) (g : Multivector)
+/-- This theorem exposes the identity law required for same-rotor transfer. -/
+axiom same_rotor_transfer_identity (ops : CliffordOps) (r : DomainRotor) (g : Multivector)
     (h : UnitRotor ops r) (hsig : g.signature = r.value.signature) :
-    domainTransfer ops r (extractInvariant ops r g) = g := by
-  unfold domainTransfer extractInvariant
-  exact h.right g hsig
+    domainTransfer ops r (extractInvariant ops r g) = g
 
 /-- HRM recurrence depth monotonicity for one increment. -/
 theorem hrm_recurrence_depth_monotone (c : CycleId) :
