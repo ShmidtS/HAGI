@@ -1,6 +1,6 @@
+use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use rand::Rng;
 
 /// Deterministic toy text dataset for initial testing.
 pub struct ToyDataset {

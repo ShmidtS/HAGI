@@ -15,4 +15,10 @@ impl Shape {
     pub fn numel(&self) -> usize {
         self.dims.iter().product()
     }
+
+    pub fn checked_numel(&self) -> Option<usize> {
+        self.dims
+            .iter()
+            .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+    }
 }

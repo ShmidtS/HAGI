@@ -4,6 +4,23 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+default = []
+cuda = ["dep:cuda-device", "dep:cuda-host", "dep:cuda-async"]
+
 [dependencies]
+config = { workspace = true }
 core-types = { workspace = true }
 tensor-runtime = { workspace = true }
+clifford-core = { workspace = true }
+hrm-model = { workspace = true }
+msa-adapter = { workspace = true }
+thiserror = { workspace = true }
+cuda-device = { path = "../cuda-oxide/crates/cuda-device", optional = true }
+cuda-host = { path = "../cuda-oxide/crates/cuda-host", optional = true, features = ["async"] }
+cuda-async = { path = "../cuda-oxide/crates/cuda-async", optional = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }

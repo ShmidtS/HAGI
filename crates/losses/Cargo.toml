@@ -5,5 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
+clifford-core = { workspace = true }
 core-types = { workspace = true }
 tensor-runtime = { workspace = true }
+thiserror = { workspace = true }
