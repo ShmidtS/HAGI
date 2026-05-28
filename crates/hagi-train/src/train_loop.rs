@@ -156,7 +156,11 @@ impl TrainingLoop {
                         bp_steps: self.backbone.config.bp_max_steps,
                     });
                 }
-                self.nars_hrm_controller = Some(NarsHrmController::default());
+                self.nars_hrm_controller = Some(NarsHrmController::with_config(
+                    nars_hrm::HrmGoalSet::default(),
+                    HrmPolicyLimits::default(),
+                    config.hrm_controller.clone(),
+                ));
             } else {
                 self.nars_hrm_controller = None;
                 self.hrm_runtime_control = None;

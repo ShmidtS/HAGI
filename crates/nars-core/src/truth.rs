@@ -50,6 +50,19 @@ impl TruthValue {
     pub fn negation(self) -> Self {
         Self::new(1.0 - self.frequency, self.confidence)
     }
+
+    pub fn revision(self, other: Self) -> Self {
+        let w1 = self.confidence;
+        let w2 = other.confidence;
+        let total_weight = w1 + w2;
+        if total_weight == 0.0 {
+            return Self::new(0.5, 0.0);
+        }
+        Self::new(
+            (self.frequency * w1 + other.frequency * w2) / total_weight,
+            total_weight / (1.0 + total_weight),
+        )
+    }
 }
 
 fn clamp01(value: f64) -> f64 {
@@ -107,5 +120,33 @@ mod tests {
         let truth = TruthValue::new(0.8, 0.9).negation();
         assert_close(truth.frequency(), 0.2);
         assert_close(truth.confidence(), 0.9);
+    }
+
+    #[test]
+    fn revision_keeps_frequency_and_confidence_bounded() {
+        let truth = TruthValue::new(1.5, 1.5).revision(TruthValue::new(-0.5, 1.5));
+        assert!((0.0..=1.0).contains(&truth.frequency()));
+        assert!((0.0..=1.0).contains(&truth.confidence()));
+    }
+
+    #[test]
+    fn revision_zero_confidence_returns_neutral_truth() {
+        let truth = TruthValue::new(1.0, 0.0).revision(TruthValue::new(0.0, 0.0));
+        assert_close(truth.frequency(), 0.5);
+        assert_close(truth.confidence(), 0.0);
+    }
+
+    #[test]
+    fn revision_increases_confidence_from_evidence_sum() {
+        let truth = TruthValue::new(0.8, 0.4).revision(TruthValue::new(0.6, 0.3));
+        assert!(truth.confidence() > 0.4);
+        assert_close(truth.confidence(), 0.7 / 1.7);
+    }
+
+    #[test]
+    fn revision_averages_contradictory_evidence_by_confidence() {
+        let truth = TruthValue::new(1.0, 0.5).revision(TruthValue::new(0.0, 0.5));
+        assert_close(truth.frequency(), 0.5);
+        assert_close(truth.confidence(), 0.5);
     }
 }

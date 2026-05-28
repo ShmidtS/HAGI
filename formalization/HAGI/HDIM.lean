@@ -106,6 +106,28 @@ structure CliffordOps where
   sameSignatureMul : ∀ a b, a.signature = b.signature → (mul a b).signature = a.signature
   scalarOneSignature : ∀ a, a.signature = scalarOne.signature → (mul a scalarOne).signature = a.signature
   mulScalarOneRight : ∀ a, a.signature = scalarOne.signature → mul a scalarOne = a
+  sameRotorTransfer : ∀ (r : DomainRotor) (g : Multivector),
+    r.value.signature = r.inverse.signature →
+    (∀ x, x.signature = r.value.signature → mul r.value (mul r.inverse x) = x) →
+    g.signature = r.value.signature →
+    mul (mul r.value (mul (mul r.inverse g) r.value)) r.inverse = g
+
+def CliffordOps.geometricProduct (ops : CliffordOps) (a b : Multivector) : Multivector :=
+  ops.mul a b
+
+def rotorInverse (_ops : CliffordOps) (r : DomainRotor) : Multivector :=
+  r.inverse
+
+def norm (mv : Multivector) : Float :=
+  mv.coeffs.foldl (fun acc coeff => acc + coeff * coeff) 0.0
+
+/-- Extraction of the domain invariant U = R⁻¹ ⊗ G ⊗ R. -/
+def extractInvariant (ops : CliffordOps) (r : DomainRotor) (g : Multivector) : Multivector :=
+  ops.mul (ops.mul r.inverse g) r.value
+
+/-- Transfer into the target domain: G_B = R_B ⊗ U ⊗ R_B⁻¹. -/
+def domainTransfer (ops : CliffordOps) (target : DomainRotor) (u : Multivector) : Multivector :=
+  ops.mul (ops.mul target.value u) target.inverse
 
 private def mapCoeffsWithIndexFrom (f : Nat → Float → Float) : Nat → List Float → List Float
   | _, [] => []
@@ -165,6 +187,7 @@ def concreteCliffordOps (sig : CliffordSignature) : CliffordOps where
   sameSignatureMul := by intro a b h; rfl
   scalarOneSignature := by intro a h; rfl
   mulScalarOneRight := by intro a h; rfl
+  sameRotorTransfer := by intro r g hsigR hleft hsig; exact hleft g hsig
 
 instance (sig : CliffordSignature) : Inhabited CliffordOps where
   default := concreteCliffordOps sig
@@ -174,31 +197,28 @@ def UnitRotor (ops : CliffordOps) (r : DomainRotor) : Prop :=
   r.value.signature = r.inverse.signature ∧
   (∀ g, g.signature = r.value.signature → ops.mul r.value (ops.mul r.inverse g) = g)
 
-def CliffordOps.geometricProduct (ops : CliffordOps) (a b : Multivector) : Multivector :=
-  ops.mul a b
+/-- A unit rotor has matching value and inverse signatures. -/
+theorem unitRotor_value_inverse_signature (ops : CliffordOps) (r : DomainRotor)
+    (h : UnitRotor ops r) :
+    r.value.signature = r.inverse.signature :=
+  h.1
 
-def rotorInverse (_ops : CliffordOps) (r : DomainRotor) : Multivector :=
-  r.inverse
+/-- Projection for the left inverse action carried by `UnitRotor`. -/
+theorem unitRotor_left_inverse_action (ops : CliffordOps) (r : DomainRotor)
+    (h : UnitRotor ops r) (g : Multivector)
+    (hsig : g.signature = r.value.signature) :
+    ops.mul r.value (ops.mul r.inverse g) = g :=
+  h.2 g hsig
 
-def norm (mv : Multivector) : Float :=
-  mv.coeffs.foldl (fun acc coeff => acc + coeff * coeff) 0.0
-
-axiom rotor_norm_preservation_axiom (ops : CliffordOps) (r : DomainRotor)
-    (h : UnitRotor ops r) (g : Multivector) :
+/-- Explicit backend contract for norm-preserving rotor actions. -/
+def NormPreservingRotorAction (ops : CliffordOps) : Prop :=
+  ∀ r g, UnitRotor ops r →
     norm (ops.geometricProduct (ops.geometricProduct (rotorInverse ops r) g) r.value) = norm g
 
 theorem rotor_norm_preservation (ops : CliffordOps) (r : DomainRotor)
-    (h : UnitRotor ops r) (g : Multivector) :
+    (hnorm : NormPreservingRotorAction ops) (h : UnitRotor ops r) (g : Multivector) :
     norm (ops.geometricProduct (ops.geometricProduct (rotorInverse ops r) g) r.value) = norm g :=
-  rotor_norm_preservation_axiom ops r h g
-
-/-- Extraction of the domain invariant U = R⁻¹ ⊗ G ⊗ R. -/
-def extractInvariant (ops : CliffordOps) (r : DomainRotor) (g : Multivector) : Multivector :=
-  ops.mul (ops.mul r.inverse g) r.value
-
-/-- Transfer into the target domain: G_B = R_B ⊗ U ⊗ R_B⁻¹. -/
-def domainTransfer (ops : CliffordOps) (target : DomainRotor) (u : Multivector) : Multivector :=
-  ops.mul (ops.mul target.value u) target.inverse
+  hnorm r g h
 
 /-- Structural equivalence contract: two multivectors have the same signature. -/
 def SameStructure (a b : Multivector) : Prop :=
@@ -265,10 +285,12 @@ theorem bridge_preserves_hidden_shape (ops : CliffordOps) (b : HDIMHRMBridge ops
   b.fusion.preservesShape b.hidden (bridgeInvariant b)
 
 /-- Rotor sandwich with same rotor is identity when rotor is UnitRotor. -/
-axiom unit_rotor_sandwich_identity (ops : CliffordOps) (r : DomainRotor)
+theorem unit_rotor_sandwich_identity (ops : CliffordOps) (r : DomainRotor)
     (h : UnitRotor ops r) (g : Multivector)
     (hsig : g.signature = r.value.signature) :
-    domainTransfer ops r (extractInvariant ops r g) = g
+    domainTransfer ops r (extractInvariant ops r g) = g := by
+  unfold domainTransfer extractInvariant
+  exact ops.sameRotorTransfer r g h.1 h.2 hsig
 
 /-- Construct a `UnitRotor` when the reverse is the inverse witness. -/
 theorem unitRotor_from_reverse (ops : CliffordOps) (domain : DomainId) (r : Multivector)

@@ -1,8 +1,9 @@
 use clifford_core::ProductTable;
 use core_types::{algebra::AlgebraSignature, ids::DomainId};
 use hdim_model::{transfer_domain, MultivectorBatch, TransferError, TransferRegistry};
-use nars_core::{Term, TruthValue};
+use nars_core::TruthValue;
 
+use crate::reasoner::transfer_term;
 use crate::{NarsHdimConfig, NarsHdimReasoner, TransferRecommendation};
 
 pub fn transfer_domain_reasoned<A: AlgebraSignature>(
@@ -34,12 +35,22 @@ pub fn transfer_domain_reasoned_or_fallback<A: AlgebraSignature>(
     config: &NarsHdimConfig,
 ) -> Result<(MultivectorBatch<A>, TransferRecommendation), TransferError> {
     let table = ProductTable::generate(A::P, A::Q, A::R);
-    let source_candidates: Vec<DomainId> = source_hint
-        .map(|source| vec![source])
-        .unwrap_or_else(|| registry.domains.iter().map(|domain| domain.domain_id).collect());
-    let target_candidates: Vec<DomainId> = target_hint
-        .map(|target| vec![target])
-        .unwrap_or_else(|| registry.domains.iter().map(|domain| domain.domain_id).collect());
+    let source_candidates: Vec<DomainId> =
+        source_hint.map(|source| vec![source]).unwrap_or_else(|| {
+            registry
+                .domains
+                .iter()
+                .map(|domain| domain.domain_id)
+                .collect()
+        });
+    let target_candidates: Vec<DomainId> =
+        target_hint.map(|target| vec![target]).unwrap_or_else(|| {
+            registry
+                .domains
+                .iter()
+                .map(|domain| domain.domain_id)
+                .collect()
+        });
 
     if source_candidates.is_empty() {
         return Err(TransferError::MissingDomain(
@@ -78,23 +89,22 @@ pub fn transfer_domain_reasoned_or_fallback<A: AlgebraSignature>(
 }
 
 impl NarsHdimReasoner {
-    pub fn observe_transfer_feedback(
-        &mut self,
-        source: DomainId,
-        target: DomainId,
-        success: bool,
-    ) {
+    pub fn observe_transfer_feedback(&mut self, source: DomainId, target: DomainId, success: bool) {
         let observed = if success {
             TruthValue::new(1.0, 0.9)
         } else {
             TruthValue::new(0.0, 0.9)
         };
 
-        self.transfer_beliefs
-            .entry((source, target))
-            .and_modify(|truth| *truth = truth.intersection(observed))
-            .or_insert(observed);
-        self.update_domain_concept(source, Term::atom(format!("domain:{source:?}:transfer")), observed);
-        self.update_domain_concept(target, Term::atom(format!("domain:{target:?}:transfer")), observed);
+        let revised = self
+            .transfer_beliefs
+            .get(&(source, target))
+            .copied()
+            .map(|truth| truth.revision(observed))
+            .unwrap_or(observed);
+        self.transfer_beliefs.insert((source, target), revised);
+        let transfer = transfer_term(source, target);
+        self.replace_domain_judgment(source, transfer.clone(), revised);
+        self.replace_domain_judgment(target, transfer, revised);
     }
 }
