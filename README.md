@@ -143,11 +143,11 @@ Four models, identical training, architecture-only differences:
 ```
 HAGI/
 ├── prototype/              # PyTorch prototype (primary development)
-│   ├── model/              # Model architecture
-│   ├── data/               # Data loading and processing
-│   ├── training/           # Training scripts
-│   ├── evaluation/         # Benchmark evaluation
-│   └── configs/            # Training configurations
+│   ├── model/              # clifford, transformer, gdr, hagi
+│   ├── data/               # tokenizer, datatrove tokenize, memmap dataset, toy
+│   ├── training/           # optim (AdamW+Muon), loop, train CLI, config
+│   ├── evaluation/         # lm-eval adapter + metrics
+│   └── tests/              # clifford, model, overfit
 ├── crates/                 # Rust implementation (Stage 5+)
 │   ├── clifford-core/      # Clifford algebra primitives
 │   ├── core-types/         # Shared type definitions
@@ -164,6 +164,7 @@ HAGI/
 │   └── lakefile.lean
 ├── docs/                   # Documentation
 │   ├── ARCHITECTURE.md     # Detailed architecture specification
+│   ├── TRAINING.md         # Training stack + workflow
 │   ├── MILESTONES.md       # Milestone definitions and tracking
 │   ├── RESEARCH.md         # Research background and references
 │   └── ...
@@ -216,18 +217,27 @@ cd formalization && lake build
 
 ### Training
 
-```bash
-# Stage 0: Dense baseline
-python prototype/training/train.py --config configs/baseline.yaml
+See [docs/TRAINING.md](docs/TRAINING.md) for the full workflow. Quick version:
 
-# Stage 2: GDR model
-python prototype/training/train.py --config configs/gdr.yaml
+```bash
+# 0. Overfit sanity check (no data needed — proves the loop is correct)
+python -m pytest prototype/tests/test_overfit.py -q
+
+# 1. Tokenize a corpus into shards (datatrove)
+python -m prototype.data.tokenize --dataset HuggingFaceFW/fineweb-edu \
+    --subset sample-10BT --output data/fineweb-edu --tokenizer HuggingFaceTB/SmolLM2-135M
+
+# 2. Train (Stage 0 baseline, then Stage 2 GDR)
+python -m prototype.training.train --config configs/baseline.yaml --data data/fineweb-edu
+python -m prototype.training.train --config configs/gdr.yaml --data data/fineweb-edu
 ```
 
 ### Evaluation
 
 ```bash
-python prototype/evaluation/evaluate.py --model checkpoints/gdr_final.pt --benchmarks gsm8k,arc_c,boolq
+python -m prototype.evaluation.evaluate \
+    --ckpt checkpoints/gdr/step-00050000.pt \
+    --benchmarks gsm8k,arc_challenge,boolq
 ```
 
 ## Research Context
