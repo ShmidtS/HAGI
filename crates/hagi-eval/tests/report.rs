@@ -8,7 +8,7 @@ use hagi_eval::{
 use hagi_train::save_checkpoint;
 use hrm_model::{HrmBackbone, LmHead};
 use losses::LossWeights;
-use msa_adapter::{MemorySlot, SlotRegistry, SparseRouter};
+use msa_adapter::{MemorySlot, MsaConfig, SlotRegistry, SparseRouter};
 use tensor_runtime::Tensor;
 
 fn tiny_hrm_config() -> HrmConfig {
@@ -209,7 +209,11 @@ fn route_top_k_hit_rate_is_reasonable() {
         vec![0.5; config.hrm_config.hidden_size],
         Shape::new(vec![1, 1, config.hrm_config.hidden_size]),
     );
-    let (slot_ids, _) = SparseRouter::new(config.route_top_k).route(&query, &registry);
+    let router = SparseRouter::try_from_config(
+        MsaConfig::try_new(config.route_top_k).expect("eval test top_k must be valid"),
+    )
+    .expect("SparseRouter eval test config must be valid");
+    let (slot_ids, _) = router.route(&query, &registry);
     let route_top_k_hit_rate = if slot_ids.is_empty() { 0.0 } else { 1.0 };
 
     assert!(route_top_k_hit_rate > 0.0);
@@ -247,8 +251,11 @@ fn checkpoint_loads_eval_model_components() {
     );
     assert_eq!(
         model.hdim_forward.fusion.w_gate.data(),
-        sequence(0.02, (config.hrm_config.hidden_size + 8) * config.hrm_config.hidden_size)
-            .as_slice()
+        sequence(
+            0.02,
+            (config.hrm_config.hidden_size + 8) * config.hrm_config.hidden_size
+        )
+        .as_slice()
     );
     assert_eq!(
         model.hdim_forward.fusion.w_fuse.data(),
@@ -256,7 +263,11 @@ fn checkpoint_loads_eval_model_components() {
     );
     assert_eq!(
         model.lm_head.w_proj.data(),
-        sequence(0.04, config.hrm_config.hidden_size * config.hrm_config.vocab_size).as_slice()
+        sequence(
+            0.04,
+            config.hrm_config.hidden_size * config.hrm_config.vocab_size
+        )
+        .as_slice()
     );
     assert!(model.slot_registry.is_none());
 

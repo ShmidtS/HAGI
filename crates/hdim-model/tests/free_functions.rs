@@ -88,8 +88,8 @@ fn fused_hrm_hdim_inject_wraps_structural_fusion() {
         1,
     );
 
-    let output = fused_hrm_hdim_inject(&fusion, &hidden, &hdim_signal)
-        .expect("fusion should succeed");
+    let output =
+        fused_hrm_hdim_inject(&fusion, &hidden, &hdim_signal).expect("fusion should succeed");
 
     assert_eq!(output.shape().dims, vec![1, 1, hidden_size]);
     assert_eq!(output.data(), hidden_data.as_slice());

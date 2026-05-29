@@ -2,8 +2,8 @@ use core_types::shape::Shape;
 use msa_adapter::{
     fetch_pages, route_top_k, run_memory_interleave, sparse_attention_over_pages, FetchEvent,
     HostKvCache, HostKvPage, KVCache, MemoryInterleaveConfig, MemoryInterleaveReport, MemorySlot,
-    MemoryStopReason, MsaError, RouteSelection, RoutingQueryView, SlotRegistry, SparseAttention,
-    SparseRouter,
+    MemoryStopReason, MsaConfig, MsaError, RouteSelection, RoutingQueryView, SlotRegistry,
+    SparseAttention, SparseRouter,
 };
 use tensor_runtime::Tensor;
 
@@ -48,7 +48,9 @@ fn msa_public_api_exports_route_cache_fetch_interleave_types() {
     );
     assert_eq!(report.stop_reason, MemoryStopReason::MaxSteps);
 
-    let _router = SparseRouter::new(1);
+    let _router =
+        SparseRouter::try_from_config(MsaConfig::try_new(1).expect("test top_k must be valid"))
+            .expect("SparseRouter test config must be valid");
     let _attention = SparseAttention::new();
     let _kv_cache = KVCache::new();
     let _error = MsaError::InvalidTopK { top_k: 0 };

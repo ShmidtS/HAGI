@@ -168,17 +168,7 @@ fn mean_rows(data: &[f32], dim: usize) -> Vec<f32> {
     mean
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MsaConfig {
-    pub top_k: usize,
-}
-
-impl MsaConfig {
-    pub fn new(top_k: usize) -> Self {
-        assert!(top_k > 0, "top_k must be positive");
-        Self { top_k }
-    }
-}
+pub use config::MsaConfig;
 
 /// Sparse top-k router that selects memory slots by dot-product similarity.
 pub struct SparseRouter {
@@ -187,13 +177,25 @@ pub struct SparseRouter {
 
 impl SparseRouter {
     pub fn new(top_k: usize) -> Self {
-        Self::from_config(MsaConfig::new(top_k))
+        Self::try_from_config(
+            MsaConfig::try_new(top_k).expect("SparseRouter::new requires top_k > 0"),
+        )
+        .expect("SparseRouter::new requires top_k > 0")
+    }
+
+    pub fn try_from_config(config: MsaConfig) -> Result<Self, MsaError> {
+        if config.top_k == 0 {
+            return Err(MsaError::InvalidTopK {
+                top_k: config.top_k,
+            });
+        }
+        Ok(Self {
+            top_k: config.top_k,
+        })
     }
 
     pub fn from_config(config: MsaConfig) -> Self {
-        Self {
-            top_k: config.top_k,
-        }
+        Self::try_from_config(config).expect("SparseRouter::from_config requires validated config")
     }
 
     /// Route a query tensor [B, T, hidden] to the top-k most relevant slots.
@@ -265,7 +267,9 @@ mod tests {
         let query_data: Vec<f32> = (0..2 * 3 * 16).map(|_| rng.gen_range(-1.0..1.0)).collect();
         let query = Tensor::from_vec(query_data, Shape::new(vec![2, 3, 16]));
 
-        let router = SparseRouter::new(5);
+        let router =
+            SparseRouter::try_from_config(MsaConfig::try_new(5).expect("test top_k must be valid"))
+                .expect("SparseRouter test config must be valid");
         let (ids, weights) = router.route(&query, &reg);
 
         assert_eq!(ids.len(), 5);
@@ -282,7 +286,9 @@ mod tests {
         let query_data: Vec<f32> = (0..2 * 3 * 16).map(|_| rng.gen_range(-1.0..1.0)).collect();
         let query = Tensor::from_vec(query_data, Shape::new(vec![2, 3, 16]));
 
-        let router = SparseRouter::new(5);
+        let router =
+            SparseRouter::try_from_config(MsaConfig::try_new(5).expect("test top_k must be valid"))
+                .expect("SparseRouter test config must be valid");
         let (_, weights) = router.route(&query, &reg);
 
         let sum: f32 = weights.iter().sum();
@@ -300,7 +306,10 @@ mod tests {
         let query_data: Vec<f32> = (0..1 * 2 * 8).map(|_| rng.gen_range(-1.0..1.0)).collect();
         let query = Tensor::from_vec(query_data, Shape::new(vec![1, 2, 8]));
 
-        let router = SparseRouter::new(10);
+        let router = SparseRouter::try_from_config(
+            MsaConfig::try_new(10).expect("test top_k must be valid"),
+        )
+        .expect("SparseRouter test config must be valid");
         let (ids, weights) = router.route(&query, &reg);
 
         assert_eq!(ids.len(), 3);

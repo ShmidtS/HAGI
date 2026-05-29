@@ -1,5 +1,5 @@
-use core_types::shape::Shape;
 use config::HdimConfig;
+use core_types::shape::Shape;
 use hdim_model::{HdimError, HiddenToMultivector};
 use hrm_model::HiddenState;
 use tensor_runtime::Tensor;
@@ -114,7 +114,10 @@ fn projection_different_batch_sizes() {
 fn try_projection_with_wrong_shape_returns_error() {
     let config = HdimConfig::default();
     let hidden_size = 8;
-    let wrong = Tensor::from_vec(vec![0.0f32; hidden_size * 7], Shape::new(vec![hidden_size, 7]));
+    let wrong = Tensor::from_vec(
+        vec![0.0f32; hidden_size * 7],
+        Shape::new(vec![hidden_size, 7]),
+    );
 
     let result = HiddenToMultivector::try_with_weights(&wrong, &config);
 

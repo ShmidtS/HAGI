@@ -1,0 +1,5 @@
+CompileFlags:
+  Add: [-xcuda, -nocudainc, -nocudalib]
+  Compiler: clang
+Diagnostics:
+  Suppress: [drv_no_cuda_libdevice, drv_no_cuda_installation, unknown_typename, undeclared_var_use, undeclared_var_use_suggest]

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use clifford_core::{get_product_table_cl3, Cl3, Multivector, Rotor};
-use config::HdimConfig;
+use config::{HdimConfig, MsaConfig};
 use core_types::{algebra::AlgebraSignature, ids::DomainId, shape::Shape};
 use data::PackedBatch;
 use hdim_model::{
@@ -20,7 +20,7 @@ use nars_hdim::{transfer_domain_reasoned_or_fallback, NarsHdimConfig, NarsHdimRe
 use nars_hrm::{HrmPolicyLimits, NarsHrmConfig, NarsHrmController};
 use nars_msa::{
     compute_reward_from_retrieval_outcome, route_top_k_with_nars, NarsMsaConfig, NarsMsaReasoner,
-    NarsRoutePolicy,
+    NarsRoutePolicy, ScoreBlend,
 };
 use tensor_runtime::Tensor;
 
@@ -41,6 +41,8 @@ pub enum TrainError {
     Msa(#[from] MsaError),
     #[error("checkpoint failed: {0}")]
     Checkpoint(#[from] std::io::Error),
+    #[error("config failed: {0}")]
+    Config(#[from] config::ConfigError),
     #[error("empty response-token set")]
     EmptyResponse,
 }
@@ -76,6 +78,7 @@ pub struct TrainingLoop {
     pub nars_hrm_controller: Option<NarsHrmController>,
     pub nars_hdim_reasoner: Option<NarsHdimReasoner>,
     pub nars_msa_reasoner: Option<NarsMsaReasoner>,
+    pub msa_config: MsaConfig,
     pub msa_slot_registry: SlotRegistry,
     pub msa_kv_cache: HostKvCache,
     pub eval_interval: usize,
@@ -93,6 +96,16 @@ impl TrainingLoop {
         optimizer: AdamW,
         loss_weights: LossWeights,
     ) -> Result<Self, TrainError> {
+        Self::try_new_with_msa_config(backbone, optimizer, loss_weights, MsaConfig::default())
+    }
+
+    pub fn try_new_with_msa_config(
+        backbone: HrmBackbone,
+        optimizer: AdamW,
+        loss_weights: LossWeights,
+        msa_config: MsaConfig,
+    ) -> Result<Self, TrainError> {
+        msa_config.validate()?;
         let hidden_size = backbone.config.hidden_size;
         let hdim_config = HdimConfig::default();
         let structural_heads = hdim_config.structural_heads;
@@ -128,6 +141,7 @@ impl TrainingLoop {
             nars_hrm_controller: None,
             nars_hdim_reasoner: None,
             nars_msa_reasoner: None,
+            msa_config,
             msa_slot_registry: SlotRegistry::default(),
             msa_kv_cache: HostKvCache::default(),
             eval_interval: 0,
@@ -142,6 +156,16 @@ impl TrainingLoop {
 
     pub fn new(backbone: HrmBackbone, optimizer: AdamW, loss_weights: LossWeights) -> Self {
         Self::try_new(backbone, optimizer, loss_weights)
+            .expect("TrainingLoop HDIM layer initialization failed")
+    }
+
+    pub fn new_with_msa_config(
+        backbone: HrmBackbone,
+        optimizer: AdamW,
+        loss_weights: LossWeights,
+        msa_config: MsaConfig,
+    ) -> Self {
+        Self::try_new_with_msa_config(backbone, optimizer, loss_weights, msa_config)
             .expect("TrainingLoop HDIM layer initialization failed")
     }
 
@@ -274,6 +298,7 @@ impl TrainingLoop {
         let grad_norm = global_norm(&grads);
         self.optimizer.clip_gradients(&mut grads);
 
+        // HRM backbone is frozen: backward not yet implemented for recurrence/attention/MLP weights. See .omc/tech-debt.md.
         let mut params = vec![
             self.projector.w_proj.clone(),
             self.fusion.w_gate.clone(),
@@ -403,8 +428,13 @@ impl TrainingLoop {
         }
 
         let hidden_size = hidden.shape().dims[2];
+        let top_k = self.msa_config.top_k;
         let selection = if self.nars_config.enabled {
             if let Some(reasoner) = self.nars_msa_reasoner.as_mut() {
+                let policy = NarsRoutePolicy::FixedTopK {
+                    top_k,
+                    blend: ScoreBlend::default(),
+                };
                 route_top_k_with_nars(
                     &self.msa_slot_registry,
                     RoutingQueryView {
@@ -412,7 +442,7 @@ impl TrainingLoop {
                         dim: hidden_size,
                     },
                     reasoner,
-                    &NarsRoutePolicy::default(),
+                    &policy,
                     self.step,
                 )?
             } else {
@@ -422,7 +452,7 @@ impl TrainingLoop {
                         data: hidden.data(),
                         dim: hidden_size,
                     },
-                    1,
+                    top_k,
                 )?
             }
         } else {
@@ -432,7 +462,7 @@ impl TrainingLoop {
                     data: hidden.data(),
                     dim: hidden_size,
                 },
-                1,
+                top_k,
             )?
         };
         let pages = fetch_pages(&self.msa_kv_cache, &selection.slot_ids).wait();

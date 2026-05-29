@@ -1,14 +1,16 @@
 use std::fmt;
 
+pub mod demo;
 pub mod enums;
 pub mod hdim;
 pub mod hrm;
 pub mod model;
 
+pub use demo::demo_model_config;
 pub use enums::{FusionMode, InsertionPolicy};
 pub use hdim::HdimConfig;
 pub use hrm::HrmConfig;
-pub use model::ModelConfig;
+pub use model::{ModelConfig, MsaConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {

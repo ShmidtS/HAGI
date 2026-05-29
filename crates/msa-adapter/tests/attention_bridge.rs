@@ -1,6 +1,6 @@
 use core_types::shape::Shape;
 use msa_adapter::{
-    sparse_attention_with_memory, HostKvCache, MemorySlot, SlotRegistry, SparseRouter,
+    sparse_attention_with_memory, HostKvCache, MemorySlot, MsaConfig, SlotRegistry, SparseRouter,
 };
 use tensor_runtime::Tensor;
 
@@ -42,7 +42,9 @@ fn sparse_attention_with_memory_preserves_local_hidden_shape() {
         Tensor::from_vec(vec![0.0, 0.0, 0.0, 1.0], Shape::new(vec![hidden])),
     );
 
-    let router = SparseRouter::new(1);
+    let router =
+        SparseRouter::try_from_config(MsaConfig::try_new(1).expect("test top_k must be valid"))
+            .expect("SparseRouter test config must be valid");
     let output = sparse_attention_with_memory(
         &local_hidden,
         (&local_k, &local_v),

@@ -2,6 +2,8 @@ use approx::assert_relative_eq;
 use clifford_core::{rotor_sandwich_cl3, Cl3, Multivector, ProductTable, Rotor};
 use core_types::shape::Shape;
 use cuda_kernels::cuda_kernels_available;
+#[cfg(feature = "cuda")]
+use cuda_kernels::dispatch::GpuBackend;
 use cuda_kernels::dispatch::{
     dispatch_or_fallback, Backend, CpuBackend, FusedHagiOp, KernelDispatch,
 };
@@ -130,4 +132,86 @@ fn parity_geometric_product_matches_clifford_core() {
     for (actual, expected) in actual.data().iter().zip(expected.coeffs.iter()) {
         assert_relative_eq!(*actual, *expected, epsilon = 1e-4);
     }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_geometric_product_matches_cpu() {
+    if !cuda_kernels_available() {
+        return;
+    }
+
+    let table = ProductTable::generate(3, 0, 0);
+    let n = table.blade_count;
+    let a = Tensor::from_vec(
+        vec![1.0, 0.5, -0.25, 0.75, 0.0, 0.1, -0.2, 0.3],
+        Shape::new(vec![n]),
+    );
+    let b = Tensor::from_vec(
+        vec![0.7, -0.1, 0.2, 0.4, -0.3, 0.9, 0.05, -0.6],
+        Shape::new(vec![n]),
+    );
+
+    let cpu = CpuBackend.geometric_product(&a, &b, &table).unwrap();
+    let gpu = GpuBackend::new().geometric_product(&a, &b, &table).unwrap();
+
+    for (actual, expected) in gpu.data().iter().zip(cpu.data()) {
+        assert_relative_eq!(*actual, *expected, epsilon = 1e-4);
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_rotor_sandwich_matches_cpu() {
+    if !cuda_kernels_available() {
+        return;
+    }
+
+    let table = ProductTable::generate(3, 0, 0);
+    let n = table.blade_count;
+    let rotor = Tensor::from_vec(
+        vec![0.9238795, 0.0, 0.0, 0.0, 0.38268343, 0.0, 0.0, 0.0],
+        Shape::new(vec![n]),
+    );
+    let mv = Tensor::from_vec(
+        vec![0.0, 1.0, 0.5, -0.25, 0.0, 0.1, -0.2, 0.3],
+        Shape::new(vec![n]),
+    );
+
+    let cpu = CpuBackend.rotor_sandwich(&rotor, &mv, &table).unwrap();
+    let gpu = GpuBackend::new()
+        .rotor_sandwich(&rotor, &mv, &table)
+        .unwrap();
+
+    for (actual, expected) in gpu.data().iter().zip(cpu.data()) {
+        assert_relative_eq!(*actual, *expected, epsilon = 1e-4);
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_fused_dispatch_reports_gpu_and_writes_output() {
+    if !cuda_kernels_available() {
+        return;
+    }
+
+    let (input, rotor_lut, hrm_weights, routing_keys, mut output) = fused_inputs();
+    let report = dispatch_or_fallback(
+        FusedHagiOp::RotorHrmMsa {
+            stream: None,
+            input: &input,
+            rotor_lut: &rotor_lut,
+            hrm_weights: &hrm_weights,
+            routing_keys: &routing_keys,
+            output: output.as_view_mut(),
+        },
+        Backend::Gpu,
+    )
+    .unwrap();
+
+    assert_eq!(report.backend, Backend::Gpu);
+    assert!(report.used_cuda);
+    assert!(!report.fallback_used);
+    assert!(report.launched_fused);
+    assert!(output.data().iter().any(|value| *value != 0.0));
 }

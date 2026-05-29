@@ -11,5 +11,5 @@ lean_lib HAGI where
   roots := #[`HAGI]
 
 @[test_driver]
-lean_exe test_runner where
+lean_exe TestRunner where
   root := `TestRunner

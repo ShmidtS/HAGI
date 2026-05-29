@@ -7,6 +7,8 @@
 
 pub mod attention;
 pub mod clifford;
+#[cfg(feature = "cuda")]
+mod cuda_impl;
 pub mod dispatch;
 pub mod fused;
 
@@ -44,7 +46,7 @@ pub struct KernelReport {
 /// Returns whether a CUDA runtime is detected in this build.
 #[cfg(feature = "cuda")]
 pub fn cuda_kernels_available() -> bool {
-    cuda_host::CudaContext::new(0).is_ok()
+    cuda_core::CudaContext::new(0).is_ok()
 }
 
 /// Returns whether a CUDA runtime is detected in this build.
