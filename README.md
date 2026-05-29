@@ -53,7 +53,7 @@ Input Tokens
 │   6. Add iteration embedding                │
 │                                             │
 │  Parameters shared across all iterations.   │
-│  ~115M unique params → ~345M effective.     │
+│  ~115M params; effective depth ~20 layers.  │
 └─────────────────────────────────────────────┘
       │
       ▼
@@ -80,20 +80,21 @@ The geometric product of `Cl(3,0,0)` naturally mixes grades: `vector × vector �
 
 ## Research Status
 
-> **Phase: Pre-prototype.** No trained model exists yet. The architecture is under active development. Current work focuses on building the PyTorch prototype and establishing baselines.
+> **Phase: Prototype built, untrained.** The PyTorch prototype — model, training stack, and evaluation adapter — exists and passes correctness tests. No model has been trained yet; the next step is the Stage 0 baseline run.
 
 ### What Exists
 
-- Rust workspace scaffold (10 crates) with typed Clifford algebra primitives
-- Lean4 formal verification of core invariants (~700 lines of proofs)
-- Comprehensive architecture documentation and research analysis
-- Milestone-driven implementation plan
+- PyTorch prototype: GDR model with Perception/Reasoning/Expression, all four ablation variants behind config flags (`prototype/model/`)
+- Training stack: nanoGPT-adapted loop, AdamW+Muon optimizer, datatrove tokenization, memmap loader, lm-eval-harness adapter (`prototype/training/`, `prototype/data/`, `prototype/evaluation/`)
+- Test suite: Clifford algebra, model shape, overfit, config smoke, checkpoint roundtrip (20 tests, CPU-only)
+- Rust workspace scaffold (10 crates) with typed Clifford primitives (refactored for GDR at Stage 5)
+- Lean4 formal verification of core invariants (~700 lines, aligned at Stage 6)
+- Architecture documentation, research analysis, milestone-driven plan
 
 ### What's Next
 
-- PyTorch prototype of the GDR architecture
-- Dense transformer baseline (Model A)
-- Controlled ablation experiments (Models A/B/C/D)
+- Stage 0: tokenize FineWeb-Edu, train the dense baseline (Model A)
+- Stages 1-2: recurrent core, then the full GDR ablation (Models A/B/C/D)
 
 ## Key Design Decisions
 
@@ -132,7 +133,7 @@ Four models, identical training, architecture-only differences:
 | Position encoding | RoPE |
 | Normalization | RMSNorm (pre-norm) |
 | Context length | 4096 tokens |
-| Vocabulary | 32K (BPE, reuse existing tokenizer) |
+| Vocabulary | 49,152 (SmolLM2 BPE) |
 | Clifford algebra | `Cl(3,0,0)`, 8 blades |
 | Grade allocation | 64 scalar + 192 vector + 192 bivector + 64 trivector + 256 residual = 768 |
 | Training precision | bf16 |

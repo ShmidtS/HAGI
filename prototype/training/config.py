@@ -1,7 +1,13 @@
-"""Config loading: YAML -> HAGIConfig + training/data/eval dicts."""
+"""Config loading: YAML -> HAGIConfig + training/data/eval dicts.
+
+Also (de)serializes HAGIConfig to/from a plain nested dict so checkpoints store
+the config as primitives (no pickled dataclass) and load under torch's default
+`weights_only=True`. See `prototype/training/loop.py` save/load_checkpoint.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import yaml
@@ -48,3 +54,16 @@ def load_config(path: str | Path) -> dict:
         "data": raw.get("data", {}),
         "eval": raw.get("eval", {}),
     }
+
+
+def config_to_dict(cfg: HAGIConfig) -> dict:
+    """HAGIConfig -> plain nested dict (primitives only). Safe to torch.save."""
+    return dataclasses.asdict(cfg)
+
+
+def config_from_dict(d: dict) -> HAGIConfig:
+    """Inverse of config_to_dict. Reconstructs the nested dataclasses."""
+    d = dict(d)
+    tcfg = TransformerConfig(**d.pop("transformer"))
+    gcfg = GradeConfig(**d.pop("grades"))
+    return HAGIConfig(transformer=tcfg, grades=gcfg, **d)

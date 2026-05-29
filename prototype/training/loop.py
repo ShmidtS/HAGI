@@ -131,11 +131,28 @@ def train(
 
 
 def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str):
+    """Write a checkpoint. Config is stored as a plain dict (not a pickled
+    dataclass) so the file loads under torch's default weights_only=True."""
+    from prototype.training.config import config_to_dict
+
     out = Path(ckpt_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"step-{step:08d}.pt"
     torch.save(
-        {"model": model.state_dict(), "step": step, "config": model.cfg},
+        {"model": model.state_dict(), "step": step, "config": config_to_dict(model.cfg)},
         path,
     )
     print(f"checkpoint -> {path}")
+
+
+def load_checkpoint(path: str, device: str = "cpu") -> tuple[HAGI, int]:
+    """Rebuild a HAGI model from a checkpoint. Loads under weights_only=True
+    (config is a plain dict, weights are tensors — no arbitrary unpickling)."""
+    from prototype.training.config import config_from_dict
+
+    state = torch.load(path, map_location=device, weights_only=True)
+    cfg = config_from_dict(state["config"])
+    model = HAGI(cfg)
+    model.load_state_dict(state["model"])
+    model.to(device)
+    return model, int(state.get("step", 0))

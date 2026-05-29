@@ -23,6 +23,16 @@ class TransformerConfig:
     norm_eps: float = 1e-6
     max_seq_len: int = 4096
 
+    def __post_init__(self):
+        assert self.hidden_size % self.num_query_heads == 0, (
+            f"hidden_size {self.hidden_size} not divisible by num_query_heads {self.num_query_heads}"
+        )
+        assert self.num_query_heads % self.num_kv_heads == 0, (
+            f"num_query_heads {self.num_query_heads} not divisible by num_kv_heads {self.num_kv_heads}"
+        )
+        head_dim = self.hidden_size // self.num_query_heads
+        assert head_dim % 2 == 0, f"head_dim {head_dim} must be even for RoPE"
+
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
