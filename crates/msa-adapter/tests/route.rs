@@ -1,6 +1,7 @@
 use core_types::shape::Shape;
 use msa_adapter::{
-    route_top_k, MemorySlot, MsaError, RouteSelection, RoutingQueryView, SlotRegistry, SparseRouter,
+    route_top_k, MemorySlot, MsaConfig, MsaError, RouteSelection, RoutingQueryView, SlotRegistry,
+    SparseRouter,
 };
 use tensor_runtime::Tensor;
 
@@ -164,7 +165,9 @@ fn route_top_k_negative_scores_returns_probability_weights() {
 fn sparse_router_empty_registry_returns_empty() {
     let registry = SlotRegistry::new();
     let query = Tensor::from_vec(vec![1.0, 2.0], Shape::new(vec![1, 1, 2]));
-    let router = SparseRouter::new(2);
+    let router =
+        SparseRouter::try_from_config(MsaConfig::try_new(2).expect("test top_k must be valid"))
+            .expect("SparseRouter test config must be valid");
 
     let (ids, weights) = router.route(&query, &registry);
 
@@ -178,7 +181,9 @@ fn sparse_router_compat_returns_weights_sum_one() {
     registry.register(slot(0, vec![1.0, 0.0]));
     registry.register(slot(1, vec![2.0, 0.0]));
     let query = Tensor::from_vec(vec![1.0, 0.0, 1.0, 0.0], Shape::new(vec![1, 2, 2]));
-    let router = SparseRouter::new(2);
+    let router =
+        SparseRouter::try_from_config(MsaConfig::try_new(2).expect("test top_k must be valid"))
+            .expect("SparseRouter test config must be valid");
 
     let (_, weights) = router.route(&query, &registry);
     let sum: f32 = weights.iter().sum();
@@ -200,6 +205,15 @@ fn route_top_k_zero_top_k_is_error() {
     )
     .unwrap_err();
     assert!(matches!(err, MsaError::InvalidTopK { top_k: 0 }));
+}
+
+#[test]
+fn sparse_router_try_from_config_rejects_zero_top_k() {
+    match SparseRouter::try_from_config(MsaConfig { top_k: 0 }) {
+        Err(MsaError::InvalidTopK { top_k: 0 }) => {}
+        Err(err) => panic!("unexpected error: {err}"),
+        Ok(_) => panic!("zero top_k must be rejected"),
+    }
 }
 
 #[test]

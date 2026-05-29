@@ -168,7 +168,9 @@ pub fn total_loss(
 ) -> Result<LossBreakdown, LossError> {
     validate_weights(weights)?;
     if !aux.margin.is_finite() {
-        return Err(LossError::InvalidTargets("aux margin must be finite".to_string()));
+        return Err(LossError::InvalidTargets(
+            "aux margin must be finite".to_string(),
+        ));
     }
 
     let logits_shape = logits.shape();
@@ -211,9 +213,7 @@ pub fn total_loss(
         if target as usize >= vocab {
             return Err(LossError::TargetOutOfRange { target, vocab });
         }
-        let is_response = prefix_mask
-            .as_ref()
-            .is_none_or(|mask| mask.data()[i] == 0);
+        let is_response = prefix_mask.as_ref().is_none_or(|mask| mask.data()[i] == 0);
         if is_response {
             response_token_count += 1;
             loss_mask.push(1.0);
@@ -452,8 +452,16 @@ mod tests {
         let mut grads = vec![Tensor::from_vec(vec![3.0f32, 4.0], Shape::new(vec![2]))];
         magic_norm_clip(&mut grads, 1.0);
         let data = grads[0].data();
-        assert!((data[0] - 1.0).abs() < 1e-5, "expected 1.0, got {}", data[0]);
-        assert!((data[1] - 1.0).abs() < 1e-5, "expected 1.0, got {}", data[1]);
+        assert!(
+            (data[0] - 1.0).abs() < 1e-5,
+            "expected 1.0, got {}",
+            data[0]
+        );
+        assert!(
+            (data[1] - 1.0).abs() < 1e-5,
+            "expected 1.0, got {}",
+            data[1]
+        );
     }
 
     #[test]

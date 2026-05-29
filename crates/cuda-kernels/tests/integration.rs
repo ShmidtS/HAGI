@@ -6,7 +6,10 @@ use core_types::shape::Shape;
 use cuda_kernels::attention::AttentionKernels;
 use cuda_kernels::clifford::CliffordKernels;
 use cuda_kernels::cuda_kernels_available;
-use cuda_kernels::dispatch::{AutoDispatch, Backend, CpuBackend, GpuBackend, KernelDispatch};
+use cuda_kernels::dispatch::{
+    dispatch_or_fallback, AutoDispatch, Backend, CpuBackend, FusedHagiOp, GpuBackend,
+    KernelDispatch,
+};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -29,8 +32,8 @@ fn assert_near(a: f32, b: f32, eps: f32, ctx: &str) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cuda_kernels_available_returns_false() {
-    assert!(!cuda_kernels_available());
+fn cuda_kernels_available_query_is_callable() {
+    let _available = cuda_kernels_available();
 }
 
 // ---------------------------------------------------------------------------
@@ -38,9 +41,14 @@ fn cuda_kernels_available_returns_false() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn auto_dispatch_selects_cpu() {
+fn auto_dispatch_tracks_cuda_availability() {
     let d = AutoDispatch::new();
-    assert_eq!(d.active_backend(), Backend::Cpu);
+    let expected = if cuda_kernels_available() {
+        Backend::Gpu
+    } else {
+        Backend::Cpu
+    };
+    assert_eq!(d.active_backend(), expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +390,9 @@ fn gpu_fallback_matches_cpu_geometric_product() {
     let cpu_result = cpu.geometric_product(&a_t, &b_t, &table).unwrap();
     let gpu_result = gpu.geometric_product(&a_t, &b_t, &table).unwrap();
 
-    assert_eq!(cpu_result.data(), gpu_result.data());
+    for (index, (cpu, gpu)) in cpu_result.data().iter().zip(gpu_result.data()).enumerate() {
+        assert_near(*gpu, *cpu, 1e-4, &format!("index {}", index));
+    }
 }
 
 #[test]
@@ -407,7 +417,9 @@ fn gpu_fallback_matches_cpu_rotor_sandwich() {
     let cpu_result = cpu.rotor_sandwich(&rotor_t, &mv_t, &table).unwrap();
     let gpu_result = gpu.rotor_sandwich(&rotor_t, &mv_t, &table).unwrap();
 
-    assert_eq!(cpu_result.data(), gpu_result.data());
+    for (index, (cpu, gpu)) in cpu_result.data().iter().zip(gpu_result.data()).enumerate() {
+        assert_near(*gpu, *cpu, 1e-4, &format!("index {}", index));
+    }
 }
 
 #[test]
@@ -447,5 +459,67 @@ fn gpu_fallback_matches_cpu_sparse_attention() {
         .sparse_attention(&query, &keys, &values, &weights)
         .unwrap();
 
-    assert_eq!(cpu_result.data(), gpu_result.data());
+    for (index, (cpu, gpu)) in cpu_result.data().iter().zip(gpu_result.data()).enumerate() {
+        assert_near(*gpu, *cpu, 1e-4, &format!("index {}", index));
+    }
+}
+
+#[test]
+fn fused_dispatch_gpu_matches_cpu_when_cuda_available() {
+    let input = Tensor::from_vec(
+        vec![0.25, -0.5, 0.75, 1.0, -0.25, 0.5, -0.75, 0.125],
+        Shape::new(vec![1, 2, 4]),
+    );
+    let rotor_lut = Tensor::from_vec(
+        vec![1.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0],
+        Shape::new(vec![8]),
+    );
+    let hrm_weights = Tensor::from_vec(vec![0.5, 0.25, 0.75, 1.0], Shape::new(vec![4]));
+    let routing_keys = Tensor::from_vec(
+        vec![0.1, -0.2, 0.3, -0.4, -0.3, 0.2, -0.1, 0.4],
+        Shape::new(vec![2, 4]),
+    );
+    let mut cpu_output = Tensor::zeros(input.shape().clone());
+    let mut gpu_output = Tensor::zeros(input.shape().clone());
+
+    let cpu_report = dispatch_or_fallback(
+        FusedHagiOp::RotorHrmMsa {
+            stream: None,
+            input: &input,
+            rotor_lut: &rotor_lut,
+            hrm_weights: &hrm_weights,
+            routing_keys: &routing_keys,
+            output: cpu_output.as_view_mut(),
+        },
+        Backend::Cpu,
+    )
+    .unwrap();
+    let gpu_report = dispatch_or_fallback(
+        FusedHagiOp::RotorHrmMsa {
+            stream: None,
+            input: &input,
+            rotor_lut: &rotor_lut,
+            hrm_weights: &hrm_weights,
+            routing_keys: &routing_keys,
+            output: gpu_output.as_view_mut(),
+        },
+        Backend::Gpu,
+    )
+    .unwrap();
+
+    for (index, (cpu, gpu)) in cpu_output.data().iter().zip(gpu_output.data()).enumerate() {
+        assert_near(*gpu, *cpu, 1e-4, &format!("index {}", index));
+    }
+    assert!(!cpu_report.used_cuda);
+    if cuda_kernels_available() {
+        assert_eq!(gpu_report.backend, Backend::Gpu);
+        assert!(gpu_report.used_cuda);
+        assert!(gpu_report.launched_fused);
+        assert!(!gpu_report.fallback_used);
+    } else {
+        assert_eq!(gpu_report.backend, Backend::Cpu);
+        assert!(!gpu_report.used_cuda);
+        assert!(!gpu_report.launched_fused);
+        assert!(gpu_report.fallback_used);
+    }
 }

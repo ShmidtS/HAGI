@@ -13,6 +13,4 @@ pub use nars_training_wrapper::{NarsControlledTrainingLoop, NarsTrainStepReport}
 pub use optimizer::{
     adamw_step, AdamW, AdamWConfig, AdamWState, Gradient, OptimizerError, Parameter,
 };
-pub use train_loop::{
-    train_step, NarsTrainingConfig, TrainError, TrainStepReport, TrainingLoop,
-};
+pub use train_loop::{train_step, NarsTrainingConfig, TrainError, TrainStepReport, TrainingLoop};

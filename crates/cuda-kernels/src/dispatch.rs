@@ -6,6 +6,11 @@ use hrm_model::HrmBackbone;
 use msa_adapter::{route_top_k, MemorySlot, RoutingQueryView, SlotRegistry};
 use tensor_runtime::{Tensor, TensorViewMut};
 
+#[cfg(feature = "cuda")]
+use cuda_core::CudaContext;
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
+
 use crate::{CudaKernelError, KernelReport};
 
 /// Which backend is active.
@@ -60,14 +65,13 @@ fn dispatch_fused_rotor_hrm_msa(
     backend: Backend,
 ) -> Result<KernelReport, CudaKernelError> {
     if backend == Backend::Gpu && crate::cuda_kernels_available() {
-        let launch_output = Tensor::zeros(output.shape().clone());
         match crate::fused::launch_fused_rotor_hrm_msa(
             stream,
             input,
             rotor_lut,
             hrm_weights,
             routing_keys,
-            &launch_output,
+            output.data_mut(),
         ) {
             Ok(report) => Ok(report),
             Err(err) => {
@@ -158,7 +162,13 @@ fn cpu_fused_fallback(
             Shape::new(vec![key_dim]),
         );
         let value = Tensor::from_vec(vec![0.0; key_dim], Shape::new(vec![key_dim]));
-        registry.register(MemorySlot::new(slot_id, key, value, 0, "fallback".to_string()));
+        registry.register(MemorySlot::new(
+            slot_id,
+            key,
+            value,
+            0,
+            "fallback".to_string(),
+        ));
     }
     let query = Tensor::from_vec(
         (0..key_dim)
@@ -285,16 +295,27 @@ impl KernelDispatch for CpuBackend {
     }
 }
 
-/// GPU backend stub. Falls back to CpuBackend when CUDA is unavailable.
+/// GPU backend. Falls back to CpuBackend when CUDA is unavailable.
 pub struct GpuBackend {
     fallback: CpuBackend,
+    #[cfg(feature = "cuda")]
+    context: Option<Arc<CudaContext>>,
 }
 
 impl GpuBackend {
     pub fn new() -> Self {
         Self {
             fallback: CpuBackend,
+            #[cfg(feature = "cuda")]
+            context: crate::cuda_impl::default_context().ok(),
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn context(&self) -> Result<&Arc<CudaContext>, CudaKernelError> {
+        self.context.as_ref().ok_or_else(|| {
+            CudaKernelError::Unavailable("cuda feature/runtime is not available".to_string())
+        })
     }
 }
 
@@ -311,10 +332,15 @@ impl KernelDispatch for GpuBackend {
         b: &Tensor<f32>,
         table: &ProductTable,
     ) -> Result<Tensor<f32>, CudaKernelError> {
-        if !super::cuda_kernels_available() {
-            return self.fallback.geometric_product(a, b, table);
+        #[cfg(feature = "cuda")]
+        {
+            if let Ok(context) = self.context() {
+                if let Ok(output) = crate::cuda_impl::launch_geometric_product(context, a, b, table)
+                {
+                    return Ok(output);
+                }
+            }
         }
-        // Future: dispatch to CUDA kernel here
         self.fallback.geometric_product(a, b, table)
     }
 
@@ -324,8 +350,15 @@ impl KernelDispatch for GpuBackend {
         mv: &Tensor<f32>,
         table: &ProductTable,
     ) -> Result<Tensor<f32>, CudaKernelError> {
-        if !super::cuda_kernels_available() {
-            return self.fallback.rotor_sandwich(rotor, mv, table);
+        #[cfg(feature = "cuda")]
+        {
+            if let Ok(context) = self.context() {
+                if let Ok(output) =
+                    crate::cuda_impl::launch_rotor_sandwich(context, rotor, mv, table)
+                {
+                    return Ok(output);
+                }
+            }
         }
         self.fallback.rotor_sandwich(rotor, mv, table)
     }
@@ -337,8 +370,15 @@ impl KernelDispatch for GpuBackend {
         values: &[Tensor<f32>],
         weights: &[f32],
     ) -> Result<Tensor<f32>, CudaKernelError> {
-        if !super::cuda_kernels_available() {
-            return self.fallback.sparse_attention(query, keys, values, weights);
+        #[cfg(feature = "cuda")]
+        {
+            if let Ok(context) = self.context() {
+                if let Ok(output) =
+                    crate::cuda_impl::launch_sparse_attention(context, query, keys, values, weights)
+                {
+                    return Ok(output);
+                }
+            }
         }
         self.fallback.sparse_attention(query, keys, values, weights)
     }
@@ -362,8 +402,43 @@ impl KernelDispatch for GpuBackend {
         registry: &SlotRegistry,
         top_k: usize,
     ) -> Result<Tensor<f32>, CudaKernelError> {
-        if !super::cuda_kernels_available() {
-            return self.fallback.msa_route_score(query, registry, top_k);
+        #[cfg(feature = "cuda")]
+        {
+            if let Ok(context) = self.context() {
+                if !registry.is_empty() {
+                    let all_keys = registry.all_keys();
+                    let dim = query.shape().dims.last().copied().ok_or_else(|| {
+                        CudaKernelError::InvalidShape("msa_route_score query is empty".to_string())
+                    })?;
+                    if all_keys.shape().rank() == 2 && all_keys.shape().dims[1] == dim {
+                        let query_data = if query.data().len() == dim {
+                            query.data().to_vec()
+                        } else {
+                            mean_query_rows(query.data(), dim)
+                        };
+                        if let Ok(scores) = crate::cuda_impl::launch_msa_route_score(
+                            context,
+                            &query_data,
+                            all_keys.data(),
+                            all_keys.shape().dims[0],
+                            dim,
+                        ) {
+                            let mut scored: Vec<(usize, f32)> =
+                                registry.slot_ids().into_iter().zip(scores).collect();
+                            scored.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| a.0.cmp(&b.0))
+                            });
+                            scored.truncate(top_k.min(scored.len()));
+                            return Ok(Tensor::from_vec(
+                                scored.into_iter().map(|(_, score)| score).collect(),
+                                Shape::new(vec![top_k.min(registry.len())]),
+                            ));
+                        }
+                    }
+                }
+            }
         }
         self.fallback.msa_route_score(query, registry, top_k)
     }
@@ -783,6 +858,22 @@ fn cpu_hrm_update(
     step: usize,
 ) -> Result<Tensor<f32>, CudaKernelError> {
     Ok(model.forward(input, prefix_lens, step).hidden)
+}
+
+#[cfg(feature = "cuda")]
+fn mean_query_rows(data: &[f32], dim: usize) -> Vec<f32> {
+    let rows = data.len() / dim;
+    let mut mean = vec![0.0f32; dim];
+    for row in 0..rows {
+        let offset = row * dim;
+        for d in 0..dim {
+            mean[d] += data[offset + d];
+        }
+    }
+    for value in &mut mean {
+        *value /= rows as f32;
+    }
+    mean
 }
 
 fn cpu_msa_route_score(

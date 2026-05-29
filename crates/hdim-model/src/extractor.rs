@@ -19,7 +19,10 @@ impl InvariantExtractor {
         source: &Rotor<A>,
     ) -> Result<MultivectorBatch<A>, HdimError> {
         let shape = g.coeffs.shape();
-        if shape.rank() != 4 || shape.dims[2] != g.structural_heads || shape.dims[3] != A::BLADE_COUNT {
+        if shape.rank() != 4
+            || shape.dims[2] != g.structural_heads
+            || shape.dims[3] != A::BLADE_COUNT
+        {
             return Err(HdimError::ShapeMismatch);
         }
 

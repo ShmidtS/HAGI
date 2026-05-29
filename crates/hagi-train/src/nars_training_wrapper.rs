@@ -42,7 +42,11 @@ pub struct NarsTrainStepReport {
 }
 
 impl NarsControlledTrainingLoop {
-    pub fn new(inner: TrainingLoop, controller: NarsHrmController, limits: HrmPolicyLimits) -> Self {
+    pub fn new(
+        inner: TrainingLoop,
+        controller: NarsHrmController,
+        limits: HrmPolicyLimits,
+    ) -> Self {
         Self {
             inner,
             controller,

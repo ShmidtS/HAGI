@@ -25,7 +25,11 @@ impl Linear {
     }
 
     pub fn new_sequence(input_dim: usize, seq_len: usize, hidden_size: usize) -> Self {
-        Self::new_with_sequence_output(input_dim, seq_len * hidden_size, Some((seq_len, hidden_size)))
+        Self::new_with_sequence_output(
+            input_dim,
+            seq_len * hidden_size,
+            Some((seq_len, hidden_size)),
+        )
     }
 
     fn new_with_sequence_output(
@@ -49,7 +53,11 @@ impl Linear {
         let batch = input_shape.dims[0];
         let input_dim = input_shape.dims[1];
         let weight_shape = self.weight.shape();
-        assert_eq!(weight_shape.rank(), 2, "linear weight must be [input_dim, output_dim]");
+        assert_eq!(
+            weight_shape.rank(),
+            2,
+            "linear weight must be [input_dim, output_dim]"
+        );
         assert_eq!(input_dim, weight_shape.dims[0], "linear input dim mismatch");
         let output_dim = weight_shape.dims[1];
         let input_data = input.data();
@@ -245,7 +253,8 @@ impl HrmBackbone {
         let mask = PrefixLmMask::build(batch, seq_len, &prefix_lens);
         let lm_head = LmHead::new(self.config.vocab_size, self.config.hidden_size);
         let token_ids = tensor_i64_to_u32(tokens);
-        let mut final_hidden = Tensor::zeros(Shape::new(vec![batch, seq_len, self.config.hidden_size]));
+        let mut final_hidden =
+            Tensor::zeros(Shape::new(vec![batch, seq_len, self.config.hidden_size]));
 
         for _ in 0..h_cycles {
             for _ in 0..l_cycles {
@@ -369,7 +378,10 @@ pub fn forward_hrm_with_control(
     }
 
     let expected = Shape::new(vec![b, t, model.config.hidden_size]);
-    if initial_hidden.shape() != &expected || state.z_h.shape() != &expected || state.z_l.shape() != &expected {
+    if initial_hidden.shape() != &expected
+        || state.z_h.shape() != &expected
+        || state.z_l.shape() != &expected
+    {
         return Err(HrmError::InvalidStateShape {
             expected,
             actual_h: state.z_h.shape().clone(),
@@ -505,8 +517,15 @@ fn project_state_to_hidden(state: &Tensor<f32>, proj: &Linear) -> Tensor<f32> {
     let shape = projected.shape();
     let batch = shape.dims[0];
     let (seq_len, hidden_size) = proj.sequence_output.unwrap_or((1, shape.dims[1]));
-    assert_eq!(shape.dims[1], seq_len * hidden_size, "linear sequence output dim mismatch");
-    Tensor::from_vec(projected.data().to_vec(), Shape::new(vec![batch, seq_len, hidden_size]))
+    assert_eq!(
+        shape.dims[1],
+        seq_len * hidden_size,
+        "linear sequence output dim mismatch"
+    );
+    Tensor::from_vec(
+        projected.data().to_vec(),
+        Shape::new(vec![batch, seq_len, hidden_size]),
+    )
 }
 
 fn mean_over_tokens(hidden: &Tensor<f32>) -> Tensor<f32> {
@@ -531,7 +550,11 @@ fn mean_over_tokens(hidden: &Tensor<f32>) -> Tensor<f32> {
 }
 
 fn tensor_i64_to_u32(tokens: &Tensor<i64>) -> Tensor<u32> {
-    let data = tokens.data().iter().map(|&token| token.max(0) as u32).collect();
+    let data = tokens
+        .data()
+        .iter()
+        .map(|&token| token.max(0) as u32)
+        .collect();
     Tensor::from_vec(data, tokens.shape().clone())
 }
 

@@ -92,7 +92,11 @@ impl ProductTable {
                         inversion_count += (b & ((1 << i) - 1)).count_ones() as usize;
                     }
                 }
-                let sign = if inversion_count.is_multiple_of(2) { 1i8 } else { -1i8 };
+                let sign = if inversion_count.is_multiple_of(2) {
+                    1i8
+                } else {
+                    -1i8
+                };
 
                 let mut metric = 1.0f32;
                 for i in 0..dim {

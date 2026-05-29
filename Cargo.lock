@@ -180,6 +180,7 @@ dependencies = [
  "config",
  "core-types",
  "cuda-async",
+ "cuda-core",
  "cuda-device",
  "cuda-host",
  "hrm-model",
