@@ -39,7 +39,7 @@ except ImportError:  # allow import without lm-eval installed
 
 
 from prototype.data.tokenizer import DEFAULT_TOKENIZER, load_tokenizer
-from prototype.model.hagi import HAGI
+from prototype.training.loop import load_checkpoint
 
 
 @register_model("hagi")
@@ -53,10 +53,8 @@ class HAGILMEval(LM):
         self.max_length = max_length
         self.tokenizer = load_tokenizer(tokenizer)
 
-        state = torch.load(ckpt, map_location="cpu", weights_only=False)
-        cfg = state["config"]
-        self.model = HAGI(cfg).to(self.device).eval()
-        self.model.load_state_dict(state["model"])
+        model, _ = load_checkpoint(ckpt, device=self.device)
+        self.model = model.eval()
 
     def tok_encode(self, s: str) -> list[int]:
         return self.tokenizer.encode(s)

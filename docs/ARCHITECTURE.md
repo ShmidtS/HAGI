@@ -37,7 +37,7 @@ Input Tokens + Position IDs
         │
         ▼
 ┌──────────────────────────────────────────────────┐
-│  Token Embedding (32K → 768) + RoPE              │
+│  Token Embedding (49K → 768) + RoPE              │
 └──────────────────────────────────────────────────┘
         │
         ▼
@@ -69,7 +69,7 @@ Input Tokens + Position IDs
         │
         ▼
 ┌──────────────────────────────────────────────────┐
-│  RMSNorm → LM Head (768 → 32K, weight-tied)      │
+│  RMSNorm → LM Head (768 → 49K, weight-tied)      │
 └──────────────────────────────────────────────────┘
         │
         ▼
@@ -92,7 +92,7 @@ h[..., 448:512]   → trivector grade (T=64)
 h[..., 512:768]   → residual        (R=256)
 ```
 
-The vector/bivector slices are reshaped so the `Cl(3,0,0)` 8-blade structure applies per structural head. With 192 dims and 8 blades, that is 24 structural heads for vectors (similarly for bivectors).
+The vector slice is reshaped so the `Cl(3,0,0)` 8-blade structure applies per structural head: 192 dims / 8 blades = 24 structural heads. The geometric product runs on these vector multivectors; its grade-0 and grade-2 outputs feed the scalar and bivector grades (see Geometric Interaction below).
 
 ### Per-Grade Update
 
@@ -135,7 +135,7 @@ Grades and residual are concatenated back into a 768-dim vector, then passed thr
 | Model | unique params | ~115M |
 | Model | effective depth (N=3) | 20 layers |
 | Model | hidden_size | 768 |
-| Model | vocab_size | 32000 |
+| Model | vocab_size | 49152 (SmolLM2 BPE) |
 | Model | context_length | 4096 |
 | Attention | num_query_heads | 12 |
 | Attention | num_kv_heads | 4 (GQA) |
@@ -203,7 +203,7 @@ Critical comparison: **B vs D** isolates the contribution of grade decomposition
 
 | Layer | Technology | Status | Stage |
 |-------|-----------|--------|-------|
-| Prototype | PyTorch | To build | 0-4 |
+| Prototype | PyTorch | Built (untrained) | 0-4 |
 | Production | Rust (`crates/`) | Scaffolded | 5 |
 | GPU kernels | CUDA (`cudarc`/cuda-oxide) | Stub | 5 |
 | Verification | Lean4 (`formalization/`) | Proofs exist | 6 |

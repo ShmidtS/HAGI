@@ -69,6 +69,23 @@ python -m prototype.evaluation.evaluate \
     --benchmarks gsm8k,arc_challenge,boolq,hellaswag,winogrande
 ```
 
+## Checkpoints
+
+`save_checkpoint(model, optimizer, step, ckpt_dir)` writes `step-<N>.pt` into
+`checkpoints/<config-name>/`. The model config is stored as a plain dict (not a
+pickled dataclass), so checkpoints load under torch's default `weights_only=True`
+— no arbitrary code execution on load.
+
+Load for resume or evaluation:
+
+```python
+from prototype.training.loop import load_checkpoint
+model, step = load_checkpoint("checkpoints/baseline/step-00050000.pt", device="cuda")
+```
+
+The eval adapter (`prototype/evaluation/lm_eval_wrapper.py`) loads via this path,
+so `--ckpt` accepts any saved checkpoint directly.
+
 ## Optimizer: AdamW vs Muon
 
 - **Baseline runs use AdamW.** It is the clean control.
@@ -100,6 +117,12 @@ gates and pivot conditions.
 ## Hardware Notes
 
 - ~100M model trains on a single 24GB GPU (4090/A5000/L4) in bf16.
+- The full Stage 0 config (`batch_size=16`, `max_seq_len=4096`) needs ~24GB. The
+  49K-vocab logits at length 4096 alone are multiple GB; a small laptop GPU (≤8GB)
+  cannot run it. On such hardware, use only the overfit test, or a reduced **dev
+  profile** (short `max_seq_len`, `batch_size` 1-2, higher `grad_accum_steps`) to
+  validate the pipeline end-to-end — not the science. Real runs go on a rented/
+  cloud 24GB+ GPU.
 - Adjust `batch_size` × `grad_accum_steps` to fit memory while holding the
   effective batch (tokens/step) constant across all four ablation models.
 - CPU is fine for the overfit test only.
