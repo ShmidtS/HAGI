@@ -2,7 +2,9 @@ pub mod backend;
 pub mod tensor;
 
 pub use backend::{BackendError, BackendRequest, CpuBackend, TensorBackend};
-pub use tensor::{Backend, BackendOp, Tensor, TensorElement, TensorError, TensorMut, TensorView, TensorViewMut};
+pub use tensor::{
+    Backend, BackendOp, Tensor, TensorElement, TensorError, TensorMut, TensorView, TensorViewMut,
+};
 
 pub use core_types::{Strides, TensorLayout, TensorSpec};
 

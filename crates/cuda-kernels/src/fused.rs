@@ -4,23 +4,23 @@ use tensor_runtime::Tensor;
 
 use crate::{CudaKernelError, KernelReport};
 
+#[cfg(feature = "cuda")]
+pub type CudaStream = cuda_core::CudaStream;
+
+#[cfg(not(feature = "cuda"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CudaStream;
 
 /// Launches the fused rotor, HRM, and MSA kernel.
-///
-/// The current M6 implementation only validates the host-visible tensor contract. Actual CUDA device
-/// code is intentionally not present, so a CUDA launch attempt returns [`CudaKernelError::Unsupported`]
-/// and callers should route through `dispatch_or_fallback` to execute the CPU reference path.
 pub fn launch_fused_rotor_hrm_msa(
     stream: Option<CudaStream>,
     input: &Tensor<f32>,
     rotor_lut: &Tensor<f32>,
     hrm_weights: &Tensor<f32>,
     routing_keys: &Tensor<f32>,
-    output: &Tensor<f32>,
+    output: &mut [f32],
 ) -> Result<KernelReport, CudaKernelError> {
-    validate_fused_inputs(input, rotor_lut, hrm_weights, routing_keys, output)?;
+    validate_fused_inputs(input, rotor_lut, hrm_weights, routing_keys, output.len())?;
 
     if !crate::cuda_kernels_available() {
         return Err(CudaKernelError::Unavailable(
@@ -47,18 +47,18 @@ fn validate_fused_inputs(
     rotor_lut: &Tensor<f32>,
     hrm_weights: &Tensor<f32>,
     routing_keys: &Tensor<f32>,
-    output: &Tensor<f32>,
+    output_len: usize,
 ) -> Result<(), CudaKernelError> {
     if input.shape().rank() != 3 {
         return Err(CudaKernelError::InvalidShape(
             "fused_rotor_hrm_msa input must be [B, T, hidden]".to_string(),
         ));
     }
-    if output.shape() != input.shape() {
+    if output_len != input.numel() {
         return Err(CudaKernelError::InvalidShape(format!(
-            "fused_rotor_hrm_msa output shape must match input: {:?} != {:?}",
-            output.shape().dims,
-            input.shape().dims
+            "fused_rotor_hrm_msa output length must match input: {} != {}",
+            output_len,
+            input.numel()
         )));
     }
     if rotor_lut.shape().rank() == 0 || rotor_lut.numel() == 0 {
@@ -86,10 +86,14 @@ fn launch_fused_rotor_hrm_msa_cuda(
     rotor_lut: &Tensor<f32>,
     hrm_weights: &Tensor<f32>,
     routing_keys: &Tensor<f32>,
-    output: &Tensor<f32>,
+    output: &mut [f32],
 ) -> Result<KernelReport, CudaKernelError> {
-    let _ = (stream, input, rotor_lut, hrm_weights, routing_keys, output);
-    Err(CudaKernelError::Unsupported(
-        "fused rotor+HRM+MSA CUDA kernel is not implemented in M6 stub".to_string(),
-    ))
+    crate::cuda_impl::launch_fused_rotor_hrm_msa(
+        stream,
+        input,
+        rotor_lut,
+        hrm_weights,
+        routing_keys,
+        output,
+    )
 }

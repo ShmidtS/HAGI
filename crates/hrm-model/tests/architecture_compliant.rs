@@ -1,6 +1,6 @@
 use config::hrm::HrmConfig;
 use core_types::shape::Shape;
-use hrm_model::{HrmBackbone, HState, LState, Linear};
+use hrm_model::{HState, HrmBackbone, LState, Linear};
 use tensor_runtime::Tensor;
 
 fn test_config() -> HrmConfig {
@@ -93,7 +93,10 @@ fn architecture_forward_returns_logits_shape() {
         vec![0i64, 1, 2, 3, 4, 5, 6, 7],
         Shape::new(vec![batch, seq_len]),
     );
-    let prefix_mask = Tensor::from_vec(vec![1.0f32; batch * seq_len], Shape::new(vec![batch, seq_len]));
+    let prefix_mask = Tensor::from_vec(
+        vec![1.0f32; batch * seq_len],
+        Shape::new(vec![batch, seq_len]),
+    );
     let mut z_h = HState {
         data: Tensor::zeros(Shape::new(vec![batch, h_dim])),
     };
