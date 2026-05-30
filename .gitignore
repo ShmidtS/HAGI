@@ -42,4 +42,4 @@ checkpoints/
 *.pt
 *.pth
 *.ckpt
-training.log
+*.log
