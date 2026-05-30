@@ -21,12 +21,7 @@ class _DummyTokenizer:
 
 
 class TokenizerWrapper:
-    def __init__(self, tokenizer: Any | None = None, model_name: str | None = None, **kwargs: Any) -> None:
-        if tokenizer is not None:
-            self.tokenizer = tokenizer
-            self._ensure_padding_token()
-            return
-
+    def __init__(self, model_name: str | None = None, tokenizer: Any | None = None, **kwargs: Any) -> None:
         if model_name is not None:
             try:
                 from transformers import AutoTokenizer
@@ -36,6 +31,11 @@ class TokenizerWrapper:
                 return
             except ImportError:
                 pass
+
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
+            self._ensure_padding_token()
+            return
 
         self.tokenizer = _DummyTokenizer()
 
