@@ -127,6 +127,7 @@ def run(
         grad_accum_steps=int(train_cfg.get("grad_accum_steps", 1)),
         grad_clip=float(train_cfg.get("grad_clip", 1.0)),
         precision=str(train_cfg.get("precision", precision)),
+        gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", False)),
         eval_interval=int(cfg.get("eval", {}).get("every_n_steps", train_cfg.get("eval_interval", 2000))),
         eval_iters=int(train_cfg.get("eval_iters", 50)),
         ckpt_interval=int(train_cfg.get("ckpt_interval", 5000)),

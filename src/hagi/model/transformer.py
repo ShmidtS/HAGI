@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 @dataclass
@@ -79,20 +80,26 @@ class GroupedQueryAttention(nn.Module):
         self.v_proj = nn.Linear(cfg.hidden_size, self.nkv * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.nq * self.head_dim, cfg.hidden_size, bias=False)
 
-    def forward(self, x: torch.Tensor, cos, sin) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False):
         B, T, _ = x.shape
         q = self.q_proj(x).view(B, T, self.nq, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.nkv, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.nkv, self.head_dim).transpose(1, 2)
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
-        # Expand KV heads to match query heads (GQA).
+        if past_key_value is not None:
+            past_key, past_value = past_key_value
+            k = torch.cat([past_key, k], dim=2)
+            v = torch.cat([past_value, v], dim=2)
+        next_key_value = (k, v) if use_cache else None
         rep = self.nq // self.nkv
-        k = k.repeat_interleave(rep, dim=1)
-        v = v.repeat_interleave(rep, dim=1)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attn_k = k.repeat_interleave(rep, dim=1)
+        attn_v = v.repeat_interleave(rep, dim=1)
+        is_causal = past_key_value is None
+        out = F.scaled_dot_product_attention(q, attn_k, attn_v, is_causal=is_causal)
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
-        return self.o_proj(out)
+        out = self.o_proj(out)
+        return (out, next_key_value) if use_cache else out
 
 
 class SwiGLU(nn.Module):
@@ -114,7 +121,35 @@ class TransformerBlock(nn.Module):
         self.mlp_norm = RMSNorm(cfg.hidden_size, cfg.norm_eps)
         self.mlp = SwiGLU(cfg)
 
-    def forward(self, x: torch.Tensor, cos, sin) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x), cos, sin)
-        x = x + self.mlp(self.mlp_norm(x))
-        return x
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos,
+        sin,
+        past_key_value=None,
+        use_cache: bool = False,
+        gradient_checkpointing: bool = False,
+    ):
+        use_checkpoint = gradient_checkpointing and self.training and not use_cache
+        if use_checkpoint:
+            attn_out = checkpoint(
+                lambda h, c, s: self.attn(self.attn_norm(h), c, s),
+                x,
+                cos,
+                sin,
+                use_reentrant=False,
+            )
+            next_key_value = None
+        else:
+            attn_out = self.attn(self.attn_norm(x), cos, sin, past_key_value, use_cache)
+            if use_cache:
+                attn_out, next_key_value = attn_out
+            else:
+                next_key_value = None
+        x = x + attn_out
+        if use_checkpoint:
+            mlp_out = checkpoint(lambda h: self.mlp(self.mlp_norm(h)), x, use_reentrant=False)
+        else:
+            mlp_out = self.mlp(self.mlp_norm(x))
+        x = x + mlp_out
+        return (x, next_key_value) if use_cache else x

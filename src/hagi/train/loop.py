@@ -31,6 +31,7 @@ class LoopConfig:
     grad_accum_steps: int = 1
     grad_clip: float = 1.0
     precision: str = "bf16"
+    gradient_checkpointing: bool = False
     eval_interval: int = 2000
     eval_iters: int = 50
     ckpt_interval: int = 5000
@@ -78,10 +79,14 @@ def train(
     on_log: Callable[[dict], None] | None = None,
 ):
     """Run the training loop. Returns the final training loss."""
+    if device.startswith("cuda"):
+        torch.backends.cuda.matmul.allow_tf32 = True
     model.to(device)
     model.train()
+    if hasattr(model.cfg, "gradient_checkpointing"):
+        model.cfg.gradient_checkpointing = cfg.gradient_checkpointing
     use_scaler = cfg.precision == "fp16" and device.startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
     last_loss = float("nan")
     for step in range(cfg.max_steps):
