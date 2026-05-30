@@ -20,9 +20,8 @@ def test_memmap_dataset_mock(tmp_path):
     dataset = MemmapDataset(path, block_size=8, dtype=np.uint16)
 
     assert len(dataset) == 24
-    x0, y0 = dataset[0]
-    assert x0.tolist() == list(range(8))
-    assert y0.tolist() == list(range(1, 9))
+    chunk = dataset[0]
+    assert chunk.tolist() == list(range(9))
 
     x, y = get_batch_memmap(dataset, batch_size=2, seq_len=8)
     assert _shape(x) == (2, 8)
