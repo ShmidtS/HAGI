@@ -1,5 +1,0 @@
-model parameters: total=53,075,330 trainable=53,075,330
-estimated VRAM: params_fp16=0.10GB adamw_training_state~=0.59GB
-VRAM after model creation: allocated=0.20GB reserved=0.22GB
-step      0 | loss 269.8330 | lr 5.00e-07
-step     50 | loss 74.1237 | lr 2.55e-05
