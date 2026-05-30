@@ -55,3 +55,55 @@ def total_loss(
 
     assert total is not None
     return total
+
+
+def compute_auxiliary_loss(gdr_output: torch.Tensor) -> torch.Tensor:
+    """Penalize similarity between grade projections."""
+    flattened = gdr_output.reshape(-1, gdr_output.size(-1)).float()
+    if flattened.size(0) < 2:
+        return gdr_output.new_zeros(())
+    normalized = F.normalize(flattened, dim=-1)
+    similarity = normalized @ normalized.transpose(0, 1)
+    off_diagonal = ~torch.eye(similarity.size(0), dtype=torch.bool, device=similarity.device)
+    return similarity[off_diagonal].pow(2).mean()
+
+
+def _as_logits(output: torch.Tensor | tuple | dict) -> torch.Tensor:
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, tuple):
+        return output[0]
+    if isinstance(output, dict):
+        return output["logits"]
+    raise TypeError("model output must be a tensor, tuple, or dict")
+
+
+def compute_isomorphic_loss(model, input_ids: torch.Tensor, targets: torch.Tensor, device) -> torch.Tensor:
+    """Run two forward passes and penalize output differences."""
+    input_ids = input_ids.to(device)
+    first = _as_logits(model(input_ids))
+    second = _as_logits(model(input_ids))
+    return F.mse_loss(first.float(), second.float())
+
+
+def composite_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    model_output: torch.Tensor,
+    auxiliary_output: torch.Tensor | None = None,
+    weights: Mapping[str, float] | None = None,
+) -> dict[str, torch.Tensor]:
+    """Compute CE, auxiliary, isomorphic, and weighted total losses."""
+    merged_weights = {"w_ce": 1.0, "w_aux": 0.1, "w_iso": 0.01}
+    if weights is not None:
+        merged_weights.update(weights)
+
+    l_ce = cross_entropy_loss(logits.float(), targets)
+    l_aux = logits.new_zeros(()) if auxiliary_output is None else compute_auxiliary_loss(auxiliary_output)
+    l_iso = isomorphic_consistency_loss(logits.float(), model_output.float())
+    l_total = (
+        merged_weights["w_ce"] * l_ce
+        + merged_weights["w_aux"] * l_aux
+        + merged_weights["w_iso"] * l_iso
+    )
+    return {"L_CE": l_ce, "L_aux": l_aux, "L_iso": l_iso, "L_total": l_total}

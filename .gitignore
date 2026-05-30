@@ -18,6 +18,7 @@ AGENTS.md
 /.kilo/
 .omc/
 meta.json
+.env
 
 # cargo install artifacts
 .crates.toml

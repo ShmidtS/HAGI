@@ -1,0 +1,7 @@
+dataset=HuggingFaceFW/fineweb-edu
+name=default
+split=train
+tokenizer=HuggingFaceTB/SmolLM2-135M
+tokens=10000000
+dtype=uint16
+shard=fineweb_edu_00000.bin
