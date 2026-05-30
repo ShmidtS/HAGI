@@ -5,6 +5,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
 
@@ -63,8 +64,8 @@ def memmap_batcher(path: Path, batch_size: int, seq_len: int, device: str, dtype
     def get_batch() -> tuple[torch.Tensor, torch.Tensor]:
         indices = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
         xs, ys = zip(*(dataset[index] for index in indices), strict=True)
-        x = torch.tensor(xs, dtype=torch.long, device=device)
-        y = torch.tensor(ys, dtype=torch.long, device=device)
+        x = torch.tensor(np.array(xs), dtype=torch.long, device=device)
+        y = torch.tensor(np.array(ys), dtype=torch.long, device=device)
         return x, y
 
     return get_batch
