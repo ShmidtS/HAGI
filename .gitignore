@@ -27,3 +27,11 @@ meta.json
 # untracked / wip artifacts
 formalization/.lake/
 formalization/.lake-build.log
+
+# Python
+__pycache__/
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+dist/
