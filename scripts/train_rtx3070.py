@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -69,22 +70,26 @@ def memmap_batcher(path: Path, batch_size: int, seq_len: int, device: str, dtype
     return get_batch
 
 
-def build_batcher(cfg: dict[str, Any], device: str, train_path: Path | None):
+def build_batcher(cfg: dict[str, Any], device: str, train_path: Path | None, data_dir: Path, seq_len: int | None):
     model_cfg = cfg.get("model", {})
     train_cfg = cfg.get("training", {})
     data_cfg = cfg.get("data", {})
     vocab_size = int(model_cfg.get("vocab_size", 49152))
     batch_size = int(train_cfg.get("batch_size", 1))
-    seq_len = int(data_cfg.get("max_seq_len", model_cfg.get("transformer", {}).get("max_seq_len", 2048)))
+    seq_len = int(seq_len if seq_len is not None else data_cfg.get("max_seq_len", model_cfg.get("transformer", {}).get("max_seq_len", 2048)))
     seed = int(train_cfg.get("seed", 42))
 
     if train_path is None:
         configured_path = data_cfg.get("train_path") or data_cfg.get("path")
         train_path = Path(configured_path) if configured_path else None
+    if train_path is None and data_dir.exists():
+        bin_files = sorted(data_dir.glob("*.bin"))
+        train_path = bin_files[0] if bin_files else None
     if train_path is not None and train_path.exists():
         generator = torch.Generator(device="cpu")
         generator.manual_seed(seed)
         return memmap_batcher(train_path, batch_size, seq_len, device, data_cfg.get("dtype", "uint16"), generator)
+    warnings.warn("no memmap .bin data found; falling back to synthetic data", RuntimeWarning, stacklevel=2)
     generator = torch.Generator(device=device if device.startswith("cuda") else "cpu")
     generator.manual_seed(seed)
     return synthetic_batcher(vocab_size, batch_size, seq_len, device, generator)
@@ -124,6 +129,8 @@ def main() -> None:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--train-path", type=Path, default=None)
+    parser.add_argument("--data-dir", type=Path, default=Path("data/fineweb_1M"))
+    parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--ckpt-dir", type=Path, default=DEFAULT_CKPT_DIR)
     parser.add_argument("--max-steps", type=int, default=None)
     args = parser.parse_args()
@@ -141,7 +148,7 @@ def main() -> None:
 
     args.ckpt_dir.mkdir(parents=True, exist_ok=True)
     optimizer = build_optimizer(model, cfg.get("training", {}))
-    get_batch = build_batcher(cfg, args.device, args.train_path)
+    get_batch = build_batcher(cfg, args.device, args.train_path, args.data_dir, args.seq_len)
     loop_cfg = build_loop_config(cfg, args.ckpt_dir, args.max_steps)
     final_loss = train(model, optimizer, get_batch, loop_cfg, device=args.device)
     save_checkpoint(model, optimizer, loop_cfg.max_steps, str(args.ckpt_dir))
