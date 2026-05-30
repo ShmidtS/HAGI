@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import logging
 
 import torch
 import torch.nn.functional as F
+
+
+logger = logging.getLogger(__name__)
 
 
 def cross_entropy_loss(
@@ -57,17 +61,58 @@ def total_loss(
     return total
 
 
-def compute_auxiliary_loss(gdr_output: torch.Tensor | None) -> torch.Tensor:
-    """Penalize similarity between grade projections."""
-    if gdr_output is None:
+def compute_auxiliary_loss(aux_output) -> torch.Tensor:
+    """Compute supervised contrastive auxiliary loss when pair labels are available."""
+    if aux_output is None:
         return torch.tensor(0.0)
-    flat = gdr_output.float().reshape(-1, gdr_output.size(-1))
-    if flat.size(0) < 2 or flat.size(-1) < 1:
+
+    labels = None
+    features = aux_output
+    if isinstance(aux_output, dict):
+        for key in ("features", "embeddings", "output"):
+            value = aux_output.get(key)
+            if isinstance(value, torch.Tensor):
+                features = value
+                break
+        for key in ("labels", "pair_labels"):
+            value = aux_output.get(key)
+            if value is not None:
+                labels = value
+                break
+    elif isinstance(aux_output, tuple):
+        if len(aux_output) >= 1:
+            features = aux_output[0]
+        if len(aux_output) >= 2:
+            labels = aux_output[1]
+
+    if not isinstance(features, torch.Tensor):
+        return torch.tensor(0.0)
+    if labels is None:
+        logger.debug("auxiliary contrastive labels missing; L_aux set to 0")
+        return features.new_zeros(())
+    if not isinstance(labels, torch.Tensor):
+        labels = torch.as_tensor(labels, device=features.device)
+
+    flat = features.float().reshape(-1, features.size(-1))
+    labels = labels.to(device=features.device).reshape(-1)
+    if flat.size(0) != labels.numel() or flat.size(0) < 2:
+        logger.debug("auxiliary contrastive labels invalid; L_aux set to 0")
         return flat.new_zeros(())
+
     flat_norm = F.normalize(flat, dim=-1)
-    sim = torch.mm(flat_norm, flat_norm.t())
-    mask = 1.0 - torch.eye(sim.size(0), dtype=sim.dtype, device=sim.device)
-    return (sim * mask).abs().mean()
+    logits = torch.mm(flat_norm, flat_norm.t()) / 0.07
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+    self_mask = torch.eye(logits.size(0), dtype=torch.bool, device=logits.device)
+    positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & ~self_mask
+    if not positive_mask.any():
+        logger.debug("auxiliary contrastive positive pairs missing; L_aux set to 0")
+        return flat.new_zeros(())
+
+    exp_logits = torch.exp(logits).masked_fill(self_mask, 0.0)
+    log_prob = logits - exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12).log()
+    positive_count = positive_mask.sum(dim=1)
+    valid = positive_count > 0
+    return -(log_prob * positive_mask).sum(dim=1)[valid].div(positive_count[valid]).mean()
 
 
 def _as_logits(output: torch.Tensor | tuple | dict) -> torch.Tensor:
@@ -94,43 +139,52 @@ def _model_output_tensor(model_output: torch.Tensor | dict | None) -> torch.Tens
 
 
 def compute_isomorphic_loss(
-    model_output,
-    input_ids: torch.Tensor | None = None,
+    invariant_src,
+    invariant_tgt=None,
     targets: torch.Tensor | None = None,
     device=None,
 ) -> torch.Tensor:
-    """Penalize nondeterministic or unbounded model outputs."""
-    if isinstance(model_output, torch.nn.Module):
-        if input_ids is None or device is None:
+    """Compute invariant MSE when HDIM source and target invariants are available."""
+    if isinstance(invariant_src, torch.nn.Module):
+        if invariant_tgt is None or device is None:
             raise ValueError("input_ids and device are required when passing a model")
-        input_ids = input_ids.to(device)
-        first = _as_logits(model_output(input_ids))
-        second = _as_logits(model_output(input_ids))
+        input_ids = invariant_tgt.to(device)
+        first = _as_logits(invariant_src(input_ids))
+        second = _as_logits(invariant_src(input_ids))
         return F.mse_loss(first.float(), second.float())
 
-    if isinstance(model_output, dict):
-        first = _model_output_tensor(model_output)
-        second = model_output.get("second_forward")
-        if second is None:
-            second = model_output.get("reference")
-        if isinstance(first, torch.Tensor) and isinstance(second, torch.Tensor):
-            return F.mse_loss(first.float(), second.float())
-        if isinstance(first, torch.Tensor):
-            return first.float().pow(2).mean()
+    if isinstance(invariant_src, dict):
+        src = None
+        tgt = None
+        for key in ("invariant_src", "invariant"):
+            value = invariant_src.get(key)
+            if isinstance(value, torch.Tensor):
+                src = value
+                break
+        for key in ("invariant_tgt", "target_invariant"):
+            value = invariant_src.get(key)
+            if isinstance(value, torch.Tensor):
+                tgt = value
+                break
+        if isinstance(src, torch.Tensor) and isinstance(tgt, torch.Tensor):
+            return F.mse_loss(src.float(), tgt.float())
         return torch.tensor(0.0)
 
-    tensor = _model_output_tensor(model_output)
-    if tensor is None:
-        return torch.tensor(0.0)
-    return tensor.float().pow(2).mean()
+    if isinstance(invariant_src, torch.Tensor) and isinstance(invariant_tgt, torch.Tensor):
+        return F.mse_loss(invariant_src.float(), invariant_tgt.float())
+    if isinstance(invariant_src, torch.Tensor):
+        return invariant_src.new_zeros(())
+    return torch.tensor(0.0)
 
 
 def composite_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    auxiliary_output: torch.Tensor | None = None,
+    auxiliary_output=None,
     model_output: torch.Tensor | dict | None = None,
-    weights: Mapping[str, float] | None = None,
+    weights: dict[str, float] | None = None,
+    invariant_src=None,
+    invariant_tgt=None,
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
     if (
@@ -141,13 +195,18 @@ def composite_loss(
     ):
         auxiliary_output, model_output = model_output, auxiliary_output
 
+    if invariant_src is None and isinstance(model_output, dict):
+        invariant_src = model_output.get("invariant_src")
+    if invariant_tgt is None and isinstance(model_output, dict):
+        invariant_tgt = model_output.get("invariant_tgt")
+
     merged_weights = {"w_ce": 1.0, "w_aux": 0.1, "w_iso": 0.01}
     if weights is not None:
         merged_weights.update(weights)
 
     l_ce = cross_entropy_loss(logits.float(), targets)
     l_aux = compute_auxiliary_loss(auxiliary_output).to(device=logits.device, dtype=logits.dtype)
-    l_iso = compute_isomorphic_loss(model_output).to(device=logits.device, dtype=logits.dtype)
+    l_iso = compute_isomorphic_loss(invariant_src, invariant_tgt).to(device=logits.device, dtype=logits.dtype)
     l_total = (
         merged_weights["w_ce"] * l_ce
         + merged_weights["w_aux"] * l_aux
