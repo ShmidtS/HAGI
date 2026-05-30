@@ -1,0 +1,40 @@
+# Tiny config for the overfit sanity check. Not for real training.
+# A correct loop drives loss -> ~0 on a fixed toy corpus in a few hundred steps.
+name: overfit
+model:
+  vocab_size: 64
+  hidden_size: 64
+  perception_layers: 1
+  reasoning_layers: 1
+  expression_layers: 1
+  loop_count: 2
+  use_loop: true
+  use_gdr: true
+  transformer:
+    num_query_heads: 4
+    num_kv_heads: 2
+    intermediate_size: 128
+    rope_theta: 10000.0
+    max_seq_len: 64
+  grades:
+    scalar: 8
+    vector: 16
+    bivector: 16
+    trivector: 8
+    residual: 16
+    scalar_momentum: 0.9
+    vector_momentum: 0.5
+
+training:
+  optimizer: adamw
+  precision: fp32
+  batch_size: 8
+  grad_accum_steps: 1
+  learning_rate: 1.0e-3
+  warmup_steps: 10
+  max_steps: 150
+  grad_clip: 1.0
+  seed: 0
+
+data:
+  max_seq_len: 32
