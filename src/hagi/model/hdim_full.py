@@ -113,12 +113,20 @@ class GatedFusion(nn.Module):
         self.mv_to_hidden = nn.Linear(mv_size, hidden_size)
         self.gate = nn.Linear(hidden_size + hidden_size, hidden_size)
 
-    def forward(self, transformed: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        transformed: torch.Tensor,
+        hidden_states: torch.Tensor,
+        return_gate: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         B, T, _, _ = transformed.shape
         mv_hidden = self.mv_to_hidden(transformed.reshape(B, T, self.heads * self.blade_count))
         gate = torch.sigmoid(self.gate(torch.cat([hidden_states, mv_hidden], dim=-1)))
         fused = hidden_states + mv_hidden
-        return gate * fused + (1.0 - gate) * hidden_states
+        output = gate * fused + (1.0 - gate) * hidden_states
+        if return_gate:
+            return output, gate
+        return output
 
 
 class HDIMFull(nn.Module):
@@ -146,8 +154,20 @@ class HDIMFull(nn.Module):
         hidden_states: torch.Tensor,
         src_rotor_idx: int | torch.Tensor = 0,
         tgt_rotor_idx: int | torch.Tensor = 0,
-    ) -> torch.Tensor:
+        return_state: bool = False,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
         multivector = self.project(hidden_states)
         invariant = self.extract(multivector, self.rotors, src_rotor_idx)
         target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
-        return self.fuse(target, hidden_states)
+        target_invariant = self.extract(target, self.rotors, tgt_rotor_idx)
+        fused, gate = self.fuse(target, hidden_states, return_gate=True)
+        if return_state:
+            return {
+                "fused": fused,
+                "multivector": multivector,
+                "invariant": invariant,
+                "target_multivector": target,
+                "target_invariant": target_invariant,
+                "gate": gate,
+            }
+        return fused
