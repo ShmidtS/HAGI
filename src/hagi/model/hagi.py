@@ -44,7 +44,7 @@ class HAGIConfig:
 
     def __post_init__(self):
         assert self.hidden_size == self.transformer.hidden_size
-        if self.use_gdr and not self.hdim_full:
+        if self.use_gdr and not self.hdim_full and not self.hrm:
             assert self.hidden_size == self.grades.hidden_size, (
                 f"grade dims sum to {self.grades.hidden_size}, hidden is {self.hidden_size}"
             )
@@ -69,15 +69,13 @@ class HAGI(nn.Module):
                 self.gdr = GradeDecomposedRecurrence(cfg.grades)
         self.hrm = (
             HRMCore(
-                vocab_size=cfg.vocab_size,
                 hidden_size=cfg.hidden_size,
                 h_dim=cfg.h_dim,
                 l_dim=cfg.l_dim,
                 h_cycles=cfg.loop_count,
                 l_cycles=cfg.reasoning_layers,
-                transformer=tcfg,
             )
-            if cfg.use_loop and cfg.hrm
+            if cfg.hrm
             else None
         )
 
@@ -105,6 +103,7 @@ class HAGI(nn.Module):
         ignore_index: int = -100,
         past_key_values=None,
         use_cache: bool = False,
+        training_mode: bool = False,
     ):
         """Returns logits, or (logits, loss) when targets are provided.
 
@@ -112,19 +111,6 @@ class HAGI(nn.Module):
         (caller does the shift, or passes -100 for masked positions).
         """
         B, T = input_ids.shape
-        if self.hrm is not None:
-            logits, _, _ = self.hrm(input_ids)
-            if targets is not None:
-                loss = F.cross_entropy(
-                    logits.reshape(-1, logits.size(-1)).float(),
-                    targets.reshape(-1),
-                    ignore_index=ignore_index,
-                )
-                return logits, loss
-            if use_cache:
-                return logits, []
-            return logits
-
         cache_pos = 0
         if past_key_values is not None and len(past_key_values) > 0:
             first = past_key_values[0]
@@ -134,6 +120,7 @@ class HAGI(nn.Module):
         cos, sin = self._rope_cache(T, h.device, h.dtype, cache_pos)
         next_key_values = [] if use_cache else None
         layer_idx = 0
+        gdr_output = None
         use_gradient_checkpointing = self.cfg.gradient_checkpointing and self.training and not use_cache
 
         def run_block(block, hidden, past=None):
@@ -158,19 +145,24 @@ class HAGI(nn.Module):
                 h = run_block(block, h)
             layer_idx += 1
 
-        loops = self.cfg.loop_count if self.cfg.use_loop else 1
-        for i in range(loops):
-            if self.gdr is not None:
-                h = self.gdr(h)
-            for block in self.reasoning:
-                past = past_key_values[layer_idx] if past_key_values is not None else None
-                if use_cache:
-                    h, next_kv = run_block(block, h, past)
-                    next_key_values.append(next_kv)
-                else:
-                    h = run_block(block, h)
-                layer_idx += 1
-            h = h + self.iter_embed[i]
+        if self.hrm is not None:
+            h, _, _ = self.hrm(h, self.reasoning, cos, sin)
+            layer_idx += len(self.reasoning)
+        else:
+            loops = self.cfg.loop_count if self.cfg.use_loop else 1
+            for i in range(loops):
+                if self.gdr is not None:
+                    h = self.gdr(h)
+                    gdr_output = h
+                for block in self.reasoning:
+                    past = past_key_values[layer_idx] if past_key_values is not None else None
+                    if use_cache:
+                        h, next_kv = run_block(block, h, past)
+                        next_key_values.append(next_kv)
+                    else:
+                        h = run_block(block, h)
+                    layer_idx += 1
+                h = h + self.iter_embed[i]
 
         for block in self.expression:
             past = past_key_values[layer_idx] if past_key_values is not None else None
@@ -181,8 +173,17 @@ class HAGI(nn.Module):
                 h = run_block(block, h)
             layer_idx += 1
 
+        pre_logits_hidden = h.clone()
         h = self.final_norm(h)
         logits = self.lm_head(h)
+
+        if training_mode:
+            result = {"logits": logits}
+            if gdr_output is not None:
+                result["auxiliary_output"] = gdr_output
+            if pre_logits_hidden is not None:
+                result["model_output"] = pre_logits_hidden
+            return result
 
         if targets is not None:
             loss = F.cross_entropy(

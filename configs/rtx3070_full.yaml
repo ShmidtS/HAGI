@@ -1,0 +1,50 @@
+data:
+  max_seq_len: 512
+  tokenizer: HuggingFaceTB/SmolLM2-135M
+model:
+  expression_layers: 4
+  grades:
+    bivector: 192
+    residual: 256
+    scalar: 64
+    trivector: 64
+    vector: 192
+  gradient_checkpointing: true
+  h_dim: 256
+  hdim_full: true
+  hdim_heads: 4
+  hidden_size: 768
+  hrm: true
+  l_dim: 256
+  loop_count: 3
+  perception_layers: 4
+  reasoning_layers: 4
+  transformer:
+    hidden_size: 768
+    intermediate_size: 2048
+    max_seq_len: 2048
+    num_kv_heads: 4
+    num_query_heads: 12
+  use_gdr: true
+  use_loop: true
+  vocab_size: 49152
+name: rtx3070_full
+training:
+  batch_size: 2
+  ckpt_interval: 1000
+  composite_loss:
+    w_aux: 0.1
+    w_ce: 1.0
+    w_iso: 0.01
+  eval_interval: 0
+  grad_accum_steps: 4
+  grad_clip: 1.0
+  gradient_checkpointing: true
+  learning_rate: 0.0005
+  log_interval: 25
+  max_steps: 50000
+  optimizer: adamw
+  precision: fp16
+  use_prefix_lm: true
+  warmup_steps: 500
+  weight_decay: 0.1

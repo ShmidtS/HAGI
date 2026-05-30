@@ -1,13 +1,14 @@
-"""Full Hierarchical Recurrent Model core with strategic and tactical states."""
+"""Hierarchical Recurrent Model reasoning controller."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 
 import torch
 from torch import nn
 
-from .transformer import TransformerBlock, TransformerConfig, build_rope_cache
+from .transformer import TransformerBlock
 
 
 @dataclass
@@ -56,66 +57,36 @@ class LTransition(nn.Module):
 class HRMCore(nn.Module):
     def __init__(
         self,
-        vocab_size: int,
         hidden_size: int,
         h_dim: int = 256,
         l_dim: int = 256,
         h_cycles: int = 2,
         l_cycles: int = 3,
-        transformer: TransformerConfig | None = None,
     ):
         super().__init__()
-        self.vocab_size = vocab_size
         self.hidden_size = hidden_size
-        self.h_dim = h_dim
-        self.l_dim = l_dim
         self.h_cycles = h_cycles
         self.l_cycles = l_cycles
-        self.transformer = transformer if transformer is not None else TransformerConfig(hidden_size=hidden_size)
 
-        self.embed = nn.Embedding(vocab_size, hidden_size)
-        self.block = TransformerBlock(self.transformer)
-        self.z_l_to_hidden = nn.Linear(l_dim, hidden_size)
         self.h_init = nn.Linear(hidden_size, h_dim)
         self.l_init = nn.Linear(hidden_size, l_dim)
         self.h_transition = HTransition(h_dim, l_dim)
         self.l_transition = LTransition(l_dim, hidden_size, h_dim)
-        self.final_norm = nn.LayerNorm(hidden_size)
-        self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
-        self.lm_head.weight = self.embed.weight
-        self._rope = {}
-
-    def _rope_cache(self, T: int, device, dtype):
-        key = (T, device, dtype)
-        if key not in self._rope:
-            head_dim = self.transformer.hidden_size // self.transformer.num_query_heads
-            self._rope[key] = build_rope_cache(T, head_dim, self.transformer.rope_theta, device, dtype)
-        return self._rope[key]
-
-    def _attention_mask(self, prefix_mask, partition, device):
-        mask = None
-        if prefix_mask is not None:
-            mask = prefix_mask.to(device=device, dtype=torch.bool)
-        if partition is not None:
-            part = torch.as_tensor(partition, device=device)
-            same_partition = part[:, :, None] == part[:, None, :]
-            causal = torch.ones(part.shape[-1], part.shape[-1], device=device, dtype=torch.bool).tril()
-            partition_mask = same_partition & causal
-            mask = partition_mask if mask is None else mask & partition_mask
-        if mask is not None and mask.ndim == 3:
-            mask = mask.unsqueeze(1)
-        return mask
+        self.z_l_to_hidden = nn.Linear(l_dim, hidden_size)
+        self.z_h_to_hidden = nn.Linear(h_dim, hidden_size)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        reasoning_blocks: Sequence[TransformerBlock],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        attn_mask=None,
         z_H: torch.Tensor | HState | None = None,
         z_L: torch.Tensor | LState | None = None,
-        prefix_mask=None,
-        partition=None,
     ):
-        h = self.embed(input_ids)
-        B, T, _ = h.shape
+        h = hidden_states
+        B, T, H = h.shape
         pooled = h.mean(dim=1)
 
         if isinstance(z_H, HState):
@@ -127,16 +98,16 @@ class HRMCore(nn.Module):
         if z_L is None:
             z_L = self.l_init(pooled)
 
-        cos, sin = self._rope_cache(T, h.device, h.dtype)
-        attn_mask = self._attention_mask(prefix_mask, partition, h.device)
-
         for _ in range(self.h_cycles):
             for _ in range(self.l_cycles):
-                z_l_hidden = self.z_l_to_hidden(z_L).unsqueeze(1).expand(B, T, self.hidden_size)
-                h = self.block(h + z_l_hidden, cos, sin, attn_mask=attn_mask)
+                z_l_hidden = self.z_l_to_hidden(z_L).unsqueeze(1).expand(B, T, H)
+                z_h_hidden = self.z_h_to_hidden(z_H).unsqueeze(1).expand(B, T, H)
+                h_in = h + z_l_hidden + z_h_hidden
+                for block in reasoning_blocks:
+                    h = block(h_in, cos, sin, attn_mask=attn_mask)
+                    h_in = h
                 z_L = self.l_transition(z_L, h)
             z_H = self.h_transition(z_H, z_L)
             z_L = self.l_transition.reset(z_H)
 
-        logits = self.lm_head(self.final_norm(h))
-        return logits, HState(z_H), LState(z_L)
+        return h, HState(z_H), LState(z_L)
