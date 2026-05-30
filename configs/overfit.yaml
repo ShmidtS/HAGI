@@ -1,0 +1,39 @@
+# Toy overfit config for smoke testing
+# Model A — Dense baseline (Stage 0). The control.
+name: overfit
+model:
+  vocab_size: 49152          # SmolLM2 tokenizer
+  hidden_size: 768
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 1
+  use_loop: false
+  use_gdr: false
+  transformer:
+    num_query_heads: 12
+    num_kv_heads: 4
+    intermediate_size: 2048
+    rope_theta: 10000.0
+    max_seq_len: 4096
+
+training:
+  optimizer: adamw           # baseline control; ablate muon separately
+  precision: bf16
+  batch_size: 4
+  grad_accum_steps: 1
+  learning_rate: 3.0e-4
+  warmup_steps: 2000
+  max_steps: 1000
+  weight_decay: 0.1
+  grad_clip: 1.0
+  seed: 42
+
+data:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"   # SmolLM2 BPE (~49K), trained on edu+code+math
+  train_tokens: 1_000_000
+  max_seq_len: 4096
+
+eval:
+  every_n_steps: 2000
+  benchmarks: [gsm8k, arc_challenge, boolq, hellaswag, winogrande]
