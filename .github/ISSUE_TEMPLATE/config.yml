@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/ShmidtS/HAGI/discussions
+    about: Ask questions, share ideas, discuss research directions.
+  - name: Security Vulnerability
+    url: https://github.com/ShmidtS/HAGI/security/advisories/new
+    about: Report security issues privately (do not open a public issue).

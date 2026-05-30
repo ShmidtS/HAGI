@@ -28,3 +28,25 @@ meta.json
 formalization/.lake/config/\[anonymous]/lakefile.olean
 formalization/.lake/config/\[anonymous]/lakefile.olean.trace
 formalization/.lake-build.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ML artifacts
+checkpoints/
+*.safetensors
+*.ckpt
+*.pt
+wandb/
+/data/
+!prototype/data/
+benchmarks/results/*/
+!benchmarks/results/.gitkeep

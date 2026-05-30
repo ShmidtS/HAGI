@@ -1,0 +1,17 @@
+# HAGI PyTorch prototype — runtime dependencies
+# Pin minor versions for reproducibility; update deliberately.
+
+torch>=2.2
+numpy>=1.26
+transformers>=4.40
+datasets>=2.19
+tokenizers>=0.19
+safetensors>=0.4
+einops>=0.8
+pyyaml>=6.0
+tqdm>=4.66
+wandb>=0.17            # experiment tracking (optional, gated by config)
+
+# Data + eval stack (SmolLM-aligned)
+datatrove>=0.2         # tokenization + sharding of FineWeb-Edu / code / math
+lm-eval>=0.4           # EleutherAI harness — GSM8K/ARC/BoolQ/... benchmarks

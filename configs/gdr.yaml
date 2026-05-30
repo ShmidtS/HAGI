@@ -1,0 +1,53 @@
+# Model D — Grade-Decomposed Recurrence (Stage 2). Full HAGI architecture.
+name: gdr
+model:
+  vocab_size: 49152          # SmolLM2 tokenizer
+  hidden_size: 768
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 3
+  use_loop: true
+  use_gdr: true
+  transformer:
+    num_query_heads: 12
+    num_kv_heads: 4
+    intermediate_size: 2048
+    rope_theta: 10000.0
+    max_seq_len: 4096
+  grades:
+    scalar: 64
+    vector: 192
+    bivector: 192
+    trivector: 64
+    residual: 256
+    scalar_momentum: 0.9
+    vector_momentum: 0.5
+
+training:
+  optimizer: adamw           # switch to "muon" for the optimizer ablation
+  precision: bf16
+  batch_size: 16
+  grad_accum_steps: 4
+  learning_rate: 3.0e-4
+  warmup_steps: 2000
+  max_steps: 50000
+  weight_decay: 0.1
+  grad_clip: 1.0
+  seed: 42
+  # Muon (only used when optimizer: muon)
+  muon_lr: 0.02
+  muon_momentum: 0.95
+  muon_ns_steps: 5
+  # GDR-specific: anneal isomorphic loss from 0 over first 20% of training.
+  lambda_iso_target: 0.01
+  iso_warmup_ratio: 0.2
+
+data:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"   # SmolLM2 BPE (~49K)
+  train_tokens: 5_000_000_000
+  max_seq_len: 4096
+
+eval:
+  every_n_steps: 2000
+  benchmarks: [gsm8k, arc_challenge, boolq, hellaswag, winogrande]
