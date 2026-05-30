@@ -1,0 +1,47 @@
+name: rtx3070_fast
+model:
+  vocab_size: 49152
+  hidden_size: 768
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 3
+  use_loop: true
+  use_gdr: true
+  gradient_checkpointing: true
+  transformer:
+    hidden_size: 768
+    num_query_heads: 12
+    num_kv_heads: 4
+    intermediate_size: 2048
+    rope_theta: 10000.0
+    max_seq_len: 2048
+  grades:
+    scalar: 64
+    vector: 192
+    bivector: 192
+    trivector: 64
+    residual: 256
+
+training:
+  optimizer: adamw
+  precision: fp16
+  batch_size: 2
+  grad_accum_steps: 4
+  learning_rate: 1.0e-3
+  warmup_steps: 500
+  max_steps: 20000
+  weight_decay: 0.1
+  grad_clip: 1.0
+  gradient_checkpointing: true
+  eval_interval: 0
+  ckpt_interval: 1000
+  log_interval: 25
+
+data:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"
+  max_seq_len: 512
+  num_workers: 2
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
