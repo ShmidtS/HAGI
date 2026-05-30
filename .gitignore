@@ -35,3 +35,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 dist/
+
+# checkpoints and model weights
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+training.log
