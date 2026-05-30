@@ -149,7 +149,9 @@ class HAGI(nn.Module):
         if self.hrm is not None:
             if self.gdr is not None:
                 if training_mode and isinstance(self.gdr, HDIMFull):
-                    gdr_state = self.gdr(h, return_state=True)
+                    num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
+                    tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
+                    gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                     h = gdr_state["fused"]
                 else:
                     h = self.gdr(h)
@@ -161,7 +163,9 @@ class HAGI(nn.Module):
             for i in range(loops):
                 if self.gdr is not None:
                     if training_mode and isinstance(self.gdr, HDIMFull):
-                        gdr_state = self.gdr(h, return_state=True)
+                        num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
+                        tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
+                        gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                         h = gdr_state["fused"]
                     else:
                         h = self.gdr(h)
