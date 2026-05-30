@@ -121,6 +121,7 @@ class HAGI(nn.Module):
         next_key_values = [] if use_cache else None
         layer_idx = 0
         gdr_output = None
+        gdr_state = None
         use_gradient_checkpointing = self.cfg.gradient_checkpointing and self.training and not use_cache
 
         def run_block(block, hidden, past=None):
@@ -146,13 +147,24 @@ class HAGI(nn.Module):
             layer_idx += 1
 
         if self.hrm is not None:
+            if self.gdr is not None:
+                if training_mode and isinstance(self.gdr, HDIMFull):
+                    gdr_state = self.gdr(h, return_state=True)
+                    h = gdr_state["fused"]
+                else:
+                    h = self.gdr(h)
+                gdr_output = h
             h, _, _ = self.hrm(h, self.reasoning, cos, sin)
             layer_idx += len(self.reasoning)
         else:
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
             for i in range(loops):
                 if self.gdr is not None:
-                    h = self.gdr(h)
+                    if training_mode and isinstance(self.gdr, HDIMFull):
+                        gdr_state = self.gdr(h, return_state=True)
+                        h = gdr_state["fused"]
+                    else:
+                        h = self.gdr(h)
                     gdr_output = h
                 for block in self.reasoning:
                     past = past_key_values[layer_idx] if past_key_values is not None else None
@@ -181,6 +193,9 @@ class HAGI(nn.Module):
             result = {"logits": logits}
             if gdr_output is not None:
                 result["auxiliary_output"] = gdr_output
+            if gdr_state is not None:
+                result["invariant_src"] = gdr_state["invariant"]
+                result["invariant_tgt"] = gdr_state["target_invariant"]
             if pre_logits_hidden is not None:
                 result["model_output"] = pre_logits_hidden
             return result
