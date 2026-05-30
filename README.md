@@ -1,70 +1,88 @@
 # HAGI — Hypercomplex Artificial General Intelligence
 
-HAGI unites a hierarchical recurrent language model architecture ([HRM-Text](https://github.com/sapientinc/HRM-Text)) with a geometric structural layer of hypercomplex invariants (HDIM) in a single Rust system with CUDA kernels via [cuda-oxide](https://github.com/NVlabs/cuda-oxide).
+HAGI unites a hierarchical recurrent language model architecture with a geometric structural layer of hypercomplex invariants (HDIM) and a Python-first training/inference stack with CUDA support.
+
+**Branches:**
+- `main` — original Rust architecture with Lean4 formalization
+- `test` — Rust end-to-end training/evaluation stack
+- `test-python` — **Python migration** (active development) with PyTorch, GDR, NARS, and GPU training
+- `experimental` — PyTorch GDR prototype and research docs
 
 ---
 
-## Concept
+## Python Stack (test-python branch)
 
-### HRM as Backbone
-The Hierarchical Recurrent Model (HRM) splits computation into two levels:
-- **L-module** — fast local refinement recurrence, responsible for token-level processing.
-- **H-module** — slow global controller recurrence, manages abstract planning.
+### Quick Start
 
-On each H-cycle the L-module performs several refinement iterations, after which the H-module integrates the result into the global hidden state.
+```bash
+# Clone and checkout branch
+git clone https://github.com/ShmidtS/HAGI.git
+cd HAGI
+git checkout test-python
 
-### HDIM as Structural Layer
-The Hypercomplex Domain Isomorphism Machine (HDIM) transforms H-module hidden states into Clifford-algebra multivectors. Key operations:
-- **Sandwich product** extracts domain-invariant encoding: `U_inv = R^{-1} ⊗ G ⊗ R`.
-- **Transfer** moves the invariant into the target domain: `G_target = R_target ⊗ U_inv ⊗ R_target^{-1}`.
-- **Geometric product** encodes both similarity (scalar/inner) and relational structure (bivector/wedge).
+# Install dependencies
+pip install -e .
 
-This lets the model "think" not merely in vector space but in a geometrically rich structure where relations between concepts are governed by rotors and bivectors.
+# Download training data (FineWeb-Edu subset)
+python scripts/download_data.py --subset 10M --output data/fineweb_10M
 
-### MoE + Hierarchical Recurrence
-Mixture-of-Experts (MoE) routes representations to specialized experts:
-- Low-level experts — local computations of the L-module.
-- Structural experts — geometric transformations of multivectors.
-- Domain experts — rotors for cross-domain transfer.
-- Memory experts — interaction with long-term context.
+# Train on RTX 3070 (8GB VRAM)
+python scripts/train_rtx3070.py --device cuda --max-steps 50000 --data-dir data/fineweb_10M --seq-len 512
 
-### Titans/TTT Memory
-Adaptive Titans/TTT-style memory updates online through gradient steps on the surprise error. Combined with HRM hierarchical states, this creates powerful long-term memory with on-the-fly domain transfer capability.
+# Chat with trained model
+python scripts/chat_rtx3070.py --checkpoint checkpoints/rtx3070/step-XXXXXXXX.pt
+```
 
----
+### Architecture
 
-## Why It Works
-
-Vector spaces discard structural information: dot-product similarity cannot distinguish "A causes B" from "B causes A". Clifford multivectors preserve the directionality of relations through grade structure (vectors, bivectors, trivectors). HRM provides hierarchical context reprocessing, while HDIM supplies a structural invariant layer resilient to domain shift.
-
----
-
-## Key Components
-
-| Component | Rust Crate | Description |
+| Component | Path | Description |
 |---|---|---|
-| Clifford core | `clifford-core` | Clifford algebra, geometric product, rotors, norms, inverses |
-| HRM model | `hrm-model` | H/L Transformer stacks, recurrent scheduler, PrefixLM attention |
-| HDIM model | `hdim-model` | Hidden → multivector projection, sandwich extraction, domain transfer |
-| MoE | `moe` | Router, dispatch/combine, Z-loss, expert orthogonalization |
-| Memory | `memory` | Titans/TTT adaptive memory with online update |
-| Losses | `losses` | CE + reconstruction + isomorphism + InfoNCE + routing + ortho + memory |
-| Training | `training` | PrefixLM packing, multipack LPT, truncated BPTT, AdamATan2 |
-| Data | `data` | Synthetic pair/triplet generation for contrastive losses |
-| CUDA kernels | `cuda-kernels` | cuda-oxide kernels: attention, Clifford ops, MoE, memory |
+| Core Types | `src/hagi/core/` | Tensor specs, shapes, layouts, algebra helpers |
+| NARS Core | `src/hagi/nars/` | Term, Truth, Budget, Sentence, Task, Concept, Bag |
+| NARS Adapters | `src/hagi/hrm/`, `hdim/`, `msa/` | Control, reasoning, sparse attention adapters |
+| Model | `src/hagi/model/` | Clifford algebra, GDR, Transformer, HAGI (4 ablations) |
+| Training | `src/hagi/train/` | Loop, optimizer (AdamW/Muon), checkpointing, config |
+| Inference | `src/hagi/inference/` | Generation with KV-cache, chat session, streaming |
+| Data | `src/hagi/data/` | Tokenizer (SmolLM2), memmap dataset, batching |
+| Eval | `src/hagi/eval/` | Golden tests, reports, lm-eval adapter |
+| Lean Bridge | `src/hagi/lean/` | Subprocess verification wrapper |
+
+### Model Configurations
+
+Four ablation variants via `HAGIConfig`:
+- **A (baseline)**: `use_loop=False, use_gdr=False` — dense transformer
+- **B (loop)**: `use_loop=True, use_gdr=False` — recurrent transformer
+- **C (HDIM)**: `use_loop=False, use_gdr=True` — Clifford projection without loop
+- **D (GDR)**: `use_loop=True, use_gdr=True` — full Grade-Decomposed Recurrence
+
+### RTX 3070 Optimized Training
+
+Config: `configs/rtx3070.yaml`
+- **GPU**: RTX 3070 Laptop 8GB
+- **Precision**: fp16 (Ampere-optimal)
+- **Model**: 53M parameters, hidden_size=512, 3 layers per stage
+- **Batch**: 1 physical + 16 gradient accumulation = effective batch 16
+- **VRAM**: ~2GB allocated during training (room for larger models)
+- **Loss**: Cross-entropy + optional GDR auxiliary + isomorphic consistency
+
+### Tests
+
+```bash
+PYTHONPATH=src python -m pytest tests/ -v
+```
+
+55+ tests covering: core types, NARS truth/budget, Clifford algebra, model variants, checkpoints, training loop, data pipeline, Lean bridge.
 
 ---
 
-## Current Status
+## Rust Stack (main/test branches)
 
-The project is in the architectural design phase.
-
-
-The first milestone (toy model, ~8 layers, 256 hidden, single-GPU forward parity) is in planning.
-
-### Platform Note
-
-This project targets [cuda-oxide](https://github.com/NVlabs/cuda-oxide) for GPU kernel compilation. cuda-oxide is Linux-only. On Windows, use WSL2 — see [`docs/WSL2-SETUP.md`](docs/WSL2-SETUP.md) for installation instructions.
+See original documentation in `docs/` for:
+- HRM hierarchical recurrent model
+- HDIM hypercomplex invariants
+- MoE + Titans/TTT memory
+- CUDA kernels via cuda-oxide
+- Lean4 formalization (`formalization/`)
 
 ---
 
