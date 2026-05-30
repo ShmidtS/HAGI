@@ -18,6 +18,8 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .gdr import GradeConfig, GradeDecomposedRecurrence
+from .hdim_full import HDIMFull
+from .hrm_full import HRMCore
 from .transformer import RMSNorm, TransformerBlock, TransformerConfig, build_rope_cache
 
 
@@ -31,13 +33,18 @@ class HAGIConfig:
     loop_count: int = 3
     use_loop: bool = True
     use_gdr: bool = True
+    hdim_full: bool = False
+    hdim_heads: int = 4
+    hrm: bool = False
+    h_dim: int = 256
+    l_dim: int = 256
     gradient_checkpointing: bool = False
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
 
     def __post_init__(self):
         assert self.hidden_size == self.transformer.hidden_size
-        if self.use_gdr:
+        if self.use_gdr and not self.hdim_full:
             assert self.hidden_size == self.grades.hidden_size, (
                 f"grade dims sum to {self.grades.hidden_size}, hidden is {self.hidden_size}"
             )
@@ -54,7 +61,25 @@ class HAGI(nn.Module):
         self.reasoning = nn.ModuleList(TransformerBlock(tcfg) for _ in range(cfg.reasoning_layers))
         self.expression = nn.ModuleList(TransformerBlock(tcfg) for _ in range(cfg.expression_layers))
 
-        self.gdr = GradeDecomposedRecurrence(cfg.grades) if cfg.use_gdr else None
+        self.gdr = None
+        if cfg.use_gdr:
+            if cfg.hdim_full:
+                self.gdr = HDIMFull(hidden_size=cfg.hidden_size, heads=cfg.hdim_heads)
+            else:
+                self.gdr = GradeDecomposedRecurrence(cfg.grades)
+        self.hrm = (
+            HRMCore(
+                vocab_size=cfg.vocab_size,
+                hidden_size=cfg.hidden_size,
+                h_dim=cfg.h_dim,
+                l_dim=cfg.l_dim,
+                h_cycles=cfg.loop_count,
+                l_cycles=cfg.reasoning_layers,
+                transformer=tcfg,
+            )
+            if cfg.use_loop and cfg.hrm
+            else None
+        )
 
         loops = cfg.loop_count if cfg.use_loop else 1
         self.iter_embed = nn.Parameter(torch.zeros(loops, cfg.hidden_size))
@@ -87,6 +112,19 @@ class HAGI(nn.Module):
         (caller does the shift, or passes -100 for masked positions).
         """
         B, T = input_ids.shape
+        if self.hrm is not None:
+            logits, _, _ = self.hrm(input_ids)
+            if targets is not None:
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)).float(),
+                    targets.reshape(-1),
+                    ignore_index=ignore_index,
+                )
+                return logits, loss
+            if use_cache:
+                return logits, []
+            return logits
+
         cache_pos = 0
         if past_key_values is not None and len(past_key_values) > 0:
             first = past_key_values[0]

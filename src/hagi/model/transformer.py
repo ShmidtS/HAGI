@@ -80,7 +80,7 @@ class GroupedQueryAttention(nn.Module):
         self.v_proj = nn.Linear(cfg.hidden_size, self.nkv * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.nq * self.head_dim, cfg.hidden_size, bias=False)
 
-    def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False):
+    def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None):
         B, T, _ = x.shape
         q = self.q_proj(x).view(B, T, self.nq, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.nkv, self.head_dim).transpose(1, 2)
@@ -95,12 +95,12 @@ class GroupedQueryAttention(nn.Module):
         rep = self.nq // self.nkv
         attn_k = k.repeat_interleave(rep, dim=1)
         attn_v = v.repeat_interleave(rep, dim=1)
-        is_causal = past_key_value is None
+        is_causal = attn_mask is None and past_key_value is None
         if q.is_cuda and hasattr(torch.backends.cuda, "sdp_kernel"):
             with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True):
-                out = F.scaled_dot_product_attention(q, attn_k, attn_v, is_causal=is_causal)
+                out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
         else:
-            out = F.scaled_dot_product_attention(q, attn_k, attn_v, is_causal=is_causal)
+            out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out
@@ -133,11 +133,12 @@ class TransformerBlock(nn.Module):
         past_key_value=None,
         use_cache: bool = False,
         gradient_checkpointing: bool = False,
+        attn_mask=None,
     ):
         use_checkpoint = gradient_checkpointing and self.training and not use_cache
         if use_checkpoint:
             attn_out = checkpoint(
-                lambda h, c, s: self.attn(self.attn_norm(h), c, s),
+                lambda h, c, s: self.attn(self.attn_norm(h), c, s, attn_mask=attn_mask),
                 x,
                 cos,
                 sin,
@@ -145,7 +146,7 @@ class TransformerBlock(nn.Module):
             )
             next_key_value = None
         else:
-            attn_out = self.attn(self.attn_norm(x), cos, sin, past_key_value, use_cache)
+            attn_out = self.attn(self.attn_norm(x), cos, sin, past_key_value, use_cache, attn_mask)
             if use_cache:
                 attn_out, next_key_value = attn_out
             else:
