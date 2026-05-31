@@ -73,8 +73,16 @@ def gpu_util(device: str) -> str:
 def maybe_compile(model: HAGI, device: str) -> torch.nn.Module:
     if not device.startswith("cuda") or not hasattr(torch, "compile"):
         return model
+    if platform.system() == "Windows" and importlib.util.find_spec("triton") is None:
+        print("torch.compile skipped: triton unavailable on Windows (install triton-windows or use WSL)")
+        return model
     try:
-        return torch.compile(model)  # type: ignore[return-value]
+        compiled = torch.compile(model, mode="reduce-overhead")  # type: ignore[return-value]
+        # Verify compilation works with a dummy forward pass before returning
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, dtype=torch.long, device=device)
+            compiled(dummy)
+        return compiled
     except Exception as exc:
         print(f"torch.compile skipped: {exc}")
         return model
@@ -109,7 +117,7 @@ def main() -> None:
     train_path = resolve_train_path(cfg, args.train_path, args.data_dir)
     seq_len = int(data_cfg.get("max_seq_len", 512))
     batch_size = int(train_cfg.get("batch_size", 2))
-    num_workers = int(data_cfg.get("num_workers", 2))
+    num_workers = int(data_cfg.get("num_workers", 4))
     pin_memory = bool(data_cfg.get("pin_memory", args.device.startswith("cuda")))
     dataloader = get_memmap_dataloader(
         train_path,

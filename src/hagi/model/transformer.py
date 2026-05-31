@@ -96,11 +96,9 @@ class GroupedQueryAttention(nn.Module):
         attn_k = k.repeat_interleave(rep, dim=1)
         attn_v = v.repeat_interleave(rep, dim=1)
         is_causal = attn_mask is None and past_key_value is None
-        if q.is_cuda and hasattr(torch.backends.cuda, "sdp_kernel"):
-            with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True):
-                out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
-        else:
-            out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
+        # PyTorch 2.0+ automatically selects flash-attention backend on Ampere+ when
+        # head_dim <= 128 and dtype is FP16/BF16; no explicit context manager needed.
+        out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out

@@ -152,6 +152,7 @@ class HAGI(nn.Module):
                     num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                     tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
                     gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
+                    pre_gdr_h = h.clone()
                     h = gdr_state["fused"]
                 else:
                     h = self.gdr(h)
@@ -166,6 +167,7 @@ class HAGI(nn.Module):
                         num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                         tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
                         gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
+                        pre_gdr_h = h.clone()
                         h = gdr_state["fused"]
                     else:
                         h = self.gdr(h)
@@ -198,8 +200,8 @@ class HAGI(nn.Module):
             if gdr_output is not None:
                 result["auxiliary_output"] = gdr_output
             if gdr_state is not None:
-                result["invariant_src"] = gdr_state["invariant"]
-                result["invariant_tgt"] = gdr_state["target_invariant"]
+                result["invariant_src"] = pre_gdr_h
+                result["invariant_tgt"] = gdr_state["fused"]
             if pre_logits_hidden is not None:
                 result["model_output"] = pre_logits_hidden
             return result

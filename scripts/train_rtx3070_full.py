@@ -62,8 +62,10 @@ def lr_at(step: int, max_steps: int, warmup_steps: int, learning_rate: float, mi
     return learning_rate * min_lr_ratio + coeff * learning_rate * (1.0 - min_lr_ratio)
 
 
-def scheduled_weight(step: int, start: float, final: float, warmup_steps: int) -> float:
+def scheduled_weight(step: int, start: float, final: float, warmup_steps: int, mode: str = "linear") -> float:
     progress = min(1.0, step / max(1, warmup_steps))
+    if mode == "cosine":
+        progress = 0.5 * (1.0 - math.cos(math.pi * progress))
     return start + (final - start) * progress
 
 
@@ -88,11 +90,21 @@ def gpu_util(device: str) -> str:
 def maybe_compile(model: HAGI, device: str) -> torch.nn.Module:
     if not device.startswith("cuda") or not hasattr(torch, "compile"):
         return model
-    if platform.system() == "Windows" and importlib.util.find_spec("triton") is None:
-        print("torch.compile skipped: triton is not available on Windows")
-        return model
+    if platform.system() == "Windows":
+        if importlib.util.find_spec("triton") is None:
+            print("torch.compile skipped: triton unavailable on Windows (install triton-windows or use WSL)")
+            return model
+        import shutil
+        if shutil.which("cl") is None and shutil.which("cl.exe") is None:
+            print("torch.compile skipped: MSVC compiler (cl) not found on Windows")
+            return model
     try:
-        return torch.compile(model)  # type: ignore[return-value]
+        compiled = torch.compile(model, mode="reduce-overhead")  # type: ignore[return-value]
+        # Verify compilation works with a dummy forward pass before returning
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, dtype=torch.long, device=device)
+            compiled(dummy)
+        return compiled
     except Exception as exc:
         print(f"torch.compile skipped: {exc}")
         return model
@@ -136,7 +148,7 @@ def build_dataloader(
     data_cfg = cfg.get("data", {})
     seq_len = int(data_cfg.get("max_seq_len", 512))
     batch_size = int(train_cfg.get("batch_size", 2))
-    num_workers = int(data_cfg.get("num_workers", 2))
+    num_workers = int(data_cfg.get("num_workers", 4))
     pin_memory = bool(data_cfg.get("pin_memory", device.startswith("cuda")))
     dtype = data_cfg.get("dtype", "uint16")
 
@@ -203,6 +215,16 @@ def compute_loss(
         invariant_tgt=model_output.get("invariant_tgt") if isinstance(model_output, dict) else None,
     )
     return losses["L_total"], {name: value.detach().float().item() for name, value in losses.items()}
+
+
+def get_grad_norm(model: torch.nn.Module) -> float:
+    """Compute the L2 norm of gradients across all parameters."""
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.float().norm(2).item()
+            total_norm += param_norm * param_norm
+    return math.sqrt(total_norm)
 
 
 def update_ema(model: torch.nn.Module, model_ema: torch.nn.Module, decay: float) -> None:
@@ -301,8 +323,11 @@ def main() -> None:
     w_iso_start = float(train_cfg.get("w_iso_start", 0.0))
     w_iso_final = float(train_cfg.get("w_iso_final", composite_weights.get("w_iso", 0.01) if composite_weights else 0.01))
     iso_warmup_steps = int(train_cfg.get("iso_warmup_steps", train_cfg.get("iso_warmup", 5000)))
-    ema_decay = float(train_cfg.get("ema_decay", 0.999))
-    ema_start_step = int(train_cfg.get("ema_start_step", 1000))
+    loss_warmup_mode = str(train_cfg.get("loss_warmup_mode", "linear"))
+    ema_cfg = train_cfg.get("ema", {})
+    ema_decay = float(ema_cfg.get("decay", train_cfg.get("ema_decay", 0.999)))
+    ema_start_step = int(ema_cfg.get("start_step", train_cfg.get("ema_start_step", 1000)))
+    optimizer_kind = str(train_cfg.get("optimizer", "adamw")).lower()
     magic_norm_max = float(train_cfg.get("magic_norm_max", 1.0))
     train_path = resolve_train_path(cfg, args.data_dir)
     dataloader, batch_size, seq_len, pin_memory = build_dataloader(
@@ -331,14 +356,17 @@ def main() -> None:
     last_components: dict[str, float] = {}
 
     for step in range(max_steps):
-        lr = lr_at(step, max_steps, warmup_steps, learning_rate, min_lr_ratio)
+        if optimizer_kind == "schedule-free-adamw":
+            lr = learning_rate
+        else:
+            lr = lr_at(step, max_steps, warmup_steps, learning_rate, min_lr_ratio)
         for group in optimizer.param_groups:
             group["lr"] = lr
         effective_weights = None
         if composite_weights is not None:
             effective_weights = dict(composite_weights)
-            effective_weights["w_aux"] = scheduled_weight(step, w_aux_start, w_aux_final, aux_warmup_steps)
-            effective_weights["w_iso"] = scheduled_weight(step, w_iso_start, w_iso_final, iso_warmup_steps)
+            effective_weights["w_aux"] = scheduled_weight(step, w_aux_start, w_aux_final, aux_warmup_steps, loss_warmup_mode)
+            effective_weights["w_iso"] = scheduled_weight(step, w_iso_start, w_iso_final, iso_warmup_steps, loss_warmup_mode)
 
         optimizer.zero_grad(set_to_none=True)
         accum_loss = 0.0
@@ -378,7 +406,12 @@ def main() -> None:
 
         if use_scaler:
             scaler.unscale_(optimizer)
-        if grad_clip > 0:
+
+        full_grad_norm = get_grad_norm(model)
+        if full_grad_norm > 100.0 or (0.0 < full_grad_norm < 1e-6):
+            print(f"WARNING: extreme grad_norm {full_grad_norm:.2e} at step {step}")
+
+        if grad_clip > 0 and full_grad_norm >= grad_clip / 10.0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
         if use_scaler:
@@ -403,8 +436,8 @@ def main() -> None:
             eval_model = "ema" if step >= ema_start_step else "model"
             print(
                 f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
-                f"ema_decay {ema_decay:.4f} | eval_model {eval_model} | magic_norm_max_grad {magic_norm_max_grad:.4f} | "
-                f"tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}"
+                f"ema_decay {ema_decay:.4f} | eval_model {eval_model} | grad_norm {full_grad_norm:.2e} | "
+                f"magic_norm_max_grad {magic_norm_max_grad:.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}"
             )
             tokens_since_log = 0
             last_log_time = now
