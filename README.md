@@ -27,10 +27,10 @@ pip install -e .
 python scripts/download_data.py --subset 10M --output data/fineweb_10M
 
 # Train on RTX 3070 (8GB VRAM)
-python scripts/train_rtx3070.py --device cuda --max-steps 50000 --data-dir data/fineweb_10M --seq-len 512
+python scripts/train.py --config configs/rtx3070.yaml --device cuda --max-steps 50000 --data-dir data/fineweb_10M --seq-len 512
 
 # Chat with trained model
-python scripts/chat_rtx3070.py --checkpoint checkpoints/rtx3070/step-XXXXXXXX.pt
+python scripts/chat.py --config configs/rtx3070.yaml --checkpoint checkpoints/rtx3070/step-XXXXXXXX.pt
 ```
 
 ### Architecture
