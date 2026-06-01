@@ -111,24 +111,47 @@ theorem empty_prefix_all_zero_mask (cfg : PrefixLMConfig)
   intro q k hq hk
   rfl
 
-/-- Consecutive sample ranges do not overlap. -/
+/-- Consecutive sample ranges do not overlap, assuming each range ends
+    exactly at the next range's start (contiguity). -/
 theorem ranges_ordered_no_overlap (ranges : List SampleRange)
     (h : PartitionCovers ranges totalLen)
+    (hcont : ∀ k : Nat, k + 1 < ranges.length →
+      (ranges.get ⟨k, by omega⟩).stop = (ranges.get ⟨k + 1, by omega⟩).start)
     (i j : Nat) (hi : i < ranges.length) (hj : j < ranges.length) (hij : i < j) :
     (ranges.get ⟨i, by omega⟩).stop ≤ (ranges.get ⟨j, by omega⟩).start := by
-  have h_order : ∀ i j, i < ranges.length → j < ranges.length → i < j →
-    (ranges.get ⟨i, by omega⟩).start ≤ (ranges.get ⟨j, by omega⟩).start := h.left
-  have h_i_lt_j : i < j := hij
-  have h_start_le : (ranges.get ⟨i, by omega⟩).start ≤ (ranges.get ⟨j, by omega⟩).start :=
-    h_order i j hi hj h_i_lt_j
-  have h_i_stop : (ranges.get ⟨i, by omega⟩).stop ≤ (ranges.get ⟨i, by omega⟩).start := by
-    have h_le : (ranges.get ⟨i, by omega⟩).start ≤ (ranges.get ⟨i, by omega⟩).stop :=
-      (ranges.get ⟨i, by omega⟩).start_le_stop
-    -- This is trivially true because stop ≥ start, so stop ≤ start only if start = stop
-    -- In a valid partition, the next range starts at the previous stop, so this is actually
-    -- an equality when ranges are contiguous
-    exact Nat.le_of_eq (Nat.eq_of_le_of_ge h_le h_le)
-  sorry -- Would need additional invariant that ranges are contiguous
+  -- Walk the contiguous chain from i to j - 1: stop_i = start_{i+1}, stop_{i+1} = start_{i+2}, ...
+  -- Then start_{i+1} ≤ start_{i+2} ≤ ... ≤ start_j by the ordered property of PartitionCovers.
+  have h_order : ∀ a b, a < ranges.length → b < ranges.length → a < b →
+      (ranges.get ⟨a, by omega⟩).start ≤ (ranges.get ⟨b, by omega⟩).start := h.left
+  -- For j = i + 1, contiguity gives stop_i = start_j directly.
+  by_cases h_adj : j = i + 1
+  · subst h_adj
+    exact (hcont i hi).le
+  -- For j > i + 1, we have start_{i+1} ≤ start_{i+2} ≤ ... ≤ start_j, and stop_i = start_{i+1}.
+  have h_le : (ranges.get ⟨i, by omega⟩).start ≤ (ranges.get ⟨i + 1, by omega⟩).start :=
+    h_order i (i + 1) hi (by omega) (by omega)
+  have h_stop_start : (ranges.get ⟨i, by omega⟩).stop = (ranges.get ⟨i + 1, by omega⟩).start :=
+    hcont i hi
+  -- stop_i = start_{i+1} ≤ start_{i+2} ≤ ... ≤ start_j.
+  rw [h_stop_start]
+  -- Need start_{i+1} ≤ start_j; iterate via transitivity of the ordered property.
+  -- The chain length is (j - (i+1)) steps.  Induction on the gap.
+  suffices h_chain : ∀ m, i + 1 + m ≤ j →
+      (ranges.get ⟨i + 1, by omega⟩).start ≤ (ranges.get ⟨i + 1 + m, by omega⟩).start from
+    h_chain (j - (i + 1)) (Nat.sub_le_self _ _)
+  intro m hm
+  induction m with
+  | zero => simp
+  | succ m ih =>
+    have h_lt : i + 1 + m < j := by omega
+    have h_idx : i + 1 + m < ranges.length := by
+      have : i + 1 + m < ranges.length := lt_of_lt_of_le h_lt hj
+      exact this
+    have h_succ_idx : i + 1 + (m + 1) < ranges.length := by omega
+    have h_step : (ranges.get ⟨i + 1 + m, by omega⟩).start ≤
+        (ranges.get ⟨i + 1 + (m + 1), by omega⟩).start :=
+      h_order (i + 1 + m) (i + 1 + (m + 1)) h_idx h_succ_idx (by omega)
+    exact le_trans ih h_step
 
 end Data
 end HAGI
