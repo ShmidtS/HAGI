@@ -113,6 +113,15 @@ The guiding rule: **validate the hypothesis cheaply before investing in infrastr
 
 **Stop/pivot if:** MLA degrades quality >2% → increase latent dim to 192/256. Memory slots don't help → remove them.
 
+**Deferred efficiency option — KV-cache rotation quantization.** Rotation-based
+KV quant (OScaR / QuaRot / SpinQuant family) rotates K/V so outlier energy
+spreads across dimensions, then quantizes to low-bit with small error. It is a
+serving-side memory lever — it reduces *bytes per token*; context cost stays
+linear in token count, so it is not a substitute for MLA/state compression.
+Consider only after MLA parity holds, and only as one isolated variable. It
+operates in KV feature space (`head_dim`); it has no special alignment to GDR's
+Clifford grades — treat any such claim as unproven.
+
 **Estimated effort:** 4 weeks.
 
 ---
@@ -133,6 +142,18 @@ The guiding rule: **validate the hypothesis cheaply before investing in infrastr
 - Model runs on consumer GPU (8-16GB) / CPU
 
 **Stop/pivot if:** 4-bit drops >5% → use Q5_K/Q6_K. Reasoning degrades more than knowledge → mixed-precision (keep reasoning layers higher precision).
+
+**Deferred efficiency option — 1-bit / ternary weights.** Native ternary
+`{-1,0,+1}` weights (BitNet b1.58 line) are the proven ultra-low-bit path; pure
+binary `{-1,+1}` is strictly weaker. Caveat: 1-bit is a *storage + memory-
+bandwidth* win at inference, not a free capacity gain — ternary matches FP16 only
+at equal param count and equal token budget, and the win requires **native** low-
+bit training (post-hoc quantization to 1-bit collapses quality), so it is its own
+training run, not a Stage-4 export step. Evaluate only on a GDR architecture
+already validated at Stage 2 — never bundle it into the core experiment. Out of
+scope as described in early concept notes: "1-bit + MoE-ensemble + Clifford-KV"
+stacks (multiple unproven mechanisms at once, and the claim that Clifford grades
+absorb quantization noise has no mechanism — do not pursue).
 
 **Estimated effort:** 3 weeks.
 
