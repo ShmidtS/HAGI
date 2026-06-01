@@ -48,7 +48,10 @@ def main():
     ap.add_argument("--val-data", default=None, help="optional validation shard directory")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--resume", default=None,
-                    help="checkpoint path, or 'auto' to resume the latest in checkpoints/<name>/")
+                    help="checkpoint path, or 'auto' to resume the latest in <ckpt-dir>/<name>/")
+    ap.add_argument("--ckpt-dir", default=None,
+                    help="root dir for checkpoints (default: checkpoints/). On cloud, point at "
+                         "persistent storage, e.g. /content/drive/MyDrive/hagi or /kaggle/working")
     args = ap.parse_args()
 
     # TF32 matmul on Ampere+ — free ~1.3-2x on fp32 paths, harmless on older GPUs.
@@ -64,7 +67,7 @@ def main():
     optimizer = build_optimizer(model, tcfg)
 
     # Resume must restore into the uncompiled model+optimizer before compiling.
-    ckpt_dir = f"checkpoints/{cfg['name']}"
+    ckpt_dir = f"{args.ckpt_dir or 'checkpoints'}/{cfg['name']}"
     start_step = 0
     if args.resume:
         path = latest_checkpoint(ckpt_dir) if args.resume == "auto" else args.resume
