@@ -62,7 +62,9 @@ def _is_muon_param(name: str, p: nn.Parameter) -> bool:
         return False
     lowered = name.lower()
     excluded = ("embed", "lm_head", "norm", "iter_embed", "gate")
-    return not any(tok in lowered for tok in excluded)
+    if any(tok in lowered for tok in excluded):
+        return False
+    return True
 
 
 class ScheduleFreeAdamW(torch.optim.Optimizer):
@@ -247,7 +249,7 @@ class AdamMini(torch.optim.Optimizer):
 
 
 class CombinedOptimizer:
-    """Steps several optimizers together; exposes a unified zero_grad/step."""
+    """Steps several optimizers together; exposes a unified zero_grad/step/state_dict."""
 
     def __init__(self, optimizers: list[torch.optim.Optimizer]):
         self.optimizers = optimizers
@@ -267,6 +269,40 @@ class CombinedOptimizer:
             groups.extend(opt.param_groups)
         return groups
 
+    def state_dict(self):
+        return {f"opt_{i}": opt.state_dict() for i, opt in enumerate(self.optimizers)}
+
+    def load_state_dict(self, state_dict):
+        for i, opt in enumerate(self.optimizers):
+            key = f"opt_{i}"
+            if key not in state_dict:
+                raise KeyError(f"CombinedOptimizer.load_state_dict: missing key {key!r}")
+            opt.load_state_dict(state_dict[key])
+
+
+def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict) -> "CombinedOptimizer":
+    """Muon on 2D hidden weights + AdamW on 1D/embed/head. arch_decision §Optimizer."""
+    adamw_lr = float(cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
+    wd = float(cfg.get("weight_decay", 0.1))
+    betas = tuple(cfg.get("betas", (0.9, 0.95)))
+    eps = float(cfg.get("eps", 1e-8))
+    muon_params = [p for n, p in named if _is_muon_param(n, p)]
+    adam_params = [p for n, p in named if not _is_muon_param(n, p)]
+    muon = Muon(
+        muon_params,
+        lr=float(cfg.get("muon_lr", 0.02)),
+        momentum=float(cfg.get("muon_momentum", 0.95)),
+        ns_steps=int(cfg.get("muon_ns_steps", 5)),
+    )
+    adam = torch.optim.AdamW(
+        adam_params,
+        lr=adamw_lr,
+        betas=betas,
+        eps=eps,
+        weight_decay=0.0,
+    )
+    return CombinedOptimizer([muon, adam])
+
 
 def build_optimizer(model: nn.Module, cfg: dict):
     """Build AdamW or Muon+AdamW from a training-config dict."""
@@ -277,6 +313,9 @@ def build_optimizer(model: nn.Module, cfg: dict):
     eps = cfg.get("eps", 1e-8)
 
     named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+
+    if kind in ("muon", "muon_adamw"):
+        return _build_muon_adamw(named, cfg)
 
     if kind == "adamw":
         decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
@@ -313,16 +352,6 @@ def build_optimizer(model: nn.Module, cfg: dict):
             block_size=cfg.get("adam_mini_block_size", 128),
         )
 
-    if kind == "muon":
-        muon_params = [p for n, p in named if _is_muon_param(n, p)]
-        adam_params = [p for n, p in named if not _is_muon_param(n, p)]
-        muon = Muon(
-            muon_params,
-            lr=cfg.get("muon_lr", 0.02),
-            momentum=cfg.get("muon_momentum", 0.95),
-            ns_steps=cfg.get("muon_ns_steps", 5),
-        )
-        adam = torch.optim.AdamW(adam_params, lr=lr, betas=betas, eps=eps, weight_decay=0.0)
-        return CombinedOptimizer([muon, adam])
-
-    raise ValueError(f"unknown optimizer: {kind!r} (expected 'adamw', 'schedule-free-adamw', 'adam-mini' or 'muon')")
+    raise ValueError(
+        f"unknown optimizer: {kind!r} (expected 'adamw', 'muon_adamw', 'schedule-free-adamw' or 'adam-mini')"
+    )

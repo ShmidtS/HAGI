@@ -10,6 +10,7 @@ A single class covers all four ablation models via config flags:
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 
 import torch
@@ -23,6 +24,13 @@ from .hrm_full import HRMCore
 from .transformer import RMSNorm, TransformerBlock, TransformerConfig, build_rope_cache
 
 
+def _pick_rotor_idx(seed: int, step: int, num_rotors: int) -> int:
+    """Pick a target rotor index via CPU Python RNG (no GPU sync)."""
+    if num_rotors <= 1:
+        return 0
+    return random.Random(int(seed) + int(step)).randint(1, num_rotors - 1)
+
+
 @dataclass
 class HAGIConfig:
     vocab_size: int = 32000
@@ -30,16 +38,21 @@ class HAGIConfig:
     perception_layers: int = 4
     reasoning_layers: int = 4
     expression_layers: int = 4
-    loop_count: int = 3
+    loop_count: int = 1
     use_loop: bool = True
     use_gdr: bool = True
     hdim_full: bool = False
     hdim_heads: int = 4
     hdim_delay_steps: int = 1
     hrm: bool = False
+    hrm_h_cycles: int = 1
+    hrm_l_cycles: int = 2
     h_dim: int = 256
     l_dim: int = 256
     gradient_checkpointing: bool = False
+    rotor_seed: int = 42
+    use_hdim_cross_domain: bool = False
+    use_msa: bool = False
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
 
@@ -65,14 +78,14 @@ class HAGI(nn.Module):
         self.gdr = None
         if cfg.use_gdr:
             if cfg.hdim_full:
-                if cfg.hdim_delay_steps > 1:
-                    self.gdr = DelayedHDIM(
-                        hidden_size=cfg.hidden_size,
-                        heads=cfg.hdim_heads,
-                        delay_steps=cfg.hdim_delay_steps,
-                    )
-                else:
-                    self.gdr = HDIMFull(hidden_size=cfg.hidden_size, heads=cfg.hdim_heads)
+                hdim_module = DelayedHDIM(
+                    hidden_size=cfg.hidden_size,
+                    heads=cfg.hdim_heads,
+                    delay_steps=cfg.hdim_delay_steps,
+                ) if cfg.hdim_delay_steps > 1 else HDIMFull(hidden_size=cfg.hidden_size, heads=cfg.hdim_heads)
+                if not getattr(cfg, "use_hdim_cross_domain", False):
+                    hdim_module.use_hdim_cross_domain = False
+                self.gdr = hdim_module
             else:
                 self.gdr = GradeDecomposedRecurrence(cfg.grades)
         self.hrm = (
@@ -80,8 +93,8 @@ class HAGI(nn.Module):
                 hidden_size=cfg.hidden_size,
                 h_dim=cfg.h_dim,
                 l_dim=cfg.l_dim,
-                h_cycles=cfg.loop_count,
-                l_cycles=cfg.reasoning_layers,
+                h_cycles=cfg.hrm_h_cycles,
+                l_cycles=cfg.hrm_l_cycles,
             )
             if cfg.hrm
             else None
@@ -95,6 +108,7 @@ class HAGI(nn.Module):
         self.lm_head.weight = self.embed.weight  # weight tying
 
         self._rope = {}
+        self._step = 0
 
     def _rope_cache(self, T: int, device, dtype, offset: int = 0):
         if hasattr(self, "_rope_cos") and hasattr(self, "_rope_sin"):
@@ -135,6 +149,8 @@ class HAGI(nn.Module):
         gdr_output = None
         gdr_state = None
         use_gradient_checkpointing = self.cfg.gradient_checkpointing and self.training and not use_cache
+        if self.training:
+            self._step += 1
 
         def run_block(block, hidden, past=None):
             if use_gradient_checkpointing:
@@ -166,7 +182,7 @@ class HAGI(nn.Module):
                     and self.gdr.delay_steps > 1
                 ):
                     num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                    tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
+                    tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
                     h, _, _, gdr_state, pre_gdr_h = self.hrm(
                         h,
                         self.reasoning,
@@ -178,7 +194,7 @@ class HAGI(nn.Module):
                     )
                 elif training_mode and isinstance(self.gdr, HDIMFull):
                     num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                    tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
+                    tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
                     gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                     pre_gdr_h = h.clone()
                     h = gdr_state["fused"]
@@ -200,7 +216,7 @@ class HAGI(nn.Module):
                         and self.gdr.delay_steps > 1
                     ):
                         num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                        tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
+                        tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
                         for j, block in enumerate(self.reasoning):
                             current_step = i * len(self.reasoning) + j
                             gdr_state = self.gdr(
@@ -222,7 +238,7 @@ class HAGI(nn.Module):
                             layer_idx += 1
                     elif training_mode and isinstance(self.gdr, HDIMFull):
                         num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                        tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
+                        tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
                         gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                         pre_gdr_h = h.clone()
                         h = gdr_state["fused"]

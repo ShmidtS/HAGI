@@ -15,8 +15,9 @@ import numpy as np
 class MSAAdapter:
     """Sparse attention routing from NARS task priorities."""
 
-    def __init__(self, top_k: int | None = None) -> None:
+    def __init__(self, top_k: int | None = None, enabled: bool = True) -> None:
         self.top_k = top_k
+        self.enabled = bool(enabled)
 
     def build_mask(self, tasks: Iterable[Task], seq_len: int) -> Any:
         task_list = list(tasks)
@@ -26,7 +27,7 @@ class MSAAdapter:
             mask = torch.zeros((seq_len, seq_len), dtype=torch.bool)
         else:
             mask = np.zeros((seq_len, seq_len), dtype=bool)
-        if seq_len == 0:
+        if seq_len == 0 or not self.enabled:
             return mask
 
         selected = self._selected_indices(task_list, seq_len)
@@ -41,6 +42,8 @@ class MSAAdapter:
 
     def route_kv(self, tasks: Iterable[Task], k: Any, v: Any) -> tuple[Any, Any]:
         seq_len = int(k.shape[-2])
+        if not self.enabled:
+            return k[..., :0, :], v[..., :0, :]
         selected = self._selected_indices(list(tasks), seq_len)
         if not selected:
             return k[..., :0, :], v[..., :0, :]

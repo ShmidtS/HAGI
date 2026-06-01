@@ -1,0 +1,91 @@
+# Canonical RTX 3070 8GB config — G005 implementation
+# Source of truth: .omc/ultragoal/research/arch_decision.md §Canonical Config
+name: rtx3070_canonical
+
+model:
+  vocab_size: 49152                # SmolLM2 BPE
+  hidden_size: 768
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 1
+  use_loop: false
+  use_gdr: true
+  hdim_full: false                 # gated: HDIMFull cross-domain disabled
+  use_hdim_cross_domain: false     # arch_decision §HDIM gate
+  hdim_heads: 4
+  hdim_delay_steps: 1
+  hrm: false
+  hrm_h_cycles: 1                  # arch_decision §HRM (h=1)
+  hrm_l_cycles: 2                  # arch_decision §HRM (l=2)
+  h_dim: 256
+  l_dim: 256
+  rotor_seed: 42
+  use_msa: false                   # arch_decision §MSA: disabled for pretrain
+  gradient_checkpointing: true
+  transformer:
+    hidden_size: 768
+    num_query_heads: 12
+    num_kv_heads: 4
+    intermediate_size: 2048
+    rope_theta: 10000.0
+    max_seq_len: 2048
+    norm: rmsnorm                  # arch_decision §Norm
+    qk_norm: true                  # arch_decision §Norm
+  grades:
+    scalar: 64
+    vector: 192
+    bivector: 192
+    trivector: 64
+    residual: 256
+
+training:
+  optimizer: muon_adamw            # arch_decision §Optimizer
+  muon_lr: 0.02
+  adamw_lr: 0.0003
+  muon_momentum: 0.95
+  muon_ns_steps: 5
+  schedule: wsd                    # arch_decision §Schedule
+  warmup_steps: 200
+  cooldown_frac: 0.05
+  min_lr_ratio: 0.1
+  max_steps: 2000
+  batch_size: 2
+  grad_accum_steps: 8
+  precision: bf16
+  weight_decay: 0.1
+  grad_clip: 1.0
+  gradient_checkpointing: true
+  use_prefix_lm: false
+  loss_warmup_mode: linear
+  ema:
+    decay: 0.9995
+    start_step: 200
+  composite_loss:
+    w_ce: 1.0
+    w_aux: 0.1
+    w_iso: 0.01
+  magic_norm_max: 1.0
+  eval_interval: 0
+  eval_samples: 500
+  log_interval: 25
+  ckpt_interval: 200
+  seed: 42
+
+data:
+  tokenizer: HuggingFaceTB/SmolLM2-135M
+  train_tokens: 200000000
+  max_seq_len: 2048
+  packing: bfd                     # arch_decision §Data
+  dataset_mode: memmap_packed
+  num_workers: 2
+  pin_memory: true
+  mix:                             # arch_decision §Data
+    edu: 0.70
+    cosmopedia: 0.15
+    smoltalk: 0.10
+    stackv2_py: 0.05
+
+eval:
+  every_n_steps: 2000
+  benchmarks: [gsm8k, arc_challenge, boolq, hellaswag, winogrande]

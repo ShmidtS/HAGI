@@ -23,6 +23,8 @@ class TransformerConfig:
     rope_theta: float = 10000.0
     norm_eps: float = 1e-6
     max_seq_len: int = 4096
+    norm: str = "rmsnorm"
+    qk_norm: bool = False
 
     def __post_init__(self):
         assert self.hidden_size % self.num_query_heads == 0, (
@@ -79,6 +81,10 @@ class GroupedQueryAttention(nn.Module):
         self.k_proj = nn.Linear(cfg.hidden_size, self.nkv * self.head_dim, bias=False)
         self.v_proj = nn.Linear(cfg.hidden_size, self.nkv * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.nq * self.head_dim, cfg.hidden_size, bias=False)
+        self.qk_norm_enabled = bool(getattr(cfg, "qk_norm", False))
+        if self.qk_norm_enabled:
+            self.q_norm = RMSNorm(self.head_dim, cfg.norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, cfg.norm_eps)
 
     def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None):
         B, T, _ = x.shape
@@ -87,6 +93,9 @@ class GroupedQueryAttention(nn.Module):
         v = self.v_proj(x).view(B, T, self.nkv, self.head_dim).transpose(1, 2)
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
+        if self.qk_norm_enabled:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
         if past_key_value is not None:
             past_key, past_value = past_key_value
             k = torch.cat([past_key, k], dim=2)

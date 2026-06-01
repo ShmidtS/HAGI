@@ -11,6 +11,54 @@ from hagi.data.tokenizer import SMOLLM2_TOKENIZER, TokenizerWrapper
 
 DATASET_NAME = "HuggingFaceFW/fineweb-edu"
 
+# arch_decision §Data: 70% FineWeb-Edu / 15% Cosmopedia v2 / 10% SmolTalk / 5% Stack v2 Python.
+DEFAULT_MIX = {
+    "edu": 0.70,
+    "cosmopedia": 0.15,
+    "smoltalk": 0.10,
+    "stackv2_py": 0.05,
+}
+
+# Named mix presets accepted by --mix.
+MIX_PRESETS: dict[str, dict[str, float]] = {
+    "edu70_cosmo15_chat10_code5": dict(DEFAULT_MIX),
+    "default": dict(DEFAULT_MIX),
+}
+
+
+def parse_mix(value: str | None) -> dict[str, float]:
+    """Parse --mix flag into a {source: ratio} dict.
+
+    Accepts a preset name (looked up in MIX_PRESETS) or a comma-separated
+    ``name:ratio`` list. Ratios are normalized to sum to 1.0.
+    """
+    if not value:
+        return dict(DEFAULT_MIX)
+    if value in MIX_PRESETS:
+        return dict(MIX_PRESETS[value])
+    out: dict[str, float] = {}
+    for part in value.split(","):
+        if ":" not in part:
+            raise ValueError(f"invalid --mix segment {part!r} (expected name:ratio)")
+        name, ratio = part.split(":", 1)
+        out[name.strip()] = float(ratio)
+    total = sum(out.values()) or 1.0
+    return {name: ratio / total for name, ratio in out.items()}
+
+
+def write_mix_manifest(output_dir: Path, mix: dict[str, float], packing: str = "bfd") -> Path:
+    """Write data/mix.json manifest (no actual download, code path only)."""
+    import json
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "mix.json"
+    payload = {
+        "version": 1,
+        "packing": packing,
+        "sources": [{"name": name, "ratio": ratio} for name, ratio in mix.items()],
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
 
 def parse_token_count(value: str) -> int:
     text = value.strip().lower().replace("_", "")
@@ -154,11 +202,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", default=None, help="HuggingFace SFT dataset name (e.g. HuggingFaceTB/smoltalk)")
     parser.add_argument("--dataset-config", default="all", help="dataset config/subset name (e.g. 'all' for smoltalk)")
     parser.add_argument("--sft", action="store_true", help="download SFT conversational dataset instead of raw tokens")
+    parser.add_argument(
+        "--mix",
+        default="edu70_cosmo15_chat10_code5",
+        help="data mix preset or comma-separated name:ratio list",
+    )
+    parser.add_argument(
+        "--packing",
+        choices=("bfd", "random"),
+        default="bfd",
+        help="sequence packing strategy (bfd=best-fit-decreasing on EOS, random=legacy memmap)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    args.mix_ratios = parse_mix(args.mix)
+    if args.packing == "bfd":
+        manifest = write_mix_manifest(args.output, args.mix_ratios, packing="bfd")
+        print(f"wrote mix manifest {manifest} (sources={list(args.mix_ratios)})")
     if args.sft or args.dataset is not None:
         download_sft_dataset(args)
     else:

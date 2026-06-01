@@ -162,9 +162,24 @@ def load_resume(model: HAGI, resume: Path, device: str) -> int:
     return 0
 
 
-def lr_at(step: int, max_steps: int, warmup_steps: int, learning_rate: float, min_lr_ratio: float = 0.1) -> float:
+def lr_at(
+    step: int,
+    max_steps: int,
+    warmup_steps: int,
+    learning_rate: float,
+    min_lr_ratio: float = 0.1,
+    schedule: str = "cosine",
+    cooldown_frac: float = 0.05,
+) -> float:
     if step < warmup_steps:
         return learning_rate * (step + 1) / max(1, warmup_steps)
+    if str(schedule).lower() == "wsd":
+        cooldown_start = int(max_steps * (1.0 - cooldown_frac))
+        if step >= cooldown_start:
+            cd_progress = (step - cooldown_start) / max(1, max_steps - cooldown_start)
+            cd_progress = min(1.0, max(0.0, cd_progress))
+            return learning_rate * (min_lr_ratio + (1.0 - min_lr_ratio) * (1.0 - cd_progress))
+        return learning_rate
     progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
     progress = min(1.0, progress)
     coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
@@ -354,12 +369,10 @@ def compute_loss(
 
 
 def get_grad_norm(model: torch.nn.Module) -> float:
-    total_norm = 0.0
-    for p in model.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.data.float().norm(2).item()
-            total_norm += param_norm * param_norm
-    return math.sqrt(total_norm)
+    parameters = [p for p in model.parameters() if p.grad is not None]
+    if not parameters:
+        return 0.0
+    return float(torch.nn.utils.get_total_norm(parameters).item())
 
 
 @torch.no_grad()
@@ -426,16 +439,22 @@ def magic_norm_clip(model: torch.nn.Module, max_norm: float, blade_count: int = 
     gdr = getattr(model, "gdr", None)
     if gdr is None or max_norm <= 0:
         return 0.0
-    max_seen = 0.0
+    first_param = next((p for p in gdr.parameters() if p.grad is not None), None)
+    if first_param is None:
+        return 0.0
+    max_norm_t = torch.tensor(max_norm, dtype=torch.float32, device=first_param.device)
+    max_seen_t = torch.zeros((), dtype=torch.float32, device=first_param.device)
     for param in gdr.parameters():
         grad = param.grad
         if grad is None or grad.ndim == 0 or grad.shape[-1] % blade_count != 0:
             continue
         view = grad.view(*grad.shape[:-1], grad.shape[-1] // blade_count, blade_count)
         norms = view.float().norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        max_seen = max(max_seen, float(norms.max().item()))
-        view.mul_((max_norm / norms).clamp(max=1.0).to(dtype=view.dtype))
-    return max_seen
+        local_max = norms.max().detach()
+        max_seen_t = torch.maximum(max_seen_t, local_max)
+        if local_max > max_norm:
+            view.mul_((max_norm_t / norms).clamp(max=1.0).to(dtype=view.dtype))
+    return float(max_seen_t.item())
 
 
 def save_training_checkpoint(
@@ -689,7 +708,15 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if optimizer_kind == "schedule-free-adamw":
             lr = learning_rate
         else:
-            lr = lr_at(step, max_steps, warmup_steps, learning_rate, min_lr_ratio)
+            lr = lr_at(
+                step,
+                max_steps,
+                warmup_steps,
+                learning_rate,
+                min_lr_ratio,
+                schedule=str(train_cfg.get("schedule", "cosine")),
+                cooldown_frac=float(train_cfg.get("cooldown_frac", 0.05)),
+            )
         for group in optimizer.param_groups:
             group["lr"] = lr
         effective_weights = None
@@ -738,11 +765,13 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             scaler.unscale_(optimizer)
 
         full_grad_norm = get_grad_norm(model)
-        if full_grad_norm > 100.0 or (0.0 < full_grad_norm < 1e-6):
+        if grad_clip > 0:
+            full_grad_norm = float(
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item()
+            )
+        if not math.isfinite(full_grad_norm) or full_grad_norm > 100.0 or (0.0 < full_grad_norm < 1e-6):
             print(f"WARNING: extreme grad_norm {full_grad_norm:.2e} at step {step}")
 
-        if grad_clip > 0 and full_grad_norm >= grad_clip / 10.0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
         if use_scaler:
             scaler.step(optimizer)

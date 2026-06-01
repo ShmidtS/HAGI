@@ -138,11 +138,13 @@ class HDIMFull(nn.Module):
         heads: int = 4,
         num_rotors: int = 4,
         blade_count: int = BLADE_COUNT,
+        use_hdim_cross_domain: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.heads = heads
         self.blade_count = blade_count
+        self.use_hdim_cross_domain = bool(use_hdim_cross_domain)
         self.project = HiddenToMultivector(hidden_size, heads, blade_count)
         self.rotors = DomainRotor(num_rotors, heads, blade_count)
         self.extract = InvariantExtractor()
@@ -156,6 +158,19 @@ class HDIMFull(nn.Module):
         tgt_rotor_idx: int | torch.Tensor = 0,
         return_state: bool = False,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
+        if not self.use_hdim_cross_domain:
+            if return_state:
+                B, T, _ = hidden_states.shape
+                empty_mv = self.project(hidden_states)
+                return {
+                    "fused": hidden_states,
+                    "multivector": empty_mv,
+                    "invariant": None,
+                    "target_multivector": None,
+                    "target_invariant": None,
+                    "gate": None,
+                }
+            return hidden_states
         multivector = self.project(hidden_states)
         invariant = self.extract(multivector, self.rotors, src_rotor_idx)
         target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
@@ -192,8 +207,9 @@ class DelayedHDIM(HDIMFull):
         num_rotors: int = 4,
         blade_count: int = BLADE_COUNT,
         delay_steps: int = 2,
+        use_hdim_cross_domain: bool = True,
     ):
-        super().__init__(hidden_size, heads, num_rotors, blade_count)
+        super().__init__(hidden_size, heads, num_rotors, blade_count, use_hdim_cross_domain=use_hdim_cross_domain)
         self.delay_steps = delay_steps
         self._buffer: list[torch.Tensor] = []
         self._total_steps: int | None = None
