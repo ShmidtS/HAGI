@@ -2,10 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from hagi.model import HAGI, HAGIConfig
 from hagi.train.config import config_from_dict
 
-torch = pytest.importorskip("torch")
 yaml = pytest.importorskip("yaml")
 
 
@@ -33,6 +31,9 @@ def test_rtx3070_yaml_matches_8gb_model_shape():
 
 
 def test_rtx3070_config_builds_model_with_gradient_checkpointing():
+    pytest.importorskip("torch")
+    from hagi.model import HAGI, HAGIConfig
+
     cfg = load_rtx3070_config()
     model_cfg = config_from_dict(cfg["model"])
     model = HAGI(model_cfg)
@@ -46,7 +47,26 @@ def test_rtx3070_config_builds_model_with_gradient_checkpointing():
     assert len(model.expression) == 3
 
 
+def test_rtx3070_canonical_mix_paths_match_mix_weights():
+    path = Path(__file__).resolve().parents[1] / "configs" / "rtx3070_canonical.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    data = config["data"]
+    mix = data["mix"]
+    mix_paths = data["mix_paths"]
+
+    assert data["dataset_mode"] == "memmap_packed"
+    assert {entry["name"] for entry in mix_paths} == set(mix)
+    assert sum(entry["weight"] for entry in mix_paths) == pytest.approx(1.0)
+    for entry in mix_paths:
+        assert entry["weight"] == pytest.approx(mix[entry["name"]])
+        assert entry["path"].endswith(".bin")
+
+
 def test_gradient_checkpointing_forward_flag_runs_on_tiny_model():
+    torch = pytest.importorskip("torch")
+    from hagi.model import HAGI
+
     cfg = config_from_dict({
         "vocab_size": 64,
         "hidden_size": 64,

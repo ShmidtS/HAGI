@@ -17,7 +17,14 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader, Subset
 
-from hagi.data import MemmapDataset, PrefixLMBatch, create_prefix_lm_batch, get_memmap_dataloader, get_sft_dataloader
+from hagi.data import (
+    MemmapDataset,
+    PrefixLMBatch,
+    create_prefix_lm_batch,
+    get_memmap_dataloader,
+    get_mixed_memmap_dataloader,
+    get_sft_dataloader,
+)
 from hagi.data.tokenizer import TokenizerWrapper
 from hagi.losses import composite_loss
 from hagi.model import HAGI
@@ -53,7 +60,13 @@ def detect_mode(cfg: dict[str, Any]) -> str:
     return "basic"
 
 
-def resolve_train_path(cfg: dict[str, Any], data_dir: Path) -> Path:
+def resolve_train_path(cfg: dict[str, Any], train_path_override: Path | None, data_dir: Path | None = None) -> Path:
+    if data_dir is None:
+        data_dir = train_path_override
+        train_path_override = None
+    if train_path_override is not None:
+        return Path(train_path_override)
+
     data_cfg = cfg.get("data", {})
     configured = data_cfg.get("train_path") or data_cfg.get("path")
     if configured:
@@ -240,6 +253,8 @@ def to_device(batch: Any, device: str, non_blocking: bool) -> Any:
             mask=batch.mask.to(device, non_blocking=non_blocking),
             partition=batch.partition.to(device, non_blocking=non_blocking),
         )
+    if isinstance(batch, tuple):
+        return tuple(to_device(item, device, non_blocking) for item in batch)
     return batch.to(device, non_blocking=non_blocking)
 
 
@@ -267,9 +282,30 @@ def _shift_collate(batch: list[Any]) -> tuple[Any, Any]:
     return torch.as_tensor(x, dtype=torch.long), torch.as_tensor(y, dtype=torch.long)
 
 
+def resolve_mix_paths(data_cfg: dict[str, Any], data_dir: Path) -> list[tuple[Path, float]]:
+    mix_paths = data_cfg.get("mix_paths", [])
+    resolved: list[tuple[Path, float]] = []
+    for entry in mix_paths:
+        path = Path(entry["path"])
+        if not path.is_absolute():
+            path = data_dir / path
+        resolved.append((path, float(entry["weight"])))
+    return resolved
+
+
+def resolve_eval_path(data_cfg: dict[str, Any], data_dir: Path) -> Path | None:
+    configured = data_cfg.get("eval_path")
+    if not configured:
+        return None
+    path = Path(configured)
+    if not path.is_absolute():
+        path = data_dir / path
+    return path
+
+
 def build_full_dataloader(
     cfg: dict[str, Any],
-    train_path: Path,
+    train_path: Path | None,
     data_dir: Path,
     use_prefix_lm: bool,
     device: str,
@@ -282,6 +318,9 @@ def build_full_dataloader(
     batch_size = int(train_cfg.get("batch_size", 2))
     num_workers = int(data_cfg.get("num_workers", 4))
     pin_memory = bool(data_cfg.get("pin_memory", device.startswith("cuda")))
+    dataset_mode = dataset_mode.lower()
+    if dataset_mode == "memmap_packed":
+        dataset_mode = "memmap"
 
     if dataset_mode == "sft":
         tokenizer_name = str(data_cfg.get("tokenizer", "HuggingFaceTB/SmolLM2-135M"))
@@ -301,15 +340,6 @@ def build_full_dataloader(
         return train_loader, eval_loader, batch_size, seq_len, pin_memory
 
     dtype = data_cfg.get("dtype", "uint16")
-    dataset = MemmapDataset(train_path, seq_len=seq_len, dtype=dtype)
-    total = len(dataset)
-    if eval_samples > 0:
-        eval_samples = min(eval_samples, total // 10)
-        train_ds = Subset(dataset, list(range(total - eval_samples)))
-        eval_ds = Subset(dataset, list(range(total - eval_samples, total)))
-    else:
-        train_ds = dataset
-        eval_ds = None
 
     def _make_loader(ds: Any, shuffle: bool) -> Any:
         kwargs: dict[str, Any] = {
@@ -327,6 +357,37 @@ def build_full_dataloader(
             kwargs["prefetch_factor"] = 4
             kwargs["persistent_workers"] = True
         return DataLoader(ds, **kwargs)
+
+    mix_paths = resolve_mix_paths(data_cfg, data_dir) if train_path is None else []
+    if mix_paths:
+        if use_prefix_lm:
+            raise ValueError("mix_paths does not support prefix_lm")
+        train_loader = get_mixed_memmap_dataloader(
+            mix_paths,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            dtype=dtype,
+            seed=int(train_cfg.get("seed", 0)),
+        )
+        eval_path = resolve_eval_path(data_cfg, data_dir)
+        eval_loader = (
+            _make_loader(MemmapDataset(eval_path, seq_len=seq_len, dtype=dtype), shuffle=False)
+            if eval_path is not None
+            else None
+        )
+        return train_loader, eval_loader, batch_size, seq_len, pin_memory
+
+    dataset = MemmapDataset(train_path, seq_len=seq_len, dtype=dtype)
+    total = len(dataset)
+    if eval_samples > 0:
+        eval_samples = min(eval_samples, total // 10)
+        train_ds = Subset(dataset, list(range(total - eval_samples)))
+        eval_ds = Subset(dataset, list(range(total - eval_samples, total)))
+    else:
+        train_ds = dataset
+        eval_ds = None
 
     train_loader = _make_loader(train_ds, shuffle=True)
     eval_loader = _make_loader(eval_ds, shuffle=False) if eval_ds is not None else None
@@ -346,8 +407,8 @@ def unwrap_logits(output: Any) -> torch.Tensor:
 def compute_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    model_output: Any,
-    weights: dict[str, float] | None,
+    model_output: Any = None,
+    weights: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     if weights is None:
         loss = F.cross_entropy(
@@ -487,6 +548,31 @@ def print_model_summary(model: HAGI, cfg: Any, device: str, use_prefix_lm: bool,
         f"use_loop {cfg.use_loop} | hrm {cfg.hrm} | use_gdr {cfg.use_gdr} | "
         f"hdim_full {cfg.hdim_full} | prefix_lm {use_prefix_lm} | composite_loss {use_composite_loss}"
     )
+
+
+def run_dry_profile(model: torch.nn.Module, dataloader: Any, device: str, use_prefix_lm: bool, precision: str) -> None:
+    model.eval()
+    batch = next(iter(dataloader))
+    batch = to_device(batch, device, non_blocking=device.startswith("cuda"))
+    if device.startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(device)
+    with torch.no_grad(), autocast_ctx(precision, device):
+        if use_prefix_lm:
+            inputs, targets = batch
+            output = model(inputs.tokens)
+            logits = unwrap_logits(output)
+            targets = apply_prefix_mask(targets, inputs)
+        else:
+            x, targets = batch
+            output = model(x)
+            logits = unwrap_logits(output)
+        loss, _ = compute_loss(logits, targets)
+    print(f"dry_run_loss {float(loss.detach().cpu()):.4f}")
+    if device.startswith("cuda"):
+        allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
+        reserved = torch.cuda.max_memory_reserved(device) / (1024**3)
+        print(f"dry_run_peak_vram allocated {allocated:.2f}GB | reserved {reserved:.2f}GB")
+    print("dry_run_complete no optimizer step executed")
 
 
 def run_basic(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
@@ -641,21 +727,6 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     model_ema.eval()
     for param in model_ema.parameters():
         param.requires_grad_(False)
-    optimizer = build_optimizer(model, train_cfg)
-    if args.resume is not None and args.resume.exists():
-        state = torch.load(args.resume, map_location=args.device, weights_only=True)
-        if "optimizer" in state:
-            try:
-                optimizer.load_state_dict(state["optimizer"])
-                print("loaded optimizer state")
-            except Exception as exc:
-                print(f"optimizer state mismatch, starting fresh: {exc}")
-        if "model_ema" in state:
-            try:
-                model_ema.load_state_dict(state["model_ema"])
-                print("loaded EMA state")
-            except Exception as exc:
-                print(f"EMA state mismatch, starting fresh: {exc}")
     train_model = maybe_compile(model, args.device)
     train_model.train()
 
@@ -676,7 +747,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     magic_norm_max = float(train_cfg.get("magic_norm_max", 1.0))
     data_cfg = cfg.get("data", {})
     dataset_mode = args.dataset_mode or str(data_cfg.get("dataset_mode", "memmap"))
-    train_path = resolve_train_path(cfg, args.data_dir)
+    train_path = (
+        resolve_train_path(cfg, args.train_path, args.data_dir)
+        if args.train_path is not None or not resolve_mix_paths(data_cfg, args.data_dir)
+        else None
+    )
     eval_interval = int(train_cfg.get("eval_interval", 0))
     eval_samples = int(train_cfg.get("eval_samples", 500))
     dataloader, eval_loader, batch_size, seq_len, pin_memory = build_full_dataloader(
@@ -697,6 +772,26 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     print_model_summary(model, model_cfg, args.device, use_prefix_lm, composite_weights is not None)
+    if args.dry_run:
+        run_dry_profile(model, dataloader, args.device, use_prefix_lm, precision)
+        return
+
+    optimizer = build_optimizer(model, train_cfg)
+    if args.resume is not None and args.resume.exists():
+        state = torch.load(args.resume, map_location=args.device, weights_only=True)
+        if "optimizer" in state:
+            try:
+                optimizer.load_state_dict(state["optimizer"])
+                print("loaded optimizer state")
+            except Exception as exc:
+                print(f"optimizer state mismatch, starting fresh: {exc}")
+        if "model_ema" in state:
+            try:
+                model_ema.load_state_dict(state["model_ema"])
+                print("loaded EMA state")
+            except Exception as exc:
+                print(f"EMA state mismatch, starting fresh: {exc}")
+
     args.ckpt_dir.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
     tokens_since_log = 0
@@ -838,12 +933,15 @@ def main() -> None:
     parser.add_argument("--ckpt-dir", type=Path, default=DEFAULT_CKPT_DIR)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=None)
-    parser.add_argument("--dataset-mode", choices=["memmap", "sft"], default=None, help="dataset loading mode (overrides config)")
+    parser.add_argument("--dry-run", action="store_true", help="build model and one batch, report memory, then exit before optimizer step")
+    parser.add_argument("--dataset-mode", choices=["memmap", "memmap_packed", "sft"], default=None, help="dataset loading mode (overrides config)")
     parser.add_argument("--mode", choices=["auto", "basic", "fast", "full"], default="auto", help="training mode (auto-detected from config)")
     args = parser.parse_args()
 
     cfg = load_yaml(args.config)
     mode = args.mode if args.mode != "auto" else detect_mode(cfg)
+    if args.dry_run and mode != "full":
+        raise ValueError("--dry-run is only supported in full mode")
 
     if mode == "basic":
         run_basic(args, cfg)

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "sources": {
+    "edu": {
+      "path": "edu.bin",
+      "tokens": 3500000,
+      "dtype": "uint16"
+    },
+    "cosmopedia": {
+      "path": "cosmopedia.bin",
+      "tokens": 750000,
+      "dtype": "uint16"
+    },
+    "smoltalk": {
+      "path": "smoltalk.bin",
+      "tokens": 500000,
+      "dtype": "uint16"
+    },
+    "python_instruct": {
+      "path": "python_instruct.bin",
+      "tokens": 250000,
+      "dtype": "uint16"
+    }
+  }
+}

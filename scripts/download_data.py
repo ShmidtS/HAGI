@@ -11,16 +11,57 @@ from hagi.data.tokenizer import SMOLLM2_TOKENIZER, TokenizerWrapper
 
 DATASET_NAME = "HuggingFaceFW/fineweb-edu"
 
-# arch_decision §Data: 70% FineWeb-Edu / 15% Cosmopedia v2 / 10% SmolTalk / 5% Stack v2 Python.
+DATASET_PRESETS = {
+    "edu": {
+        "dataset": "HuggingFaceFW/fineweb-edu",
+        "name": "sample-10BT",
+        "split": "train",
+        "license_note": "Use streaming/subsampling for RTX 3070 experiments.",
+    },
+    "cosmopedia": {
+        "dataset": "HuggingFaceTB/smollm-corpus",
+        "name": "cosmopedia-v2",
+        "split": "train",
+        "license_note": "Synthetic educational corpus; validate locally before mixing.",
+    },
+    "smoltalk": {
+        "dataset": "HuggingFaceTB/smoltalk",
+        "name": "all",
+        "split": "train",
+        "license_note": "Conversational SFT corpus; validate dataset card before redistribution.",
+    },
+    "python_instruct": {
+        "dataset": "iamtarun/python_code_instructions_18k_alpaca",
+        "split": "train",
+        "license_note": "Open Python instruction/code corpus used as an unauthenticated code-data fallback.",
+    },
+    "smollm_corpus": {
+        "dataset": "HuggingFaceTB/smollm-corpus",
+        "subsets": ["cosmopedia-v2", "fineweb-edu-dedup", "python-edu"],
+        "license_note": "See Hugging Face dataset card before redistribution.",
+    },
+    "fineweb_edu_10bt": {
+        "dataset": "HuggingFaceFW/fineweb-edu",
+        "name": "sample-10BT",
+        "license_note": "Use streaming/subsampling for RTX 3070 experiments.",
+    },
+    "cosmopedia_v2": {
+        "dataset": "HuggingFaceTB/cosmopedia-v2",
+        "license_note": "Synthetic educational corpus; validate locally before mixing.",
+    },
+}
+
+# arch_decision §Data adapted for unauthenticated download: 70% FineWeb-Edu / 15% Cosmopedia v2 / 10% SmolTalk / 5% Python instruction code.
 DEFAULT_MIX = {
     "edu": 0.70,
     "cosmopedia": 0.15,
     "smoltalk": 0.10,
-    "stackv2_py": 0.05,
+    "python_instruct": 0.05,
 }
 
 # Named mix presets accepted by --mix.
 MIX_PRESETS: dict[str, dict[str, float]] = {
+    "edu70_cosmo15_chat10_py5": dict(DEFAULT_MIX),
     "edu70_cosmo15_chat10_code5": dict(DEFAULT_MIX),
     "default": dict(DEFAULT_MIX),
 }
@@ -46,7 +87,12 @@ def parse_mix(value: str | None) -> dict[str, float]:
     return {name: ratio / total for name, ratio in out.items()}
 
 
-def write_mix_manifest(output_dir: Path, mix: dict[str, float], packing: str = "bfd") -> Path:
+def write_mix_manifest(
+    output_dir: Path,
+    mix: dict[str, float],
+    packing: str = "bfd",
+    token_count: int | None = None,
+) -> Path:
     """Write data/mix.json manifest (no actual download, code path only)."""
     import json
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -55,6 +101,9 @@ def write_mix_manifest(output_dir: Path, mix: dict[str, float], packing: str = "
         "version": 1,
         "packing": packing,
         "sources": [{"name": name, "ratio": ratio} for name, ratio in mix.items()],
+        "mix": mix,
+        "token_count": token_count,
+        "presets": {name: DATASET_PRESETS.get(name, {}) for name in mix},
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
@@ -79,6 +128,83 @@ def flush_shard(tokens: list[int], output_dir: Path, shard_idx: int) -> Path:
     memmap[:] = array[:]
     memmap.flush()
     return path
+
+
+def materialize_token_bins(output_dir: Path, tokens_by_source: dict[str, list[int]]) -> dict[str, Path]:
+    import json
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, Path] = {}
+    manifest: dict[str, Any] = {"version": 1, "sources": {}}
+    for name, tokens in tokens_by_source.items():
+        path = output_dir / f"{name}.bin"
+        array = np.asarray(tokens, dtype=np.uint16)
+        memmap = np.memmap(path, dtype=np.uint16, mode="w+", shape=array.shape)
+        memmap[:] = array[:]
+        memmap.flush()
+        paths[name] = path
+        manifest["sources"][name] = {"path": path.name, "tokens": int(array.size), "dtype": "uint16"}
+    (output_dir / "download_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return paths
+
+
+def _row_text(source: str, row: dict[str, Any]) -> str:
+    if source == "smoltalk":
+        messages = row.get("messages", [])
+        return "\n".join(str(message.get("content", "")) for message in messages if isinstance(message, dict))
+    if source == "python_instruct":
+        parts = [row.get("instruction", ""), row.get("input", ""), row.get("output", "")]
+        return "\n".join(str(part) for part in parts if part)
+    return str(row.get("text", ""))
+
+
+def _dataset_spec_for_source(source: str) -> tuple[str, str | None, str]:
+    if source == "python_instruct":
+        return "iamtarun/python_code_instructions_18k_alpaca", None, "train"
+    preset = DATASET_PRESETS[source]
+    return str(preset["dataset"]), preset.get("name"), str(preset.get("split", "train"))
+
+
+def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise ImportError("install datasets to download mixed data: pip install datasets") from exc
+
+    tokenizer = TokenizerWrapper.smollm2(SMOLLM2_TOKENIZER, use_fast=True)
+    target_tokens = parse_token_count(args.subset)
+    tokens_by_source: dict[str, list[int]] = {}
+    for source, ratio in args.mix_ratios.items():
+        source_target = max(args.min_source_tokens, int(target_tokens * ratio))
+        dataset_name, dataset_config, split = _dataset_spec_for_source(source)
+        load_kwargs: dict[str, Any] = {"split": split, "streaming": True}
+        if dataset_config:
+            load_kwargs["name"] = dataset_config
+        dataset = load_dataset(dataset_name, **load_kwargs)
+        tokens: list[int] = []
+        skipped = 0
+        for row in dataset:
+            text = _row_text(source, row if isinstance(row, dict) else {})
+            if not text:
+                continue
+            ids = tokenizer.encode(text, add_special_tokens=False, truncation=True, max_length=8192)
+            if len(ids) < args.min_length:
+                skipped += 1
+                continue
+            if tokenizer.eos_token_id is not None:
+                ids.append(int(tokenizer.eos_token_id))
+            remaining = source_target - len(tokens)
+            tokens.extend(ids[:remaining])
+            if len(tokens) >= source_target:
+                break
+        if not tokens:
+            raise ValueError(f"no tokens downloaded for source {source}")
+        tokens_by_source[source] = tokens
+        print(f"source={source} dataset={dataset_name} tokens={len(tokens)} skipped={skipped}")
+    return materialize_token_bins(args.output, tokens_by_source)
 
 
 def _convert_messages_to_dicts(row: Any) -> dict[str, Any] | None:
@@ -180,7 +306,7 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
                 f"split={args.split}",
                 f"tokenizer={SMOLLM2_TOKENIZER}",
                 f"tokens={total_tokens}",
-                f"dtype=uint16",
+                "dtype=uint16",
                 *[f"shard={path.name}" for path in written],
             ]
         )
@@ -202,6 +328,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", default=None, help="HuggingFace SFT dataset name (e.g. HuggingFaceTB/smoltalk)")
     parser.add_argument("--dataset-config", default="all", help="dataset config/subset name (e.g. 'all' for smoltalk)")
     parser.add_argument("--sft", action="store_true", help="download SFT conversational dataset instead of raw tokens")
+    parser.add_argument("--materialize-mix", action="store_true", help="download each mix source into source-named .bin files")
+    parser.add_argument("--min-source-tokens", type=int, default=1024, help="minimum tokens per materialized mix source")
     parser.add_argument(
         "--mix",
         default="edu70_cosmo15_chat10_code5",
@@ -220,9 +348,17 @@ def main() -> None:
     args = parse_args()
     args.mix_ratios = parse_mix(args.mix)
     if args.packing == "bfd":
-        manifest = write_mix_manifest(args.output, args.mix_ratios, packing="bfd")
+        manifest = write_mix_manifest(
+            args.output,
+            args.mix_ratios,
+            packing="bfd",
+            token_count=parse_token_count(args.subset),
+        )
         print(f"wrote mix manifest {manifest} (sources={list(args.mix_ratios)})")
-    if args.sft or args.dataset is not None:
+    if args.materialize_mix:
+        paths = download_mixed_token_bins(args)
+        print(f"wrote materialized mix bins {paths}")
+    elif args.sft or args.dataset is not None:
         download_sft_dataset(args)
     else:
         download_and_tokenize(args)

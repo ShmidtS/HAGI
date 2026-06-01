@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "packing": "bfd",
+  "sources": [
+    {
+      "name": "edu",
+      "ratio": 0.7
+    },
+    {
+      "name": "cosmopedia",
+      "ratio": 0.15
+    },
+    {
+      "name": "smoltalk",
+      "ratio": 0.1
+    },
+    {
+      "name": "python_instruct",
+      "ratio": 0.05
+    }
+  ],
+  "mix": {
+    "edu": 0.7,
+    "cosmopedia": 0.15,
+    "smoltalk": 0.1,
+    "python_instruct": 0.05
+  },
+  "token_count": 5000000,
+  "presets": {
+    "edu": {
+      "dataset": "HuggingFaceFW/fineweb-edu",
+      "name": "sample-10BT",
+      "split": "train",
+      "license_note": "Use streaming/subsampling for RTX 3070 experiments."
+    },
+    "cosmopedia": {
+      "dataset": "HuggingFaceTB/smollm-corpus",
+      "name": "cosmopedia-v2",
+      "split": "train",
+      "license_note": "Synthetic educational corpus; validate locally before mixing."
+    },
+    "smoltalk": {
+      "dataset": "HuggingFaceTB/smoltalk",
+      "name": "all",
+      "split": "train",
+      "license_note": "Conversational SFT corpus; validate dataset card before redistribution."
+    },
+    "python_instruct": {
+      "dataset": "iamtarun/python_code_instructions_18k_alpaca",
+      "split": "train",
+      "license_note": "Open Python instruction/code corpus used as an unauthenticated code-data fallback."
+    }
+  }
+}

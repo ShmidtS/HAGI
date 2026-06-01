@@ -84,7 +84,20 @@ data:
     edu: 0.70
     cosmopedia: 0.15
     smoltalk: 0.10
-    stackv2_py: 0.05
+    python_instruct: 0.05
+  mix_paths:
+    - name: edu
+      path: edu.bin
+      weight: 0.70
+    - name: cosmopedia
+      path: cosmopedia.bin
+      weight: 0.15
+    - name: smoltalk
+      path: smoltalk.bin
+      weight: 0.10
+    - name: python_instruct
+      path: python_instruct.bin
+      weight: 0.05
 
 eval:
   every_n_steps: 2000
