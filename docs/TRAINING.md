@@ -18,7 +18,7 @@ Lock configs from it, not from guesses.
 |-------|-----------|-----|
 | Recipe | Smol Training Playbook | Configs/hyperparams/data-mix for this exact scale |
 | Tokenizer | SmolLM2 (~49K vocab) | Trained on edu+code+math; right vocab size for 100M (embedding ~33%, not ~50%) |
-| Data processing | `datatrove` | Tokenize + shard FineWeb-Edu / code / math into .bin streams |
+| Data processing | `prototype/data/tokenize.py` (`datasets` + `transformers`) | Stream + tokenize FineWeb-Edu / code / math into flat uint16 `.bin` shards the loader reads directly |
 | Data loading | `prototype/data/dataset.py` | nanoGPT-style memmap `get_batch` |
 | Training loop | `prototype/training/loop.py` | nanoGPT-adapted: bf16 AMP, grad accum, cosine+warmup, clip, ckpt, eval |
 | Optimizer | AdamW (baseline) / Muon (ablation) | Muon orthogonalizes updates; faster convergence on FineWeb small-model |

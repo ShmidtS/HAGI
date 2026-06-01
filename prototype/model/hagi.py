@@ -87,6 +87,20 @@ class HAGI(nn.Module):
         self.lm_head.weight = self.embed.weight  # weight tying
 
         self._rope = {}
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(module: nn.Module):
+        """GPT-2-style init. Default nn.Embedding is N(0, 1); tied to the LM head
+        that gives logits with std ~hidden·1 at init (initial loss ~10× ln(vocab),
+        large early gradients). std=0.02 keeps initial logits near-uniform. RMSNorm
+        weights (ones) and iteration embeddings (zeros) are left at their init."""
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def _rope_cache(self, T: int, device, dtype):
         key = (T, device, dtype)

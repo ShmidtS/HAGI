@@ -65,6 +65,20 @@ def test_config_dict_roundtrip():
     assert restored == cfg
 
 
+def test_init_loss_near_uniform():
+    """Weight init must keep initial logits near-uniform: CE ~ ln(vocab), not ~10x
+    it. Guards the over-scaled tied-embedding init the data dry-run surfaced."""
+    torch.manual_seed(0)
+    model = _tiny_model().eval()  # vocab 64
+    x = torch.randint(0, 64, (4, 16))
+    y = torch.randint(0, 64, (4, 16))
+    with torch.no_grad():
+        _, loss = model(x, targets=y)
+    assert loss.item() < 2.0 * math.log(64), (
+        f"init loss {loss.item():.2f} >> ln(64)={math.log(64):.2f} — embedding init too large"
+    )
+
+
 def test_checkpoint_roundtrip(tmp_path):
     torch.manual_seed(0)
     model = _tiny_model().eval()
