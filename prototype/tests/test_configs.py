@@ -16,13 +16,18 @@ import pytest
 import torch
 
 from prototype.model.gdr import GradeConfig
-from prototype.model.hagi import HAGI, HAGIConfig
+from prototype.model.hagi import HAGI, HAGIConfig, cross_entropy_loss
 from prototype.model.transformer import TransformerConfig
 from prototype.training.config import config_from_dict, config_to_dict, load_config
-from prototype.training.loop import load_checkpoint, save_checkpoint
+from prototype.training.loop import (
+    latest_checkpoint,
+    load_checkpoint,
+    resume_into,
+    save_checkpoint,
+)
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
-SHIPPED = ["baseline.yaml", "gdr.yaml"]
+SHIPPED = ["baseline.yaml", "gdr.yaml", "colab_t4.yaml"]
 
 
 def _tiny_model() -> HAGI:
@@ -81,3 +86,72 @@ def test_checkpoint_roundtrip(tmp_path):
     with torch.no_grad():
         out = restored(x)
     assert torch.allclose(out, ref, atol=1e-6)
+
+
+def test_chunked_cross_entropy_matches_plain():
+    """Chunked CE must be numerically identical to the unchunked path — it only
+    splits the fp32 upcast to avoid the full-logit memory spike."""
+    torch.manual_seed(0)
+    logits = torch.randn(37, 11)
+    targets = torch.randint(0, 11, (37,))
+    assert torch.allclose(
+        cross_entropy_loss(logits, targets, chunk_size=0),
+        cross_entropy_loss(logits, targets, chunk_size=8),
+        atol=1e-6,
+    )
+    # ...and with masked (ignore_index) positions.
+    targets[::5] = -100
+    assert torch.allclose(
+        cross_entropy_loss(logits, targets, ignore_index=-100, chunk_size=0),
+        cross_entropy_loss(logits, targets, ignore_index=-100, chunk_size=8),
+        atol=1e-6,
+    )
+
+
+def test_gradient_checkpointing_matches_plain():
+    """gradient_checkpointing must not change the loss — only how activations are
+    stored for backward. Same weights, same inputs, same forward result."""
+    torch.manual_seed(0)
+    plain = _tiny_model()
+    ckpt_model = _tiny_model()
+    ckpt_model.load_state_dict(plain.state_dict())
+    ckpt_model.cfg.gradient_checkpointing = True
+
+    plain.train()
+    ckpt_model.train()
+    x = torch.randint(0, 64, (2, 16))
+    y = torch.randint(0, 64, (2, 16))
+    _, l_plain = plain(x, targets=y)
+    _, l_ckpt = ckpt_model(x, targets=y)
+    assert torch.allclose(l_plain, l_ckpt, atol=1e-5)
+
+    l_ckpt.backward()  # backward through checkpointed blocks must produce finite grads
+    grads = [p.grad for p in ckpt_model.parameters() if p.grad is not None]
+    assert grads and all(torch.isfinite(g).all() for g in grads)
+
+
+def test_resume_restores_model_and_optimizer(tmp_path):
+    """resume_into restores weights AND optimizer state — the contract that lets a
+    killed 12h free-tier session continue exactly where it stopped."""
+    torch.manual_seed(0)
+    model = _tiny_model()
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    model.train()
+    x = torch.randint(0, 64, (2, 16))
+    y = torch.randint(0, 64, (2, 16))
+    _, loss = model(x, targets=y)
+    loss.backward()
+    opt.step()
+    save_checkpoint(model, opt, step=7, ckpt_dir=str(tmp_path))
+
+    torch.manual_seed(123)  # different init — resume must overwrite it
+    model2 = _tiny_model()
+    opt2 = torch.optim.AdamW(model2.parameters(), lr=1e-3)
+    path = latest_checkpoint(str(tmp_path))
+    assert path is not None
+    step = resume_into(model2, opt2, str(path))
+
+    assert step == 7
+    for p1, p2 in zip(model.parameters(), model2.parameters(), strict=True):
+        assert torch.allclose(p1, p2, atol=1e-6)
+    assert len(opt2.state) > 0  # AdamW moment buffers restored

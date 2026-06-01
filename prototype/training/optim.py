@@ -103,6 +103,14 @@ class CombinedOptimizer:
         for opt in self.optimizers:
             opt.step()
 
+    def state_dict(self) -> dict:
+        """Sub-optimizer states, in order. Enables resume for the Muon+AdamW hybrid."""
+        return {"optimizers": [opt.state_dict() for opt in self.optimizers]}
+
+    def load_state_dict(self, sd: dict):
+        for opt, s in zip(self.optimizers, sd["optimizers"], strict=True):
+            opt.load_state_dict(s)
+
     @property
     def param_groups(self):
         groups = []

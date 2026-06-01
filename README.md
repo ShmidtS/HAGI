@@ -86,7 +86,7 @@ The geometric product of `Cl(3,0,0)` naturally mixes grades: `vector × vector �
 
 - PyTorch prototype: GDR model with Perception/Reasoning/Expression, all four ablation variants behind config flags (`prototype/model/`)
 - Training stack: nanoGPT-adapted loop, AdamW+Muon optimizer, datatrove tokenization, memmap loader, lm-eval-harness adapter (`prototype/training/`, `prototype/data/`, `prototype/evaluation/`)
-- Test suite: Clifford algebra, model shape, overfit, config smoke, checkpoint roundtrip (20 tests, CPU-only)
+- Test suite: Clifford algebra, model shape, overfit, config smoke, checkpoint/resume roundtrip, chunked-CE & gradient-checkpointing equivalence (24 tests, CPU-only)
 - Rust workspace scaffold (10 crates) with typed Clifford primitives (refactored for GDR at Stage 5)
 - Lean4 formal verification of core invariants (~700 lines, aligned at Stage 6)
 - Architecture documentation, research analysis, milestone-driven plan
@@ -166,6 +166,7 @@ HAGI/
 ├── docs/                   # Documentation
 │   ├── ARCHITECTURE.md     # Detailed architecture specification
 │   ├── TRAINING.md         # Training stack + workflow
+│   ├── CLOUD_TRAINING.md   # Free/cheap cloud GPU guide + acceleration stack
 │   ├── MILESTONES.md       # Milestone definitions and tracking
 │   ├── RESEARCH.md         # Research background and references
 │   └── ...
@@ -232,6 +233,9 @@ python -m prototype.data.tokenize --dataset HuggingFaceFW/fineweb-edu \
 python -m prototype.training.train --config configs/baseline.yaml --data data/fineweb-edu
 python -m prototype.training.train --config configs/gdr.yaml --data data/fineweb-edu
 ```
+
+No local GPU? Free cloud (Kaggle/Colab) can run a proof-of-life with
+`configs/colab_t4.yaml` and `--resume auto`. See [docs/CLOUD_TRAINING.md](docs/CLOUD_TRAINING.md).
 
 ### Evaluation
 

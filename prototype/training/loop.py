@@ -73,11 +73,13 @@ def train(
     device: str = "cpu",
     eval_get_batch: Callable | None = None,
     on_log: Callable[[dict], None] | None = None,
+    start_step: int = 0,
 ):
     """Run the training loop. Returns the final training loss.
 
     optimizer: torch.optim.Optimizer or CombinedOptimizer (Muon+AdamW).
     on_log: optional callback receiving a metrics dict each log step.
+    start_step: resume from this step (LR schedule + intervals are absolute).
     """
     model.to(device)
     model.train()
@@ -85,7 +87,7 @@ def train(
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     last_loss = float("nan")
-    for step in range(cfg.max_steps):
+    for step in range(start_step, cfg.max_steps):
         lr = _lr_at(step, cfg)
         for group in optimizer.param_groups:
             group["lr"] = lr
@@ -130,24 +132,37 @@ def train(
     return last_loss
 
 
+def _unwrap(model):
+    """Return the underlying HAGI module, unwrapping a torch.compile wrapper.
+
+    torch.compile returns an OptimizedModule whose state_dict keys are prefixed
+    with `_orig_mod.`; saving/loading must use the original module to keep keys
+    stable across compiled and uncompiled runs.
+    """
+    return getattr(model, "_orig_mod", model)
+
+
 def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str):
     """Write a checkpoint. Config is stored as a plain dict (not a pickled
-    dataclass) so the file loads under torch's default weights_only=True."""
+    dataclass) so the file loads under torch's default weights_only=True.
+    Optimizer state is included when provided, enabling exact resume."""
     from prototype.training.config import config_to_dict
 
+    base = _unwrap(model)
     out = Path(ckpt_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"step-{step:08d}.pt"
-    torch.save(
-        {"model": model.state_dict(), "step": step, "config": config_to_dict(model.cfg)},
-        path,
-    )
+    payload = {"model": base.state_dict(), "step": step, "config": config_to_dict(base.cfg)}
+    if optimizer is not None:
+        payload["optimizer"] = optimizer.state_dict()
+    torch.save(payload, path)
     print(f"checkpoint -> {path}")
 
 
 def load_checkpoint(path: str, device: str = "cpu") -> tuple[HAGI, int]:
-    """Rebuild a HAGI model from a checkpoint. Loads under weights_only=True
-    (config is a plain dict, weights are tensors — no arbitrary unpickling)."""
+    """Rebuild a HAGI model from a checkpoint (model only — for eval/inference).
+    Loads under weights_only=True (config is a plain dict, weights are tensors —
+    no arbitrary unpickling)."""
     from prototype.training.config import config_from_dict
 
     state = torch.load(path, map_location=device, weights_only=True)
@@ -156,3 +171,21 @@ def load_checkpoint(path: str, device: str = "cpu") -> tuple[HAGI, int]:
     model.load_state_dict(state["model"])
     model.to(device)
     return model, int(state.get("step", 0))
+
+
+def latest_checkpoint(ckpt_dir: str) -> Path | None:
+    """Newest `step-*.pt` in ckpt_dir, or None if there are none."""
+    cks = sorted(Path(ckpt_dir).glob("step-*.pt"))
+    return cks[-1] if cks else None
+
+
+def resume_into(model: HAGI, optimizer, path: str, device: str = "cpu") -> int:
+    """Load weights (and optimizer state, if present) into an existing model +
+    optimizer. Returns the step to resume from. For free-tier cloud where 12h
+    sessions die mid-run, this restores both so training continues seamlessly."""
+    base = _unwrap(model)
+    state = torch.load(path, map_location=device, weights_only=True)
+    base.load_state_dict(state["model"])
+    if optimizer is not None and "optimizer" in state:
+        optimizer.load_state_dict(state["optimizer"])
+    return int(state.get("step", 0))

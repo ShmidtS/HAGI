@@ -15,9 +15,32 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from .gdr import GradeConfig, GradeDecomposedRecurrence
 from .transformer import RMSNorm, TransformerBlock, TransformerConfig, build_rope_cache
+
+
+def cross_entropy_loss(
+    logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100, chunk_size: int = 0
+) -> torch.Tensor:
+    """Next-token cross-entropy with fp32 accumulation.
+
+    logits: [N, V] (already flattened). The fp32 upcast of the full [N, V] tensor
+    is the dominant activation-memory spike at large N·V (e.g. 16·4096·49152·4B ≈
+    13 GB). When chunk_size > 0, the upcast happens per row-chunk so the fp32 copy
+    never fully materializes. The result is numerically identical to the unchunked
+    path (sum over chunks / valid-token count == mean).
+    """
+    if chunk_size <= 0 or logits.size(0) <= chunk_size:
+        return F.cross_entropy(logits.float(), targets, ignore_index=ignore_index)
+    valid = (targets != ignore_index).sum().clamp(min=1)
+    total = torch.zeros((), dtype=torch.float32, device=logits.device)
+    for i in range(0, logits.size(0), chunk_size):
+        lg = logits[i : i + chunk_size].float()
+        tg = targets[i : i + chunk_size]
+        total = total + F.cross_entropy(lg, tg, ignore_index=ignore_index, reduction="sum")
+    return total / valid
 
 
 @dataclass
@@ -30,6 +53,8 @@ class HAGIConfig:
     loop_count: int = 3
     use_loop: bool = True
     use_gdr: bool = True
+    gradient_checkpointing: bool = False  # trade ~30% recompute for activation memory
+    ce_chunk_size: int = 0                # >0 chunks the fp32 CE upcast (avoids logit spike)
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
 
@@ -85,19 +110,27 @@ class HAGI(nn.Module):
         h = self.embed(input_ids)
         cos, sin = self._rope_cache(T, h.device, h.dtype)
 
+        # Gradient checkpointing only helps in the backward pass; skip in eval.
+        use_ckpt = self.cfg.gradient_checkpointing and self.training
+
+        def run_block(block, x):
+            if use_ckpt:
+                return checkpoint(block, x, cos, sin, use_reentrant=False)
+            return block(x, cos, sin)
+
         for block in self.perception:
-            h = block(h, cos, sin)
+            h = run_block(block, h)
 
         loops = self.cfg.loop_count if self.cfg.use_loop else 1
         for i in range(loops):
             if self.gdr is not None:
-                h = self.gdr(h)
+                h = checkpoint(self.gdr, h, use_reentrant=False) if use_ckpt else self.gdr(h)
             for block in self.reasoning:
-                h = block(h, cos, sin)
+                h = run_block(block, h)
             h = h + self.iter_embed[i]
 
         for block in self.expression:
-            h = block(h, cos, sin)
+            h = run_block(block, h)
 
         h = self.final_norm(h)
         logits = self.lm_head(h)
@@ -105,10 +138,11 @@ class HAGI(nn.Module):
         if targets is None:
             return logits
 
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)).float(),
+        loss = cross_entropy_loss(
+            logits.reshape(-1, logits.size(-1)),
             targets.reshape(-1),
             ignore_index=ignore_index,
+            chunk_size=self.cfg.ce_chunk_size,
         )
         return logits, loss
 

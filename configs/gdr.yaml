@@ -9,6 +9,8 @@ model:
   loop_count: 3
   use_loop: true
   use_gdr: true
+  ce_chunk_size: 4096        # chunk fp32 CE upcast; avoids ~13GB logit spike at full seq
+  gradient_checkpointing: false  # enable on ≤16GB GPUs (≈30% recompute for activation memory)
   transformer:
     num_query_heads: 12
     num_kv_heads: 4
@@ -27,13 +29,15 @@ model:
 training:
   optimizer: adamw           # switch to "muon" for the optimizer ablation
   precision: bf16
+  compile: false             # torch.compile (Triton kernels); set true on Ampere+ for speed
   batch_size: 16
   grad_accum_steps: 4
   learning_rate: 3.0e-4
   warmup_steps: 2000
-  max_steps: 50000
+  # max_steps is derived from data.train_tokens (≈19073 at 5e9 / 262144 tok-per-step).
   weight_decay: 0.1
   grad_clip: 1.0
+  ckpt_interval: 2000
   seed: 42
   # Muon (only used when optimizer: muon)
   muon_lr: 0.02

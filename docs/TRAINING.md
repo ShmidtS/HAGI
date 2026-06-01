@@ -86,6 +86,41 @@ model, step = load_checkpoint("checkpoints/baseline/step-00050000.pt", device="c
 The eval adapter (`prototype/evaluation/lm_eval_wrapper.py`) loads via this path,
 so `--ckpt` accepts any saved checkpoint directly.
 
+Checkpoints also store **optimizer state**, so a run survives a killed session:
+
+```bash
+python -m prototype.training.train --config configs/baseline.yaml --data data/x --resume auto
+```
+
+`--resume auto` restores the newest checkpoint (model + optimizer) and continues
+the LR schedule from the saved step. Essential on free cloud where 12h sessions
+are killed mid-run — see [CLOUD_TRAINING.md](CLOUD_TRAINING.md).
+
+## Performance & Acceleration
+
+The prototype ships the real speed/memory levers; toggle them via config.
+
+| Lever | Config key | Effect |
+|-------|-----------|--------|
+| FlashAttention / mem-efficient SDPA | always on (`transformer.py`) | O(N) attention memory; FA-2 auto on Ampere+, mem-efficient on T4 |
+| `torch.compile` (fused Triton kernels) | `training.compile: true` | ~1.3–2× on CUDA; "using Triton" is `torch.compile`, not hand-written kernels (those are Stage 5) |
+| Gradient checkpointing | `model.gradient_checkpointing: true` | ~30% recompute to fit larger batch/seq on ≤16GB |
+| Chunked cross-entropy | `model.ce_chunk_size: N` | Splits the fp32 logit upcast; avoids the ~13GB spike at `batch16·seq4096·49Kvocab` |
+| TF32 matmul | auto (`train.py`) | Free ~1.3–2× fp32 on Ampere |
+
+`scaled_dot_product_attention` already gives FlashAttention where the hardware
+supports it — there is nothing to `pip install`. Custom CUDA/Triton kernels (the
+Clifford geometric product is the one candidate) are deferred to Stage 5; they are
+premature before a baseline trains.
+
+## Run length: token budget drives steps
+
+`max_steps` is **derived** from `data.train_tokens` so the budget and step count
+cannot drift: `max_steps = ceil(train_tokens / (batch · grad_accum · seq))`. At
+the canonical `5e9` tokens and `262144` tokens/step that is ~19,073 steps. To
+change the budget, edit `train_tokens` (not `max_steps`). The overfit config keeps
+an explicit `max_steps` since it has no token budget.
+
 ## Optimizer: AdamW vs Muon
 
 - **Baseline runs use AdamW.** It is the clean control.
@@ -126,3 +161,8 @@ gates and pivot conditions.
 - Adjust `batch_size` × `grad_accum_steps` to fit memory while holding the
   effective batch (tokens/step) constant across all four ablation models.
 - CPU is fine for the overfit test only.
+- **Free cloud (Kaggle/Colab, 16GB T4/P100):** good for a *proof-of-life* run, not
+  the full science. Use `configs/colab_t4.yaml` (fp16, seq 1024, gradient
+  checkpointing, frequent checkpoints + `--resume`). Precision is per-GPU: T4 → fp16
+  (no bf16 tensor cores), Ampere → bf16. Muon needs bf16/fp32, so the Muon ablation
+  belongs on an Ampere GPU. Full guide: [CLOUD_TRAINING.md](CLOUD_TRAINING.md).

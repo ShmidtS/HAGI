@@ -1,0 +1,54 @@
+# Free-tier proof-of-life — Model A architecture sized for a 16GB T4 (Colab/Kaggle).
+#
+# This is NOT the Stage 0 science run. It validates the end-to-end pipeline and
+# produces a real loss curve on free hardware, then you rent an Ampere GPU for the
+# canonical run (see configs/baseline.yaml + docs/CLOUD_TRAINING.md).
+#
+# Why these choices on a T4 (sm75, 16GB, no bf16 tensor cores):
+#   - precision fp16   : T4 has no bf16 tensor cores; fp16 is the fast path here.
+#                        (Muon needs bf16/fp32 — keep optimizer=adamw on T4.)
+#   - max_seq_len 1024 : full 4096 + 49K-vocab logits won't fit 16GB.
+#   - batch 4 x accum 8: effective 32768 tokens/step within 16GB.
+#   - gradient_checkpointing + ce_chunk_size: cut activation/​logit memory.
+#   - ckpt_interval 500: 12h sessions die — resume with `--resume auto`.
+#   - SDPA dispatches to the mem-efficient kernel on T4 (FlashAttention-2 needs sm80+).
+name: colab_t4
+model:
+  vocab_size: 49152
+  hidden_size: 768
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 1
+  use_loop: false
+  use_gdr: false
+  ce_chunk_size: 1024
+  gradient_checkpointing: true
+  transformer:
+    num_query_heads: 12
+    num_kv_heads: 4
+    intermediate_size: 2048
+    rope_theta: 10000.0
+    max_seq_len: 1024
+
+training:
+  optimizer: adamw           # Muon needs bf16/fp32 — not on a fp16 T4 run
+  precision: fp16
+  compile: true
+  batch_size: 4
+  grad_accum_steps: 8        # effective batch = 4 * 8 * 1024 = 32768 tokens/step
+  learning_rate: 3.0e-4
+  warmup_steps: 300
+  weight_decay: 0.1
+  grad_clip: 1.0
+  ckpt_interval: 500         # frequent: free sessions are killed at 12h / 90min idle
+  seed: 42
+
+data:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"
+  train_tokens: 500_000_000  # proof-of-life: max_steps ≈ 15259; full run is on cloud
+  max_seq_len: 1024
+
+eval:
+  every_n_steps: 500
+  benchmarks: [arc_challenge, boolq, hellaswag]

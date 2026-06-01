@@ -43,6 +43,8 @@ def load_config(path: str | Path) -> dict:
         loop_count=m.get("loop_count", 3),
         use_loop=m.get("use_loop", True),
         use_gdr=m.get("use_gdr", True),
+        gradient_checkpointing=m.get("gradient_checkpointing", False),
+        ce_chunk_size=m.get("ce_chunk_size", 0),
         transformer=tcfg,
         grades=gcfg,
     )
