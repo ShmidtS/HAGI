@@ -6,9 +6,7 @@ from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 
-
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
+from hagi.utils import _clamp01
 
 
 def _item_key(item: Any) -> str:

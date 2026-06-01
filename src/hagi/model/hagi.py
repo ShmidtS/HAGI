@@ -18,7 +18,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .gdr import GradeConfig, GradeDecomposedRecurrence
-from .hdim_full import HDIMFull
+from .hdim_full import DelayedHDIM, HDIMFull
 from .hrm_full import HRMCore
 from .transformer import RMSNorm, TransformerBlock, TransformerConfig, build_rope_cache
 
@@ -35,6 +35,7 @@ class HAGIConfig:
     use_gdr: bool = True
     hdim_full: bool = False
     hdim_heads: int = 4
+    hdim_delay_steps: int = 1
     hrm: bool = False
     h_dim: int = 256
     l_dim: int = 256
@@ -64,7 +65,14 @@ class HAGI(nn.Module):
         self.gdr = None
         if cfg.use_gdr:
             if cfg.hdim_full:
-                self.gdr = HDIMFull(hidden_size=cfg.hidden_size, heads=cfg.hdim_heads)
+                if cfg.hdim_delay_steps > 1:
+                    self.gdr = DelayedHDIM(
+                        hidden_size=cfg.hidden_size,
+                        heads=cfg.hdim_heads,
+                        delay_steps=cfg.hdim_delay_steps,
+                    )
+                else:
+                    self.gdr = HDIMFull(hidden_size=cfg.hidden_size, heads=cfg.hdim_heads)
             else:
                 self.gdr = GradeDecomposedRecurrence(cfg.grades)
         self.hrm = (
@@ -89,6 +97,10 @@ class HAGI(nn.Module):
         self._rope = {}
 
     def _rope_cache(self, T: int, device, dtype, offset: int = 0):
+        if hasattr(self, "_rope_cos") and hasattr(self, "_rope_sin"):
+            cos = self._rope_cos.to(device=device, dtype=dtype)
+            sin = self._rope_sin.to(device=device, dtype=dtype)
+            return cos[offset : offset + T], sin[offset : offset + T]
         key = (T + offset, device, dtype)
         if key not in self._rope:
             head_dim = self.cfg.transformer.hidden_size // self.cfg.transformer.num_query_heads
@@ -148,38 +160,101 @@ class HAGI(nn.Module):
 
         if self.hrm is not None:
             if self.gdr is not None:
-                if training_mode and isinstance(self.gdr, HDIMFull):
+                if (
+                    training_mode
+                    and hasattr(self.gdr, "delay_steps")
+                    and self.gdr.delay_steps > 1
+                ):
+                    num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
+                    tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
+                    h, _, _, gdr_state, pre_gdr_h = self.hrm(
+                        h,
+                        self.reasoning,
+                        cos,
+                        sin,
+                        gdr=self.gdr,
+                        training_mode=training_mode,
+                        tgt_rotor_idx=tgt_idx,
+                    )
+                elif training_mode and isinstance(self.gdr, HDIMFull):
                     num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                     tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
                     gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                     pre_gdr_h = h.clone()
                     h = gdr_state["fused"]
+                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin)
                 else:
                     h = self.gdr(h)
+                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin)
                 gdr_output = h
-            h, _, _ = self.hrm(h, self.reasoning, cos, sin)
+            else:
+                h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin)
             layer_idx += len(self.reasoning)
         else:
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
             for i in range(loops):
                 if self.gdr is not None:
-                    if training_mode and isinstance(self.gdr, HDIMFull):
+                    if (
+                        training_mode
+                        and hasattr(self.gdr, "delay_steps")
+                        and self.gdr.delay_steps > 1
+                    ):
+                        num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
+                        tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
+                        for j, block in enumerate(self.reasoning):
+                            current_step = i * len(self.reasoning) + j
+                            gdr_state = self.gdr(
+                                h,
+                                src_rotor_idx=0,
+                                tgt_rotor_idx=tgt_idx,
+                                return_state=True,
+                                delay_step=current_step,
+                            )
+                            pre_gdr_h = h.clone()
+                            h = gdr_state["fused"]
+                            gdr_output = h
+                            past = past_key_values[layer_idx] if past_key_values is not None else None
+                            if use_cache:
+                                h, next_kv = run_block(block, h, past)
+                                next_key_values.append(next_kv)
+                            else:
+                                h = run_block(block, h)
+                            layer_idx += 1
+                    elif training_mode and isinstance(self.gdr, HDIMFull):
                         num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                         tgt_idx = int(torch.randint(1, num_rotors, (1,)).item()) if num_rotors > 1 else 0
                         gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                         pre_gdr_h = h.clone()
                         h = gdr_state["fused"]
+                        gdr_output = h
+                        for block in self.reasoning:
+                            past = past_key_values[layer_idx] if past_key_values is not None else None
+                            if use_cache:
+                                h, next_kv = run_block(block, h, past)
+                                next_key_values.append(next_kv)
+                            else:
+                                h = run_block(block, h)
+                            layer_idx += 1
                     else:
                         h = self.gdr(h)
-                    gdr_output = h
-                for block in self.reasoning:
-                    past = past_key_values[layer_idx] if past_key_values is not None else None
-                    if use_cache:
-                        h, next_kv = run_block(block, h, past)
-                        next_key_values.append(next_kv)
-                    else:
-                        h = run_block(block, h)
-                    layer_idx += 1
+                        gdr_output = h
+                        for block in self.reasoning:
+                            past = past_key_values[layer_idx] if past_key_values is not None else None
+                            if use_cache:
+                                h, next_kv = run_block(block, h, past)
+                                next_key_values.append(next_kv)
+                            else:
+                                h = run_block(block, h)
+                            layer_idx += 1
+                else:
+                    for block in self.reasoning:
+                        past = past_key_values[layer_idx] if past_key_values is not None else None
+                        if use_cache:
+                            h, next_kv = run_block(block, h, past)
+                            next_key_values.append(next_kv)
+                        else:
+                            h = run_block(block, h)
+                        layer_idx += 1
                 h = h + self.iter_embed[i]
 
         for block in self.expression:

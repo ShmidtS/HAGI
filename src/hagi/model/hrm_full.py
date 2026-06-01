@@ -123,6 +123,9 @@ class HRMCore(nn.Module):
         attn_mask=None,
         z_H: torch.Tensor | HState | None = None,
         z_L: torch.Tensor | LState | None = None,
+        gdr=None,
+        training_mode: bool = False,
+        tgt_rotor_idx: int | torch.Tensor = 0,
     ):
         h = hidden_states
         B, T, H = h.shape
@@ -137,16 +140,38 @@ class HRMCore(nn.Module):
         if z_L is None:
             z_L = self.l_init(pooled)
 
-        for _ in range(self.h_cycles):
-            for _ in range(self.l_cycles):
+        gdr_state = None
+        pre_gdr_h = None
+        for h_cycle in range(self.h_cycles):
+            for l_cycle in range(self.l_cycles):
                 z_l_hidden = self.z_l_to_hidden(z_L).unsqueeze(1).expand(B, T, H)
                 z_h_hidden = self.z_h_to_hidden(z_H).unsqueeze(1).expand(B, T, H)
                 h_in = h + z_l_hidden + z_h_hidden
                 for block in reasoning_blocks:
                     h = block(h_in, cos, sin, attn_mask=attn_mask)
                     h_in = h
+                if gdr is not None:
+                    current_step = h_cycle * self.l_cycles + l_cycle
+                    total_steps = self.h_cycles * self.l_cycles
+                    if (
+                        training_mode
+                        and hasattr(gdr, "delay_steps")
+                        and gdr.delay_steps > 1
+                    ):
+                        pre_gdr_h = h.clone()
+                        gdr_state = gdr(
+                            h,
+                            src_rotor_idx=0,
+                            tgt_rotor_idx=tgt_rotor_idx,
+                            return_state=True,
+                            delay_step=current_step,
+                            total_steps=total_steps,
+                        )
+                        h = gdr_state["fused"]
+                    else:
+                        h = gdr(h)
                 z_L = self.l_transition(z_L, h)
             z_H = self.h_transition(z_H, z_L)
             z_L = self.l_transition.reset(z_H)
 
-        return h, HState(z_H), LState(z_L)
+        return h, HState(z_H), LState(z_L), gdr_state, pre_gdr_h

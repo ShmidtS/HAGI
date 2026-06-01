@@ -103,6 +103,30 @@ class GroupedQueryAttention(nn.Module):
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out
 
+    def forward_repacked(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None):
+        """Fused QKV projection for contiguous memory access during inference."""
+        B, T, _ = x.shape
+        qkv = F.linear(x, self.qkv_weight)
+        q, k, v = qkv.split(self._qkv_splits, dim=-1)
+        q = q.view(B, T, self.nq, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.nkv, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.nkv, self.head_dim).transpose(1, 2)
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
+        if past_key_value is not None:
+            past_key, past_value = past_key_value
+            k = torch.cat([past_key, k], dim=2)
+            v = torch.cat([past_value, v], dim=2)
+        next_key_value = (k, v) if use_cache else None
+        rep = self.nq // self.nkv
+        attn_k = k.repeat_interleave(rep, dim=1)
+        attn_v = v.repeat_interleave(rep, dim=1)
+        is_causal = attn_mask is None and past_key_value is None
+        out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
+        out = out.transpose(1, 2).contiguous().view(B, T, -1)
+        out = self.o_proj(out)
+        return (out, next_key_value) if use_cache else out
+
 
 class SwiGLU(nn.Module):
     def __init__(self, cfg: TransformerConfig):
@@ -114,6 +138,12 @@ class SwiGLU(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down(F.silu(self.gate(x)) * self.up(x))
 
+    def forward_repacked(self, x: torch.Tensor) -> torch.Tensor:
+        """Fused gate-up projection for contiguous memory access during inference."""
+        gate_up = F.linear(x, self.gate_up_weight)
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self.down(F.silu(gate) * up)
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, cfg: TransformerConfig):
@@ -122,6 +152,15 @@ class TransformerBlock(nn.Module):
         self.attn = GroupedQueryAttention(cfg)
         self.mlp_norm = RMSNorm(cfg.hidden_size, cfg.norm_eps)
         self.mlp = SwiGLU(cfg)
+
+    def _apply_folded_norm(self, x: torch.Tensor, which: str) -> torch.Tensor:
+        """Inline rsqrt-only normalization when the gamma weight has been folded."""
+        eps = getattr(self, f"_{which}_norm_eps", None)
+        if eps is not None:
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
+        if which == "attn":
+            return self.attn_norm(x)
+        return self.mlp_norm(x)
 
     def forward(
         self,
@@ -134,25 +173,36 @@ class TransformerBlock(nn.Module):
         attn_mask=None,
     ):
         use_checkpoint = gradient_checkpointing and self.training and not use_cache
+        use_repacked = not self.training and hasattr(self.attn, "qkv_weight")
         if use_checkpoint:
+            h = self._apply_folded_norm(x, "attn")
             attn_out = checkpoint(
-                lambda h, c, s: self.attn(self.attn_norm(h), c, s, attn_mask=attn_mask),
-                x,
+                lambda h, c, s: self.attn(h, c, s, attn_mask=attn_mask),
+                h,
                 cos,
                 sin,
                 use_reentrant=False,
             )
             next_key_value = None
         else:
-            attn_out = self.attn(self.attn_norm(x), cos, sin, past_key_value, use_cache, attn_mask)
+            h = self._apply_folded_norm(x, "attn")
+            if use_repacked:
+                attn_out = self.attn.forward_repacked(h, cos, sin, past_key_value, use_cache, attn_mask)
+            else:
+                attn_out = self.attn(h, cos, sin, past_key_value, use_cache, attn_mask)
             if use_cache:
                 attn_out, next_key_value = attn_out
             else:
                 next_key_value = None
         x = x + attn_out
         if use_checkpoint:
-            mlp_out = checkpoint(lambda h: self.mlp(self.mlp_norm(h)), x, use_reentrant=False)
+            h = self._apply_folded_norm(x, "mlp")
+            mlp_out = checkpoint(lambda h: self.mlp(h), h, use_reentrant=False)
         else:
-            mlp_out = self.mlp(self.mlp_norm(x))
+            h = self._apply_folded_norm(x, "mlp")
+            if use_repacked and hasattr(self.mlp, "gate_up_weight"):
+                mlp_out = self.mlp.forward_repacked(h)
+            else:
+                mlp_out = self.mlp(h)
         x = x + mlp_out
         return (x, next_key_value) if use_cache else x

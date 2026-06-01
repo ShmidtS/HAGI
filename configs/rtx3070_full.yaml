@@ -3,6 +3,8 @@ data:
   num_workers: 4
   pin_memory: true
   tokenizer: HuggingFaceTB/SmolLM2-135M
+  dataset_mode: memmap
+  dataset_name: HuggingFaceTB/smoltalk
 model:
   expression_layers: 4
   grades:
@@ -15,6 +17,7 @@ model:
   h_dim: 256
   hdim_full: true
   hdim_heads: 4
+  hdim_delay_steps: 2
   hidden_size: 768
   hrm: true
   l_dim: 256

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
+from hagi.utils import _clamp01
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 try:
     import typer
 except ImportError:  # pragma: no cover - dependency fallback
@@ -16,14 +14,7 @@ from hagi.data import TokenizerWrapper
 from hagi.inference.chat import ChatSession
 from hagi.model import HAGI
 from hagi.train.config import config_from_dict
-
-
-def _load_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"config must be a mapping: {path}")
-    return data
+from hagi.utils import _load_yaml
 
 
 def _load_model(checkpoint: Path, config: Path, device: str) -> HAGI:

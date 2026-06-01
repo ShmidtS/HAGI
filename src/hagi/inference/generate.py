@@ -147,11 +147,17 @@ def generate(
     cache: CacheKeyValues | None = None,
     use_cache: bool = True,
     compile_model: bool = False,
+    pin_memory: bool = False,
 ) -> Any:
     """Generate token ids with optional KV-cache acceleration."""
     was_training = bool(getattr(model, "training", False))
     if hasattr(model, "eval"):
         model.eval()
+
+    if pin_memory and torch is not None:
+        from hagi.model.inference_opt import pin_model_weights
+        pin_model_weights(model)
+
     model = _maybe_compile(model, compile_model)
 
     if torch is not None:
@@ -207,6 +213,7 @@ def stream_generate(
     cache: CacheKeyValues | None = None,
     use_cache: bool = True,
     compile_model: bool = False,
+    pin_memory: bool = False,
 ) -> Iterator[Any]:
     """Yield next token ids as they are generated."""
     if torch is None:
@@ -228,6 +235,11 @@ def stream_generate(
     was_training = bool(getattr(model, "training", False))
     if hasattr(model, "eval"):
         model.eval()
+
+    if pin_memory and torch is not None:
+        from hagi.model.inference_opt import pin_model_weights
+        pin_model_weights(model)
+
     model = _maybe_compile(model, compile_model)
     generated = prompt_ids if torch.is_tensor(prompt_ids) else torch.tensor(prompt_ids, dtype=torch.long)
     if generated.dim() == 1:

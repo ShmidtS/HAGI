@@ -171,3 +171,95 @@ class HDIMFull(nn.Module):
                 "gate": gate,
             }
         return fused
+
+
+class DelayedHDIM(HDIMFull):
+    """HDIM with Delayed Tensor Parallelism (DTP).
+
+    Accumulates projected multivectors for ``delay_steps`` forward calls
+    during training, then extracts the invariant once from the mean of the
+    accumulated buffer and performs transfer + fusion.  Between aggregations
+    the module returns the hidden state unchanged (identity).
+
+    During evaluation (``self.training == False``) or when ``delay_steps <= 1``
+    the module behaves exactly like :class:`HDIMFull`.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        heads: int = 4,
+        num_rotors: int = 4,
+        blade_count: int = BLADE_COUNT,
+        delay_steps: int = 2,
+    ):
+        super().__init__(hidden_size, heads, num_rotors, blade_count)
+        self.delay_steps = delay_steps
+        self._buffer: list[torch.Tensor] = []
+        self._total_steps: int | None = None
+
+    def reset_buffer(self, total_steps: int | None = None) -> None:
+        """Clear the circular buffer and optional step budget."""
+        self._buffer = []
+        self._total_steps = total_steps
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        src_rotor_idx: int | torch.Tensor = 0,
+        tgt_rotor_idx: int | torch.Tensor = 0,
+        return_state: bool = False,
+        delay_step: int | None = None,
+        total_steps: int | None = None,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        if not self.training or self.delay_steps <= 1 or delay_step is None:
+            return super().forward(hidden_states, src_rotor_idx, tgt_rotor_idx, return_state)
+
+        if delay_step == 0:
+            self.reset_buffer(total_steps)
+        if total_steps is not None:
+            self._total_steps = total_steps
+
+        multivector = self.project(hidden_states)
+        self._buffer.append(multivector)
+
+        # Determine whether we should aggregate now.
+        is_last_step = (
+            self._total_steps is not None
+            and delay_step == self._total_steps - 1
+            and len(self._buffer) > 0
+        )
+        is_full = (delay_step + 1) % self.delay_steps == 0
+        should_aggregate = is_last_step or is_full
+
+        if should_aggregate and len(self._buffer) > 0:
+            agg_mv = torch.stack(self._buffer).mean(dim=0)
+            self._buffer = []
+
+            invariant = self.extract(agg_mv, self.rotors, src_rotor_idx)
+            target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
+            target_invariant = self.extract(target, self.rotors, tgt_rotor_idx)
+            fused, gate = self.fuse(target, hidden_states, return_gate=True)
+
+            if return_state:
+                return {
+                    "fused": fused,
+                    "multivector": agg_mv,
+                    "invariant": invariant,
+                    "target_multivector": target,
+                    "target_invariant": target_invariant,
+                    "gate": gate,
+                }
+            return fused
+
+        # Delayed phase: return identity (hidden state unchanged).
+        if return_state:
+            return {
+                "fused": hidden_states,
+                "multivector": multivector,
+                "invariant": None,
+                "target_multivector": None,
+                "target_invariant": None,
+                "gate": None,
+            }
+        return hidden_states

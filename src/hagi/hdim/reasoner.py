@@ -10,6 +10,8 @@ try:
 except ImportError:  # pragma: no cover - exercised only without torch installed
     torch = None  # type: ignore[assignment]
 
+from hagi.utils import _reordering_sign
+
 BLADE_COUNT = 8
 
 
@@ -21,15 +23,6 @@ def _numpy_geometric_product(x: np.ndarray, y: np.ndarray) -> np.ndarray:
             sign = _reordering_sign(a, b)
             out[..., c] = out[..., c] + sign * x[..., a] * y[..., b]
     return out
-
-
-def _reordering_sign(a: int, b: int) -> int:
-    a >>= 1
-    swaps = 0
-    while a:
-        swaps += int((a & b).bit_count())
-        a >>= 1
-    return -1 if swaps & 1 else 1
 
 
 class HDIMReasoner:

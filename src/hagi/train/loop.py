@@ -153,6 +153,18 @@ def load_checkpoint(path: str, device: str = "cpu") -> tuple[HAGI, int]:
     state = torch.load(path, map_location=device, weights_only=True)
     cfg = config_from_dict(state["config"])
     model = HAGI(cfg)
+
+    if state.get("_inference_opt"):
+        from hagi.model.inference_opt import (
+            fold_rmsnorm_into_weights,
+            precompute_rope_tables,
+            repack_qkv_for_contiguous,
+        )
+        max_seq_len = state.get("_rope_max_seq_len", cfg.transformer.max_seq_len)
+        fold_rmsnorm_into_weights(model)
+        repack_qkv_for_contiguous(model)
+        precompute_rope_tables(model, max_seq_len)
+
     model.load_state_dict(state["model"])
     model.to(device)
     return model, int(state.get("step", 0))

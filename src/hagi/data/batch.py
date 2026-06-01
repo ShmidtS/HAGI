@@ -15,11 +15,7 @@ except ImportError:  # pragma: no cover - numpy fallback for non-torch environme
     torch = None  # type: ignore[assignment]
     DataLoader = None  # type: ignore[assignment]
 
-
-def _as_long_tensor(values: Any) -> Any:
-    if torch is None:
-        return np.asarray(values, dtype=np.int64)
-    return torch.as_tensor(values, dtype=torch.long)
+from hagi.utils import _as_long_tensor
 
 
 def get_batch_memmap(dataset: Any, batch_size: int, seq_len: int) -> tuple[Any, Any]:

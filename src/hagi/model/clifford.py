@@ -25,25 +25,13 @@ from __future__ import annotations
 
 import torch
 
+from hagi.utils import _reordering_sign
+
 BLADE_COUNT = 8
 DIM = 3
 
 # Grade (popcount) of each blade index.
 GRADE = [bin(i).count("1") for i in range(BLADE_COUNT)]  # [0,1,1,2,1,2,2,3]
-
-
-def _reordering_sign(a: int, b: int) -> int:
-    """Sign from reordering the product of two basis blades into canonical order.
-
-    Counts transpositions needed to sort the concatenated basis vectors.
-    Metric is Euclidean (+1) so shared indices contribute no extra sign.
-    """
-    a >>= 1
-    swaps = 0
-    while a:
-        swaps += bin(a & b).count("1")
-        a >>= 1
-    return -1 if (swaps & 1) else 1
 
 
 def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:

@@ -15,12 +15,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
-from hagi.data import MemmapDataset, PrefixLMBatch, create_prefix_lm_batch, get_memmap_dataloader
+from hagi.data import MemmapDataset, PrefixLMBatch, create_prefix_lm_batch, get_memmap_dataloader, get_sft_dataloader
 from hagi.losses import composite_loss
 from hagi.model import HAGI
 from hagi.train.checkpoint import save_checkpoint
+from hagi.data.tokenizer import TokenizerWrapper
 from hagi.train.config import config_from_dict, config_to_dict
 from hagi.train.optim import build_optimizer
 
@@ -137,49 +138,77 @@ def prefix_lm_collate(batch: list[Any], seq_len: int) -> tuple[PrefixLMBatch, to
     return prefix_batch, targets
 
 
+def _shift_collate(batch: list[Any]) -> tuple[Any, Any]:
+    array = np.stack([np.asarray(item, dtype=np.int64) for item in batch])
+    x = array[:, :-1]
+    y = array[:, 1:]
+    return torch.as_tensor(x, dtype=torch.long), torch.as_tensor(y, dtype=torch.long)
+
+
 def build_dataloader(
     cfg: dict[str, Any],
     train_path: Path,
     data_dir: Path,
     use_prefix_lm: bool,
     device: str,
-) -> tuple[Any, int, int, bool]:
+    eval_samples: int = 0,
+    dataset_mode: str = "memmap",
+) -> tuple[Any, Any | None, int, int, bool]:
     train_cfg = cfg.get("training", {})
     data_cfg = cfg.get("data", {})
     seq_len = int(data_cfg.get("max_seq_len", 512))
     batch_size = int(train_cfg.get("batch_size", 2))
     num_workers = int(data_cfg.get("num_workers", 4))
     pin_memory = bool(data_cfg.get("pin_memory", device.startswith("cuda")))
-    dtype = data_cfg.get("dtype", "uint16")
 
-    if use_prefix_lm:
-        dataset = MemmapDataset(train_path, seq_len=seq_len, dtype=dtype)
+    if dataset_mode == "sft":
+        tokenizer_name = str(data_cfg.get("tokenizer", "HuggingFaceTB/SmolLM2-135M"))
+        tokenizer = TokenizerWrapper.smollm2(tokenizer_name, use_fast=True)
+        dataset_name = str(data_cfg.get("dataset_name", "HuggingFaceTB/smoltalk"))
+        local_path = data_cfg.get("local_path")
+        train_loader = get_sft_dataloader(
+            dataset_name=dataset_name,
+            tokenizer=tokenizer.tokenizer,
+            max_seq_len=seq_len,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            local_path=local_path,
+        )
+        eval_loader = None
+        return train_loader, eval_loader, batch_size, seq_len, pin_memory
+
+    dtype = data_cfg.get("dtype", "uint16")
+    dataset = MemmapDataset(train_path, seq_len=seq_len, dtype=dtype)
+    total = len(dataset)
+    if eval_samples > 0:
+        eval_samples = min(eval_samples, total // 10)
+        train_ds = Subset(dataset, list(range(total - eval_samples)))
+        eval_ds = Subset(dataset, list(range(total - eval_samples, total)))
+    else:
+        train_ds = dataset
+        eval_ds = None
+
+    def _make_loader(ds: Any, shuffle: bool) -> Any:
         kwargs: dict[str, Any] = {
             "batch_size": batch_size,
-            "shuffle": True,
+            "shuffle": shuffle,
             "num_workers": num_workers,
             "pin_memory": pin_memory,
-            "collate_fn": partial(prefix_lm_collate, seq_len=seq_len),
             "drop_last": True,
         }
+        if use_prefix_lm:
+            kwargs["collate_fn"] = partial(prefix_lm_collate, seq_len=seq_len)
+        else:
+            kwargs["collate_fn"] = _shift_collate
         if num_workers > 0:
             kwargs["prefetch_factor"] = 4
             kwargs["persistent_workers"] = True
-        return DataLoader(dataset, **kwargs), batch_size, seq_len, pin_memory
+        return DataLoader(ds, **kwargs)
 
-    return (
-        get_memmap_dataloader(
-            train_path,
-            batch_size=batch_size,
-            seq_len=seq_len,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            dtype=dtype,
-        ),
-        batch_size,
-        seq_len,
-        pin_memory,
-    )
+    train_loader = _make_loader(train_ds, shuffle=True)
+    eval_loader = _make_loader(eval_ds, shuffle=False) if eval_ds is not None else None
+    return train_loader, eval_loader, batch_size, seq_len, pin_memory
 
 
 def unwrap_logits(output: Any) -> torch.Tensor:
@@ -225,6 +254,58 @@ def get_grad_norm(model: torch.nn.Module) -> float:
             param_norm = p.grad.data.float().norm(2).item()
             total_norm += param_norm * param_norm
     return math.sqrt(total_norm)
+
+
+@torch.no_grad()
+def run_eval(
+    model: torch.nn.Module,
+    eval_loader: Any,
+    device: str,
+    pin_memory: bool,
+    precision: str,
+    composite_weights: dict[str, float] | None,
+    use_prefix_lm: bool,
+) -> dict[str, float]:
+    was_training = model.training
+    model.eval()
+    total_ce = 0.0
+    total_tokens = 0
+    total_correct = 0
+    total_aux = 0.0
+    total_iso = 0.0
+    num_batches = 0
+    for batch, targets in eval_loader:
+        batch = to_device(batch, device, pin_memory)
+        targets = targets.to(device, non_blocking=pin_memory)
+        targets = apply_prefix_mask(targets, batch)
+        tokens = batch.tokens if isinstance(batch, PrefixLMBatch) else batch
+        with autocast_ctx(precision, device):
+            output = model(tokens, training_mode=True)
+            logits = unwrap_logits(output)
+            ce = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                targets.reshape(-1),
+                ignore_index=-100,
+                reduction="sum",
+            )
+            total_ce += ce.item()
+            valid = targets != -100
+            total_tokens += valid.sum().item()
+            preds = logits.argmax(dim=-1)
+            total_correct += ((preds == targets) & valid).sum().item()
+            if composite_weights is not None:
+                _, components = compute_loss(logits, targets, output, composite_weights)
+                total_aux += components.get("L_aux", 0.0)
+                total_iso += components.get("L_iso", 0.0)
+        num_batches += 1
+    if was_training:
+        model.train()
+    return {
+        "ppl": math.exp(total_ce / max(1, total_tokens)),
+        "acc": 100.0 * total_correct / max(1, total_tokens),
+        "L_aux": total_aux / max(1, num_batches),
+        "L_iso": total_iso / max(1, num_batches),
+    }
 
 
 def update_ema(model: torch.nn.Module, model_ema: torch.nn.Module, decay: float) -> None:
@@ -291,6 +372,8 @@ def main() -> None:
     parser.add_argument("--ckpt-dir", type=Path, default=DEFAULT_CKPT_DIR)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--dataset-mode", choices=["memmap", "sft"], default=None, help="dataset loading mode (overrides config)")
+    parser.add_argument("--resume", type=Path, default=None, help="checkpoint path to resume from")
     args = parser.parse_args()
 
     cfg = load_yaml(args.config)
@@ -303,14 +386,41 @@ def main() -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    model = HAGI(model_cfg).to(args.device)
+    start_step = 0
+    if args.resume is not None and args.resume.exists():
+        from hagi.train.loop import load_checkpoint
+        model, start_step = load_checkpoint(str(args.resume), args.device)
+        model.to(args.device)
+        model_cfg = model.cfg
+        print(f"resumed from {args.resume} at step {start_step}")
+    else:
+        model = HAGI(model_cfg).to(args.device)
     if hasattr(model.cfg, "gradient_checkpointing"):
         model.cfg.gradient_checkpointing = bool(train_cfg.get("gradient_checkpointing", model.cfg.gradient_checkpointing))
-    model_ema = copy.deepcopy(model).to(args.device)
+    if args.resume is not None and args.resume.exists():
+        # Rebuild EMA from loaded model state
+        model_ema = copy.deepcopy(model).to(args.device)
+    else:
+        model_ema = copy.deepcopy(model).to(args.device)
     model_ema.eval()
     for param in model_ema.parameters():
         param.requires_grad_(False)
     optimizer = build_optimizer(model, train_cfg)
+    if args.resume is not None and args.resume.exists():
+        # Try to load optimizer state from checkpoint if present
+        state = torch.load(args.resume, map_location=args.device, weights_only=True)
+        if "optimizer" in state:
+            try:
+                optimizer.load_state_dict(state["optimizer"])
+                print("loaded optimizer state")
+            except Exception as exc:
+                print(f"optimizer state mismatch, starting fresh: {exc}")
+        if "model_ema" in state:
+            try:
+                model_ema.load_state_dict(state["model_ema"])
+                print("loaded EMA state")
+            except Exception as exc:
+                print(f"EMA state mismatch, starting fresh: {exc}")
     train_model = maybe_compile(model, args.device)
     train_model.train()
 
@@ -329,9 +439,13 @@ def main() -> None:
     ema_start_step = int(ema_cfg.get("start_step", train_cfg.get("ema_start_step", 1000)))
     optimizer_kind = str(train_cfg.get("optimizer", "adamw")).lower()
     magic_norm_max = float(train_cfg.get("magic_norm_max", 1.0))
+    data_cfg = cfg.get("data", {})
+    dataset_mode = args.dataset_mode or str(data_cfg.get("dataset_mode", "memmap"))
     train_path = resolve_train_path(cfg, args.data_dir)
-    dataloader, batch_size, seq_len, pin_memory = build_dataloader(
-        cfg, train_path, args.data_dir, use_prefix_lm, args.device
+    eval_interval = int(train_cfg.get("eval_interval", 0))
+    eval_samples = int(train_cfg.get("eval_samples", 500))
+    dataloader, eval_loader, batch_size, seq_len, pin_memory = build_dataloader(
+        cfg, train_path, args.data_dir, use_prefix_lm, args.device, eval_samples=eval_samples, dataset_mode=dataset_mode,
     )
     data_iter = iter(dataloader)
 
@@ -355,7 +469,7 @@ def main() -> None:
     last_loss = float("nan")
     last_components: dict[str, float] = {}
 
-    for step in range(max_steps):
+    for step in range(start_step, max_steps):
         if optimizer_kind == "schedule-free-adamw":
             lr = learning_rate
         else:
@@ -433,14 +547,31 @@ def main() -> None:
             weight_text = ""
             if effective_weights is not None:
                 weight_text = f" | w_aux {effective_weights['w_aux']:.4f} | w_iso {effective_weights['w_iso']:.4f}"
-            eval_model = "ema" if step >= ema_start_step else "model"
+            eval_model_tag = "ema" if step >= ema_start_step else "model"
             print(
                 f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
-                f"ema_decay {ema_decay:.4f} | eval_model {eval_model} | grad_norm {full_grad_norm:.2e} | "
+                f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm:.2e} | "
                 f"magic_norm_max_grad {magic_norm_max_grad:.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}"
             )
             tokens_since_log = 0
             last_log_time = now
+
+        if eval_interval > 0 and eval_loader is not None and step > 0 and step % eval_interval == 0:
+            eval_model = model_ema if step >= ema_start_step else model
+            metrics = run_eval(
+                eval_model,
+                eval_loader,
+                args.device,
+                pin_memory,
+                precision,
+                composite_weights,
+                use_prefix_lm,
+            )
+            eval_tag = "ema" if step >= ema_start_step else "model"
+            print(
+                f"eval | step {step:6d} | ppl {metrics['ppl']:.2f} | acc {metrics['acc']:.1f}% | "
+                f"L_aux {metrics['L_aux']:.4f} | L_iso {metrics['L_iso']:.4f} | {eval_tag}"
+            )
 
         if ckpt_interval > 0 and step > 0 and step % ckpt_interval == 0:
             save_training_checkpoint(model, model_ema, optimizer, step, args.ckpt_dir)
