@@ -5,6 +5,9 @@ import HAGI.TensorRuntime
 import HAGI.MSA
 import HAGI.Invariants
 import HAGI.NARS
+import HAGI.Transformer
+import HAGI.Losses
+import HAGI.Data
 
 /-! Root Lean4 module for the HAGI specification.
 
