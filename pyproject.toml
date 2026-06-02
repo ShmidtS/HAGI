@@ -35,3 +35,5 @@ extraPaths = ["scripts"]
 reportMissingTypeStubs = "warning"
 reportMissingImports = "error"
 reportIncompatibleMethodOverride = "none"
+reportRedeclaration = "none"
+reportPrivateImportUsage = "none"
