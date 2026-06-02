@@ -8,12 +8,15 @@ from typing import Any
 
 import numpy as np
 
+Dataset: Any
 try:
     import torch
-    from torch.utils.data import Dataset
+    from torch.utils.data import Dataset as _TorchDataset
 except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     Dataset = object  # type: ignore[misc,assignment]
+else:
+    Dataset = _TorchDataset
 
 from hagi.utils import _as_long_tensor
 
@@ -85,7 +88,7 @@ def _encode_conversation(
     return SFTExample(input_ids=full_ids, labels=labels)
 
 
-class SFTDataset(Dataset):  # type: ignore[misc]
+class SFTDataset(Dataset):  # type: ignore[type-arg, misc]
     """PyTorch Dataset wrapper for SFT conversational data."""
 
     def __init__(
@@ -95,6 +98,7 @@ class SFTDataset(Dataset):  # type: ignore[misc]
         max_seq_len: int = 512,
         messages_key: str = "messages",
     ) -> None:
+        super().__init__()
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len

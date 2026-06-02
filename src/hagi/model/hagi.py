@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -114,6 +115,8 @@ class HAGI(nn.Module):
         if hasattr(self, "_rope_cos") and hasattr(self, "_rope_sin"):
             cos = self._rope_cos.to(device=device, dtype=dtype)
             sin = self._rope_sin.to(device=device, dtype=dtype)
+            assert isinstance(cos, torch.Tensor)
+            assert isinstance(sin, torch.Tensor)
             return cos[offset : offset + T], sin[offset : offset + T]
         key = (T + offset, device, dtype)
         if key not in self._rope:
@@ -148,11 +151,12 @@ class HAGI(nn.Module):
         layer_idx = 0
         gdr_output = None
         gdr_state = None
+        pre_gdr_h = None
         use_gradient_checkpointing = self.cfg.gradient_checkpointing and self.training and not use_cache
         if self.training:
             self._step += 1
 
-        def run_block(block, hidden, past=None):
+        def run_block(block, hidden, past=None) -> Any:
             if use_gradient_checkpointing:
                 return checkpoint(
                     lambda h, c, s: block(h, c, s, gradient_checkpointing=True),
@@ -168,17 +172,21 @@ class HAGI(nn.Module):
         for block in self.perception:
             past = past_key_values[layer_idx] if past_key_values is not None else None
             if use_cache:
-                h, next_kv = run_block(block, h, past)
+                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
+                assert next_key_values is not None
                 next_key_values.append(next_kv)
             else:
-                h = run_block(block, h)
+                h = run_block(block, h)  # type: ignore[assignment]
             layer_idx += 1
 
         if self.hrm is not None:
             if self.gdr is not None:
+                assert self.gdr is not None
                 if (
                     training_mode
                     and hasattr(self.gdr, "delay_steps")
+                    and isinstance(self.gdr, (HDIMFull, DelayedHDIM))
+                    and isinstance(self.gdr.delay_steps, int)
                     and self.gdr.delay_steps > 1
                 ):
                     num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
@@ -210,9 +218,12 @@ class HAGI(nn.Module):
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
             for i in range(loops):
                 if self.gdr is not None:
+                    assert self.gdr is not None
                     if (
                         training_mode
                         and hasattr(self.gdr, "delay_steps")
+                        and isinstance(self.gdr, (HDIMFull, DelayedHDIM))
+                        and isinstance(self.gdr.delay_steps, int)
                         and self.gdr.delay_steps > 1
                     ):
                         num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
@@ -231,10 +242,11 @@ class HAGI(nn.Module):
                             gdr_output = h
                             past = past_key_values[layer_idx] if past_key_values is not None else None
                             if use_cache:
-                                h, next_kv = run_block(block, h, past)
+                                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
+                                assert next_key_values is not None
                                 next_key_values.append(next_kv)
                             else:
-                                h = run_block(block, h)
+                                h = run_block(block, h)  # type: ignore[assignment]
                             layer_idx += 1
                     elif training_mode and isinstance(self.gdr, HDIMFull):
                         num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
@@ -246,10 +258,11 @@ class HAGI(nn.Module):
                         for block in self.reasoning:
                             past = past_key_values[layer_idx] if past_key_values is not None else None
                             if use_cache:
-                                h, next_kv = run_block(block, h, past)
+                                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
+                                assert next_key_values is not None
                                 next_key_values.append(next_kv)
                             else:
-                                h = run_block(block, h)
+                                h = run_block(block, h)  # type: ignore[assignment]
                             layer_idx += 1
                     else:
                         h = self.gdr(h)
@@ -257,29 +270,32 @@ class HAGI(nn.Module):
                         for block in self.reasoning:
                             past = past_key_values[layer_idx] if past_key_values is not None else None
                             if use_cache:
-                                h, next_kv = run_block(block, h, past)
+                                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
+                                assert next_key_values is not None
                                 next_key_values.append(next_kv)
                             else:
-                                h = run_block(block, h)
+                                h = run_block(block, h)  # type: ignore[assignment]
                             layer_idx += 1
                 else:
                     for block in self.reasoning:
                         past = past_key_values[layer_idx] if past_key_values is not None else None
                         if use_cache:
-                            h, next_kv = run_block(block, h, past)
+                            h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
+                            assert next_key_values is not None
                             next_key_values.append(next_kv)
                         else:
-                            h = run_block(block, h)
+                            h = run_block(block, h)  # type: ignore[assignment]
                         layer_idx += 1
                 h = h + self.iter_embed[i]
 
         for block in self.expression:
             past = past_key_values[layer_idx] if past_key_values is not None else None
             if use_cache:
-                h, next_kv = run_block(block, h, past)
+                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
+                assert next_key_values is not None
                 next_key_values.append(next_kv)
             else:
-                h = run_block(block, h)
+                h = run_block(block, h)  # type: ignore[assignment]
             layer_idx += 1
 
         pre_logits_hidden = h.clone()
@@ -291,6 +307,7 @@ class HAGI(nn.Module):
             if gdr_output is not None:
                 result["auxiliary_output"] = gdr_output
             if gdr_state is not None:
+                assert pre_gdr_h is not None
                 result["invariant_src"] = pre_gdr_h
                 result["invariant_tgt"] = gdr_state["fused"]
             if pre_logits_hidden is not None:

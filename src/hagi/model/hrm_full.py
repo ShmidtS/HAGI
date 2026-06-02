@@ -172,6 +172,9 @@ class HRMCore(nn.Module):
                         h = gdr(h)
                 z_L = self.l_transition(z_L, h)
             z_H = self.h_transition(z_H, z_L)
+            assert isinstance(z_H, torch.Tensor)
             z_L = self.l_transition.reset(z_H)
 
+        assert isinstance(z_L, torch.Tensor)
+        assert isinstance(z_H, torch.Tensor)
         return h, HState(z_H), LState(z_L), gdr_state, pre_gdr_h

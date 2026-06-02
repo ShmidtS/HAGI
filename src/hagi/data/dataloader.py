@@ -1,26 +1,29 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
+Dataset: Any
 try:
     import torch
-    from torch.utils.data import Dataset
+    from torch.utils.data import Dataset as _TorchDataset
 except ImportError:  # pragma: no cover - torch is required for DataLoader use
     torch = None  # type: ignore[assignment]
 
     class Dataset:  # type: ignore[no-redef]
         pass
+else:
+    Dataset = cast(Any, _TorchDataset)
 
 
-class MemmapDataset(Dataset):
+class MemmapDataset(Dataset):  # type: ignore[type-arg, misc]
     def __init__(
         self,
         path: str | Path,
         seq_len: int | None = None,
-        dtype: str | np.dtype[Any] = np.uint16,
+        dtype: str | np.dtype[Any] = "uint16",
         mode: str = "r",
         block_size: int | None = None,
     ) -> None:
@@ -33,9 +36,17 @@ class MemmapDataset(Dataset):
             raise ValueError("seq_len must be positive")
 
     @property
+    def block_size(self) -> int:
+        return self.seq_len
+
+    @property
     def data(self) -> np.memmap[Any, Any]:
         if self._data is None:
-            self._data = np.memmap(self.path, dtype=self.dtype, mode=self.mode)
+            self._data = np.memmap(
+                self.path,
+                dtype=self.dtype,
+                mode=cast(Any, self.mode),
+            )
         return self._data
 
     def __len__(self) -> int:

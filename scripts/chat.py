@@ -187,6 +187,7 @@ def load_production_model(checkpoint: Path, compile_model: bool) -> tuple[torch.
     model.eval()
     if compile_model and device == "cuda" and hasattr(torch, "compile"):
         model = torch.compile(model)
+        assert isinstance(model, torch.nn.Module)
     return model, step
 
 

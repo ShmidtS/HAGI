@@ -22,8 +22,8 @@ def test_synthetic_batch_shapes():
 
 def test_memmap_dataset_mock(tmp_path):
     path = tmp_path / "tokens.bin"
-    np.arange(32, dtype=np.uint16).tofile(path)
-    dataset = MemmapDataset(path, block_size=8, dtype=np.uint16)
+    np.arange(32, dtype="uint16").tofile(path)
+    dataset = MemmapDataset(path, block_size=8, dtype="uint16")
 
     assert len(dataset) == 24
     chunk = dataset[0]
@@ -57,7 +57,7 @@ def test_materialize_token_bins_writes_source_named_files(tmp_path):
 
     assert {path.name for path in paths.values()} == {"edu.bin", "cosmopedia.bin", "smoltalk.bin", "python_instruct.bin"}
     for name, tokens in tokens_by_source.items():
-        array = np.memmap(paths[name], dtype=np.uint16, mode="r")
+        array = np.memmap(paths[name], dtype="uint16", mode="r")
         assert array.tolist() == tokens
 
     manifest = json.loads((tmp_path / "download_manifest.json").read_text(encoding="utf-8"))
@@ -133,7 +133,7 @@ def test_skip_existing_path_short_circuits(monkeypatch, tmp_path):
         skip_existing=True,
     )
     existing = tmp_path / "edu.bin"
-    np.arange(4096, dtype=np.uint16).tofile(existing)
+    np.arange(4096, dtype="uint16").tofile(existing)
 
     calls = {"load_dataset": 0}
 

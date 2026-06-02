@@ -1,29 +1,32 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence, cast
 
 import numpy as np
 
 try:
     import torch
-    from torch.utils.data import DataLoader, Dataset
+    from torch.utils.data import DataLoader as _TorchDataLoader, Dataset as _TorchDataset
 except ImportError:  # pragma: no cover - torch is required for DataLoader use
     torch = None  # type: ignore[assignment]
     DataLoader = None  # type: ignore[assignment]
 
     class Dataset:  # type: ignore[no-redef]
         pass
+else:
+    DataLoader = cast(Any, _TorchDataLoader)
+    Dataset = cast(Any, _TorchDataset)
 
 from hagi.utils import _as_long_tensor
 
 
-class WeightedMemmapDataset(Dataset):
+class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
     def __init__(
         self,
-        mix: list[tuple[str | Path, float]],
+        mix: Sequence[tuple[str | Path, float]],
         seq_len: int,
-        dtype: str | np.dtype[Any] = np.uint16,
+        dtype: str | np.dtype[Any] = "uint16",
         seed: int = 0,
     ) -> None:
         if not mix:
@@ -36,7 +39,7 @@ class WeightedMemmapDataset(Dataset):
         self.paths: list[Path] = []
         self._lengths: list[int] = []
         weights: list[float] = []
-        arrays: list[np.memmap[Any, Any]] = []
+        arrays: list[np.memmap[Any, Any] | None] = []
         for path, weight in mix:
             weight = float(weight)
             if not np.isfinite(weight) or weight <= 0.0:
@@ -53,7 +56,7 @@ class WeightedMemmapDataset(Dataset):
         total = sum(weights)
         self.weights = np.asarray([weight / total for weight in weights], dtype=np.float64)
         self._total_length = sum(length - self.seq_len for length in self._lengths)
-        self._arrays: list[np.memmap[Any, Any] | None] = arrays
+        self._arrays = arrays
 
     def _array(self, source_index: int) -> np.memmap[Any, Any]:
         array = self._arrays[source_index]
@@ -91,12 +94,12 @@ def _mixed_shift_collate(batch: list[tuple[Any, Any]]) -> tuple[Any, Any]:
 
 
 def get_mixed_memmap_dataloader(
-    mix: list[tuple[str | Path, float]],
+    mix: Sequence[tuple[str | Path, float]],
     batch_size: int,
     seq_len: int,
     num_workers: int = 2,
     pin_memory: bool = True,
-    dtype: str | np.dtype[Any] = np.uint16,
+    dtype: str | np.dtype[Any] = "uint16",
     seed: int = 0,
 ) -> Any:
     if torch is None or DataLoader is None:
@@ -113,4 +116,4 @@ def get_mixed_memmap_dataloader(
     if num_workers > 0:
         kwargs["prefetch_factor"] = 4
         kwargs["persistent_workers"] = True
-    return DataLoader(dataset, **kwargs)
+    return DataLoader(cast(Any, dataset), **kwargs)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -13,18 +15,18 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e
     """Approximate orthogonalization of a 2D matrix via quintic Newton-Schulz."""
     assert G.ndim == 2, "Muon orthogonalization expects a 2D matrix"
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.bfloat16()
+    x = G.bfloat16()
     transposed = G.size(0) > G.size(1)
     if transposed:
-        X = X.T
-    X = X / (X.norm() + eps)
+        x = x.T
+    x = x / (x.norm() + eps)
     for _ in range(steps):
-        A = X @ X.T
+        A = x @ x.T
         B = b * A + c * (A @ A)
-        X = a * X + B @ X
+        x = a * x + B @ x
     if transposed:
-        X = X.T
-    return X
+        x = x.T
+    return x
 
 
 class Muon(torch.optim.Optimizer):
@@ -36,7 +38,7 @@ class Muon(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
     @torch.no_grad()
-    def step(self):
+    def step(self, closure=None) -> float | None:  # type: ignore
         for group in self.param_groups:
             lr = group["lr"]
             momentum = group["momentum"]
@@ -88,7 +90,7 @@ class ScheduleFreeAdamW(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
     @torch.no_grad()
-    def step(self):
+    def step(self, closure=None) -> float | None:  # type: ignore
         for group in self.param_groups:
             lr = group["lr"]
             wd = group["weight_decay"]
@@ -164,7 +166,7 @@ class AdamMini(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
     @torch.no_grad()
-    def step(self):
+    def step(self, closure=None) -> float | None:  # type: ignore
         for group in self.param_groups:
             lr = group["lr"]
             beta1, beta2 = group["betas"]
@@ -248,26 +250,25 @@ class AdamMini(torch.optim.Optimizer):
                     p.add_(update, alpha=-lr)
 
 
-class CombinedOptimizer:
+class CombinedOptimizer(torch.optim.Optimizer):
     """Steps several optimizers together; exposes a unified zero_grad/step/state_dict."""
 
     def __init__(self, optimizers: list[torch.optim.Optimizer]):
+        # pass a dummy param so the base class doesn't error on empty params
+        super().__init__([torch.zeros(1)], {})
         self.optimizers = optimizers
+        self.param_groups = []
+        for opt in optimizers:
+            self.param_groups.extend(opt.param_groups)
 
     def zero_grad(self, set_to_none: bool = True):
         for opt in self.optimizers:
             opt.zero_grad(set_to_none=set_to_none)
 
-    def step(self):
+    def step(self, closure=None) -> float | None:  # type: ignore
         for opt in self.optimizers:
             opt.step()
-
-    @property
-    def param_groups(self):
-        groups = []
-        for opt in self.optimizers:
-            groups.extend(opt.param_groups)
-        return groups
+        return None
 
     def state_dict(self):
         return {f"opt_{i}": opt.state_dict() for i, opt in enumerate(self.optimizers)}
@@ -280,11 +281,11 @@ class CombinedOptimizer:
             opt.load_state_dict(state_dict[key])
 
 
-def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict) -> "CombinedOptimizer":
+def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]) -> "CombinedOptimizer":
     """Muon on 2D hidden weights + AdamW on 1D/embed/head. arch_decision §Optimizer."""
     adamw_lr = float(cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
     wd = float(cfg.get("weight_decay", 0.1))
-    betas = tuple(cfg.get("betas", (0.9, 0.95)))
+    betas_cfg = cast(tuple[float, float], tuple(cfg.get("betas", (0.9, 0.95))))
     eps = float(cfg.get("eps", 1e-8))
     muon_params = [p for n, p in named if _is_muon_param(n, p)]
     adam_params = [p for n, p in named if not _is_muon_param(n, p)]
@@ -297,19 +298,19 @@ def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict) -> "Comb
     adam = torch.optim.AdamW(
         adam_params,
         lr=adamw_lr,
-        betas=betas,
+        betas=betas_cfg,
         eps=eps,
         weight_decay=0.0,
     )
     return CombinedOptimizer([muon, adam])
 
 
-def build_optimizer(model: nn.Module, cfg: dict):
+def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
     """Build AdamW or Muon+AdamW from a training-config dict."""
     kind = cfg.get("optimizer", "adamw").lower()
     lr = cfg.get("learning_rate", 3e-4)
     wd = cfg.get("weight_decay", 0.1)
-    betas = tuple(cfg.get("betas", (0.9, 0.95)))
+    betas_cfg = cast(tuple[float, float], tuple(cfg.get("betas", (0.9, 0.95))))
     eps = cfg.get("eps", 1e-8)
 
     named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
@@ -325,7 +326,7 @@ def build_optimizer(model: nn.Module, cfg: dict):
                 {"params": decay, "weight_decay": wd},
                 {"params": no_decay, "weight_decay": 0.0},
             ],
-            lr=lr, betas=betas, eps=eps,
+            lr=lr, betas=betas_cfg, eps=eps,
         )
 
     if kind == "schedule-free-adamw":
@@ -336,7 +337,7 @@ def build_optimizer(model: nn.Module, cfg: dict):
                 {"params": decay, "weight_decay": wd},
                 {"params": no_decay, "weight_decay": 0.0},
             ],
-            lr=lr, betas=betas, eps=eps,
+            lr=lr, betas=betas_cfg, eps=eps,
             avg_decay=cfg.get("schedule_free_avg_decay", 0.999),
         )
 
@@ -348,7 +349,7 @@ def build_optimizer(model: nn.Module, cfg: dict):
                 {"params": decay, "weight_decay": wd},
                 {"params": no_decay, "weight_decay": 0.0},
             ],
-            lr=lr, betas=betas, eps=eps,
+            lr=lr, betas=betas_cfg, eps=eps,
             block_size=cfg.get("adam_mini_block_size", 128),
         )
 

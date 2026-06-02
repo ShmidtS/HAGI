@@ -86,7 +86,7 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, cfg.norm_eps)
             self.k_norm = RMSNorm(self.head_dim, cfg.norm_eps)
 
-    def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None):
+    def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         B, T, _ = x.shape
         q = self.q_proj(x).view(B, T, self.nq, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.nkv, self.head_dim).transpose(1, 2)
@@ -115,6 +115,7 @@ class GroupedQueryAttention(nn.Module):
     def forward_repacked(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None):
         """Fused QKV projection for contiguous memory access during inference."""
         B, T, _ = x.shape
+        assert isinstance(self.qkv_weight, torch.Tensor)
         qkv = F.linear(x, self.qkv_weight)
         q, k, v = qkv.split(self._qkv_splits, dim=-1)
         q = q.view(B, T, self.nq, self.head_dim).transpose(1, 2)
@@ -149,6 +150,7 @@ class SwiGLU(nn.Module):
 
     def forward_repacked(self, x: torch.Tensor) -> torch.Tensor:
         """Fused gate-up projection for contiguous memory access during inference."""
+        assert isinstance(self.gate_up_weight, torch.Tensor)
         gate_up = F.linear(x, self.gate_up_weight)
         gate, up = gate_up.chunk(2, dim=-1)
         return self.down(F.silu(gate) * up)
@@ -203,6 +205,7 @@ class TransformerBlock(nn.Module):
                 attn_out, next_key_value = attn_out
             else:
                 next_key_value = None
+        assert isinstance(attn_out, torch.Tensor)
         x = x + attn_out
         if use_checkpoint:
             h = self._apply_folded_norm(x, "mlp")
@@ -213,5 +216,6 @@ class TransformerBlock(nn.Module):
                 mlp_out = self.mlp.forward_repacked(h)
             else:
                 mlp_out = self.mlp(h)
+        assert isinstance(mlp_out, torch.Tensor)
         x = x + mlp_out
         return (x, next_key_value) if use_cache else x

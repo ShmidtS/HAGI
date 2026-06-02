@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import logging
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -116,7 +117,7 @@ def compute_auxiliary_loss(aux_output) -> torch.Tensor:
     return -(log_prob * positive_mask).sum(dim=1)[valid].div(positive_count[valid]).mean()
 
 
-def _as_logits(output: torch.Tensor | tuple | dict) -> torch.Tensor:
+def _as_logits(output: torch.Tensor | tuple[Any, ...] | dict[str, Any]) -> torch.Tensor:
     if isinstance(output, torch.Tensor):
         return output
     if isinstance(output, tuple):
@@ -126,7 +127,7 @@ def _as_logits(output: torch.Tensor | tuple | dict) -> torch.Tensor:
     raise TypeError("model output must be a tensor, tuple, or dict")
 
 
-def _model_output_tensor(model_output: torch.Tensor | dict | None) -> torch.Tensor | None:
+def _model_output_tensor(model_output: torch.Tensor | dict[str, Any] | None) -> torch.Tensor | None:
     if model_output is None:
         return None
     if isinstance(model_output, torch.Tensor):
@@ -182,7 +183,7 @@ def composite_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
     auxiliary_output=None,
-    model_output: torch.Tensor | dict | None = None,
+    model_output: torch.Tensor | dict[str, Any] | None = None,
     weights: dict[str, float] | None = None,
     invariant_src=None,
     invariant_tgt=None,

@@ -9,13 +9,13 @@ import time
 import warnings
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from hagi.data import (
     MemmapDataset,
@@ -74,6 +74,8 @@ def resolve_train_path(cfg: dict[str, Any], train_path_override: Path | None, da
         if not path.is_absolute():
             path = ROOT / path
         return path
+    if data_dir is None:
+        raise ValueError("data_dir is required when no train_path override or configured path")
     bin_files = sorted(data_dir.glob("*.bin"))
     if not bin_files:
         raise FileNotFoundError(f"no memmap .bin files found in {data_dir}")
@@ -237,6 +239,7 @@ def maybe_compile(model: HAGI, device: str) -> torch.nn.Module:
             return model
     try:
         compiled = torch.compile(model, mode="reduce-overhead")  # type: ignore[return-value]
+        assert isinstance(compiled, torch.nn.Module)
         with torch.no_grad():
             dummy = torch.zeros(1, 1, dtype=torch.long, device=device)
             compiled(dummy)
@@ -379,12 +382,14 @@ def build_full_dataloader(
         )
         return train_loader, eval_loader, batch_size, seq_len, pin_memory
 
+    if train_path is None:
+        raise ValueError("train_path is required when no mix_paths")
     dataset = MemmapDataset(train_path, seq_len=seq_len, dtype=dtype)
     total = len(dataset)
     if eval_samples > 0:
         eval_samples = min(eval_samples, total // 10)
-        train_ds = Subset(dataset, list(range(total - eval_samples)))
-        eval_ds = Subset(dataset, list(range(total - eval_samples, total)))
+        train_ds = Subset(cast(Any, dataset), list(range(total - eval_samples)))
+        eval_ds = Subset(cast(Any, dataset), list(range(total - eval_samples, total)))
     else:
         train_ds = dataset
         eval_ds = None
@@ -635,7 +640,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     log_interval = int(train_cfg.get("log_interval", 25))
     ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
     use_scaler = precision == "fp16" and args.device.startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
 
     args.ckpt_dir.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
@@ -669,14 +674,14 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             tokens_since_log += x.numel()
 
         if use_scaler:
-            scaler.unscale_(optimizer)
+            scaler.unscale_(optimizer)  # type: ignore[arg-type]
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         if use_scaler:
-            scaler.step(optimizer)
+            scaler.step(optimizer)  # type: ignore[arg-type]
             scaler.update()
         else:
-            optimizer.step()
+            optimizer.step()  # type: ignore[arg-type]
 
         last_loss = accum_loss
         if step % log_interval == 0:
@@ -769,7 +774,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     log_interval = int(train_cfg.get("log_interval", 25))
     ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
     use_scaler = precision == "fp16" and args.device.startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
 
     print_model_summary(model, model_cfg, args.device, use_prefix_lm, composite_weights is not None)
     if args.dry_run:
@@ -857,7 +862,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             last_components = {name: value / grad_accum_steps for name, value in accum_components.items()}
 
         if use_scaler:
-            scaler.unscale_(optimizer)
+            scaler.unscale_(optimizer)  # type: ignore[arg-type]
 
         full_grad_norm = get_grad_norm(model)
         if grad_clip > 0:
@@ -869,10 +874,10 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
 
         magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
         if use_scaler:
-            scaler.step(optimizer)
+            scaler.step(optimizer)  # type: ignore[arg-type]
             scaler.update()
         else:
-            optimizer.step()
+            optimizer.step()  # type: ignore[arg-type]
         if step >= ema_start_step:
             update_ema(model, model_ema, ema_decay)
 
@@ -914,9 +919,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             )
 
         if ckpt_interval > 0 and step > 0 and step % ckpt_interval == 0:
-            save_training_checkpoint(model, model_ema, optimizer, step, args.ckpt_dir)
+            save_training_checkpoint(model, model_ema, optimizer, step, args.ckpt_dir)  # type: ignore[arg-type]
 
-    save_training_checkpoint(model, model_ema, optimizer, max_steps, args.ckpt_dir)
+    save_training_checkpoint(model, model_ema, optimizer, max_steps, args.ckpt_dir)  # type: ignore[arg-type]
     total_tokens = max_steps * grad_accum_steps * batch_size * seq_len
     total_elapsed = max(time.perf_counter() - start_time, 1e-9)
     print(f"final_loss {last_loss:.4f} | avg_tokens/sec {total_tokens / total_elapsed:.0f}")

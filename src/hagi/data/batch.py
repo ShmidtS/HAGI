@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -53,7 +53,7 @@ def get_memmap_dataloader(
     seq_len: int,
     num_workers: int = 2,
     pin_memory: bool = True,
-    dtype: str | np.dtype[Any] = np.uint16,
+    dtype: str | np.dtype[Any] = "uint16",
 ) -> Any:
     if torch is None or DataLoader is None:
         raise ImportError("torch is required for get_memmap_dataloader")
@@ -69,7 +69,7 @@ def get_memmap_dataloader(
     if num_workers > 0:
         kwargs["prefetch_factor"] = 4
         kwargs["persistent_workers"] = True
-    return DataLoader(dataset, **kwargs)
+    return DataLoader(cast(Any, dataset), **kwargs)
 
 
 def get_batch_synthetic(vocab_size: int, batch_size: int, seq_len: int) -> tuple[Any, Any]:

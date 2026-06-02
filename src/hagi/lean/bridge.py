@@ -11,7 +11,7 @@ import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from torch import Tensor
@@ -40,7 +40,7 @@ class LeanBridge:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def validate_transformer_config(config: dict | object) -> None:
+    def validate_transformer_config(config: dict[str, Any] | object) -> None:
         """Validate config matches Lean `Transformer.TransformerConfig` proof fields.
 
         Raises ValueError with the same message contract as Lean structure fields.
@@ -87,7 +87,7 @@ class LeanBridge:
             )
 
     @staticmethod
-    def validate_hrm_config(config: dict | object) -> None:
+    def validate_hrm_config(config: dict[str, Any] | object) -> None:
         """Validate config matches Lean `HRM.HRMConfig` proof fields."""
         if isinstance(config, dict):
             h_cycles = int(config.get("h_cycles", 1))
@@ -183,7 +183,7 @@ class LeanBridge:
     # Full HAGI config validator (combines all sub-validators)
     # ------------------------------------------------------------------
 
-    def validate_hagi_config(self, config: dict | object) -> None:
+    def validate_hagi_config(self, config: dict[str, Any] | object) -> None:
         """Run all Lean-mirrored validators on a full HAGI training config."""
         self.validate_transformer_config(config)
         self.validate_hrm_config(config)
@@ -194,5 +194,5 @@ def verify(root_path: str | Path) -> bool:
     return LeanBridge().check(root_path)
 
 
-def validate_config(config: dict | object) -> None:
+def validate_config(config: dict[str, Any] | object) -> None:
     LeanBridge().validate_hagi_config(config)

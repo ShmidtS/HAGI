@@ -52,6 +52,7 @@ class GoldenEvaluator:
     @staticmethod
     def _to_float(value: Any) -> float:
         if isinstance(value, Number):
+            assert isinstance(value, (int, float))
             return float(value)
         if hasattr(value, "item"):
             return float(value.item())

@@ -12,7 +12,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 
@@ -57,7 +57,7 @@ def _autocast_ctx(precision: str, device: str):
 
 
 @torch.no_grad()
-def estimate_loss(model: HAGI, get_batch: Callable, iters: int, device: str, precision: str) -> float:
+def estimate_loss(model: HAGI, get_batch: Callable[..., Any], iters: int, device: str, precision: str) -> float:
     model.eval()
     losses = []
     for _ in range(iters):
@@ -72,11 +72,11 @@ def estimate_loss(model: HAGI, get_batch: Callable, iters: int, device: str, pre
 def train(
     model: HAGI,
     optimizer,
-    get_batch: Callable,
+    get_batch: Callable[..., Any],
     cfg: LoopConfig,
     device: str = "cpu",
-    eval_get_batch: Callable | None = None,
-    on_log: Callable[[dict], None] | None = None,
+    eval_get_batch: Callable[..., Any] | None = None,
+    on_log: Callable[[dict[str, Any]], None] | None = None,
 ):
     """Run the training loop. Returns the final training loss."""
     if device.startswith("cuda"):

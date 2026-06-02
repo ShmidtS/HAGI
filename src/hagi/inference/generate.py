@@ -7,10 +7,10 @@ import numpy as np
 
 try:
     import torch
-    import torch.nn.functional as F
+    import torch.nn.functional as _f
 except ImportError:  # pragma: no cover - torch is an optional runtime fallback
     torch = None  # type: ignore[assignment]
-    F = None  # type: ignore[assignment]
+    _f = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -50,8 +50,9 @@ def _filter_top_p(logits: Any, top_p: float | None) -> Any:
     if top_p is None or top_p <= 0.0 or top_p >= 1.0:
         return logits
     if torch is not None and torch.is_tensor(logits):
+        assert _f is not None
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        sorted_probs = F.softmax(sorted_logits, dim=-1)
+        sorted_probs = _f.softmax(sorted_logits, dim=-1)
         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
         sorted_indices_to_remove = cumulative_probs > top_p
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
@@ -89,7 +90,8 @@ def sample_next_token(
         if temperature <= 0:
             return torch.argmax(logits, dim=-1)
         logits = _filter_top_p(_filter_top_k(logits / temperature, top_k), top_p)
-        probs = F.softmax(logits, dim=-1)
+        assert _f is not None
+        probs = _f.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
     logits = np.asarray(logits)

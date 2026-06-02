@@ -9,6 +9,8 @@ SMOLLM2_TOKENIZER = "HuggingFaceTB/SmolLM2-135M"
 class _DummyTokenizer:
     pad_token_id = 0
     eos_token_id = 0
+    pad_token = None
+    eos_token = None
 
     def encode(self, text: str, **_: Any) -> list[int]:
         return [ord(char) for char in text]
@@ -71,6 +73,7 @@ class TokenizerWrapper:
         **kwargs: Any,
     ) -> Any:
         if hasattr(self.tokenizer, "__call__"):
+            assert callable(self.tokenizer)
             return self.tokenizer(
                 texts,
                 padding=padding,

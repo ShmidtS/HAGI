@@ -274,10 +274,10 @@ def test_build_full_dataloader_uses_eval_path_with_mix_paths(tmp_path):
         eval_samples=0,
         dataset_mode="memmap_packed",
     )
+    assert train_loader is not None
+    assert eval_loader is not None
     train_x, train_y = next(iter(train_loader))
     eval_x, eval_y = next(iter(eval_loader))
-
-    assert eval_loader is not None
     assert batch_size == 2
     assert seq_len == 8
     assert pin_memory is False

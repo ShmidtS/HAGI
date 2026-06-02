@@ -43,6 +43,7 @@ class DomainRotor(nn.Module):
         self.register_buffer("even_mask", even_mask)
 
     def _normalized_rotors(self) -> torch.Tensor:
+        assert isinstance(self.even_mask, torch.Tensor)
         rotors = self.rotor_params * self.even_mask
         norm_sq = geometric_product(rotors, reverse(rotors))[..., :1].abs().clamp_min(1e-8)
         return rotors / torch.sqrt(norm_sq)
@@ -157,7 +158,7 @@ class HDIMFull(nn.Module):
         src_rotor_idx: int | torch.Tensor = 0,
         tgt_rotor_idx: int | torch.Tensor = 0,
         return_state: bool = False,
-    ) -> torch.Tensor | dict[str, torch.Tensor]:
+    ) -> torch.Tensor | dict[str, torch.Tensor | None]:
         if not self.use_hdim_cross_domain:
             if return_state:
                 B, T, _ = hidden_states.shape
@@ -227,7 +228,7 @@ class DelayedHDIM(HDIMFull):
         return_state: bool = False,
         delay_step: int | None = None,
         total_steps: int | None = None,
-    ) -> torch.Tensor | dict[str, torch.Tensor]:
+    ) -> torch.Tensor | dict[str, torch.Tensor | None]:
         if not self.training or self.delay_steps <= 1 or delay_step is None:
             return super().forward(hidden_states, src_rotor_idx, tgt_rotor_idx, return_state)
 

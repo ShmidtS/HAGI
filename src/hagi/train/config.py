@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 
-def config_to_dict(cfg: Any) -> dict[str, Any]:
+def config_to_dict(cfg: Any) -> Any:
     """Convert a config object into a plain nested dictionary."""
     if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type):
         return {
@@ -30,12 +30,14 @@ def config_from_dict(d: Mapping[str, Any]):
     grades = values.get("grades")
 
     if isinstance(transformer, Mapping):
-        values["transformer"] = TransformerConfig(**transformer)
+        assert isinstance(transformer, dict)
+        values["transformer"] = TransformerConfig(**cast(dict[str, Any], transformer))
     elif transformer is None:
         values.pop("transformer", None)
 
     if isinstance(grades, Mapping):
-        values["grades"] = GradeConfig(**grades)
+        assert isinstance(grades, dict)
+        values["grades"] = GradeConfig(**cast(dict[str, Any], grades))
     elif grades is None:
         values.pop("grades", None)
 

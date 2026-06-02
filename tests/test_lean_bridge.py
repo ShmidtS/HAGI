@@ -1,13 +1,15 @@
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 bridge_module = pytest.importorskip("hagi.lean.bridge")
-LeanBridge = getattr(bridge_module, "LeanBridge", None)
+LeanBridge: Any = getattr(bridge_module, "LeanBridge", None)
 if LeanBridge is None:
     pytest.skip("LeanBridge is not implemented", allow_module_level=True)
+assert LeanBridge is not None
 
 
 def test_lean_bridge_verify_with_mocked_subprocess(tmp_path):

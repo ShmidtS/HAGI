@@ -200,11 +200,11 @@ def _row_text(source: str, row: dict[str, Any]) -> str:
     return str(row.get("text", ""))
 
 
-def _dataset_spec_for_source(source: str) -> tuple[str, str | None, str]:
+def _dataset_spec_for_source(source: str) -> tuple[str, str | list[str] | None, str]:
     if source == "python_instruct":
         return "iamtarun/python_code_instructions_18k_alpaca", None, "train"
     preset = DATASET_PRESETS[source]
-    return str(preset["dataset"]), preset.get("name"), str(preset.get("split", "train"))
+    return str(preset["dataset"]), preset.get("name"), str(preset.get("split", "train"))  # type: ignore
 
 
 def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:

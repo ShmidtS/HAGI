@@ -8,6 +8,8 @@ These transforms are NOT safe to apply to a model that will continue training:
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -32,32 +34,38 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
     for module in model.modules():
         if isinstance(module, TransformerBlock):
             if isinstance(module.attn_norm, RMSNorm):
+                assert isinstance(module.attn_norm, RMSNorm)
                 gamma = module.attn_norm.weight.data
                 for proj in (module.attn.q_proj, module.attn.k_proj, module.attn.v_proj):
                     with torch.no_grad():
                         # nn.Linear weight shape is (out_features, in_features).
                         # RMSNorm scales each input dimension, so we scale columns.
-                        proj.weight.data.mul_(gamma.view(1, -1))
-                module._attn_norm_eps = module.attn_norm.eps
-                module.attn_norm = nn.Identity()
+                        proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+                object.__setattr__(module, "_attn_norm_eps", module.attn_norm.eps)
+                object.__setattr__(module, "attn_norm", nn.Identity())
                 folded_any = True
 
             if isinstance(module.mlp_norm, RMSNorm):
+                assert isinstance(module.mlp_norm, RMSNorm)
                 gamma = module.mlp_norm.weight.data
                 for proj in (module.mlp.gate, module.mlp.up):
                     with torch.no_grad():
-                        proj.weight.data.mul_(gamma.view(1, -1))
-                module._mlp_norm_eps = module.mlp_norm.eps
-                module.mlp_norm = nn.Identity()
+                        proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+                object.__setattr__(module, "_mlp_norm_eps", module.mlp_norm.eps)
+                object.__setattr__(module, "mlp_norm", nn.Identity())
                 folded_any = True
 
     # Fold final_norm into lm_head ONLY if weights are NOT tied.
     if hasattr(model, "lm_head") and hasattr(model, "final_norm") and hasattr(model, "embed"):
-        if isinstance(model.final_norm, RMSNorm) and model.lm_head.weight is not model.embed.weight:
-            gamma = model.final_norm.weight.data
+        lm_head_obj = model.lm_head
+        embed_obj = model.embed
+        assert isinstance(lm_head_obj, nn.Linear)
+        assert isinstance(embed_obj, nn.Embedding)
+        if isinstance(model.final_norm, RMSNorm) and lm_head_obj.weight is not embed_obj.weight:
+            gamma = model.final_norm.weight.data  # type: ignore
             with torch.no_grad():
-                model.lm_head.weight.data.mul_(gamma.view(1, -1))
-            model.final_norm = nn.Identity()
+                lm_head_obj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+            model.final_norm = cast(Any, nn.Identity())
             folded_any = True
 
     if not folded_any:
@@ -83,7 +91,7 @@ def repack_qkv_for_contiguous(model: nn.Module) -> nn.Module:
                 wv = attn.v_proj.weight.data
                 qkv = torch.cat([wq, wk, wv], dim=0).contiguous()
                 attn.register_buffer("qkv_weight", qkv)
-                attn._qkv_splits = [wq.size(0), wk.size(0), wv.size(0)]
+                object.__setattr__(attn, "_qkv_splits", [wq.size(0), wk.size(0), wv.size(0)])
                 repacked_any = True
 
             mlp = module.mlp
@@ -116,7 +124,7 @@ def precompute_rope_tables(model: nn.Module, max_seq_len: int) -> nn.Module:
     )
     model.register_buffer("_rope_cos", cos)
     model.register_buffer("_rope_sin", sin)
-    model._rope_max_seq_len = max_seq_len
+    object.__setattr__(model, "_rope_max_seq_len", max_seq_len)
     return model
 
 
