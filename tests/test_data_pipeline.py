@@ -2,6 +2,7 @@ import argparse
 import json
 
 import numpy as np
+import pytest
 
 from hagi.data import MemmapDataset, get_batch_memmap, get_batch_synthetic
 import scripts.download_data as download_data
@@ -84,3 +85,78 @@ def test_main_materialize_mix_downloads_mixed_bins(monkeypatch, tmp_path):
     download_data.main()
 
     assert calls == [download_data.DEFAULT_MIX]
+
+
+def test_v2_50m_preset_present_and_normalized():
+    mix = download_data.parse_mix("v2_50m")
+    assert abs(sum(mix.values()) - 1.0) < 1e-6
+    assert set(mix) == {"edu", "cosmopedia", "wikitext", "smoltalk", "tinystories", "python_instruct", "openwebtext"}
+    assert "tinycodes" not in mix  # nampdn-ai/tiny-codes is gated
+    assert mix["edu"] == pytest.approx(0.5102, abs=1e-3)
+    assert mix["wikitext"] == pytest.approx(0.1020, abs=1e-3)
+    assert mix["openwebtext"] == pytest.approx(0.0306, abs=1e-3)
+
+
+def test_new_presets_expose_open_hf_datasets():
+    for key in ("tinystories", "wikitext", "openwebtext", "tinycodes"):
+        assert key in download_data.DATASET_PRESETS, f"missing preset {key}"
+        assert "dataset" in download_data.DATASET_PRESETS[key]
+
+
+def test_row_text_handles_new_sources():
+    assert download_data._row_text("tinystories", {"text": "Once upon a time"}) == "Once upon a time"
+    assert download_data._row_text("wikitext", {"text": "Factual wiki text"}) == "Factual wiki text"
+    assert download_data._row_text("openwebtext", {"text": "Web snippet"}) == "Web snippet"
+    assert download_data._row_text("tinycodes", {"text": "print('hi')"}) == "print('hi')"
+    assert download_data._row_text("tinycodes", {"code": "x = 1"}) == "x = 1"
+    # tinycodes with neither text nor code yields empty string (filtered out).
+    assert download_data._row_text("tinycodes", {"instruction": "noop", "output": "noop"}) == ""
+
+
+def test_dataset_spec_for_new_sources():
+    for source, expected in [
+        ("tinystories", ("roneneldan/TinyStories", None, "train")),
+        ("wikitext", ("Salesforce/wikitext", "wikitext-103-raw-v1", "train")),
+        ("openwebtext", ("Skylion007/openwebtext", None, "train")),
+        ("tinycodes", ("nampdn-ai/tiny-codes", None, "train")),
+    ]:
+        assert download_data._dataset_spec_for_source(source) == expected
+
+
+def test_skip_existing_path_short_circuits(monkeypatch, tmp_path):
+    args = argparse.Namespace(
+        output=tmp_path,
+        mix_ratios={"edu": 1.0},
+        subset="1k",
+        min_source_tokens=1024,
+        min_length=50,
+        skip_existing=True,
+    )
+    existing = tmp_path / "edu.bin"
+    np.arange(4096, dtype=np.uint16).tofile(existing)
+
+    calls = {"load_dataset": 0}
+
+    def fake_load_dataset(*_args, **_kwargs):
+        calls["load_dataset"] += 1
+        raise AssertionError("load_dataset should not be called when --skip-existing and file present")
+
+    monkeypatch.setattr(download_data, "load_dataset", fake_load_dataset, raising=False)
+    import datasets
+    monkeypatch.setattr(datasets, "load_dataset", fake_load_dataset)
+
+    paths = download_data.download_mixed_token_bins(args)
+    assert calls["load_dataset"] == 0
+    assert paths["edu"] == existing
+
+
+def test_parse_args_exposes_skip_existing():
+    import sys
+    saved = sys.argv
+    try:
+        sys.argv = ["download_data.py"]
+        ns = download_data.parse_args()
+        assert hasattr(ns, "skip_existing")
+        assert ns.skip_existing is False
+    finally:
+        sys.argv = saved

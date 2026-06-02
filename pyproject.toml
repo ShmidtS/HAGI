@@ -12,6 +12,8 @@ dependencies = [
     "typer",
     "pexpect",
     "pytest",
+    "datasets",
+    "transformers",
 ]
 
 [project.optional-dependencies]
@@ -26,3 +28,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+extraPaths = ["scripts"]
+reportMissingTypeStubs = "warning"
+reportMissingImports = "error"

@@ -1,0 +1,11 @@
+{
+  "python.defaultInterpreterPath": "C:/Users/shmid/AppData/Local/Programs/Python/Python313/python.exe",
+  "python.analysis.extraPaths": ["scripts", "src"],
+  "basedpyright.analysis.typeCheckingMode": "basic",
+  "basedpyright.analysis.extraPaths": ["scripts", "src"],
+  "basedpyright.analysis.autoImportCompletions": true,
+  "basedpyright.analysis.diagnosticSeverityOverrides": {
+    "reportMissingTypeStubs": "warning",
+    "reportMissingImports": "error"
+  }
+}

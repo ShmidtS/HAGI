@@ -8,7 +8,7 @@ yaml = pytest.importorskip("yaml")
 
 
 def load_rtx3070_config():
-    path = Path(__file__).resolve().parents[1] / "configs" / "rtx3070.yaml"
+    path = Path(__file__).resolve().parents[1] / "configs" / "rtx3070_canonical.yaml"
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 
@@ -19,15 +19,15 @@ def test_rtx3070_yaml_matches_8gb_model_shape():
     transformer = model_cfg["transformer"]
     grades = model_cfg["grades"]
 
-    assert cfg["name"] == "rtx3070"
+    assert cfg["name"] == "rtx3070_canonical"
     assert model_cfg["vocab_size"] == 49152
-    assert model_cfg["hidden_size"] == 512
-    assert transformer["hidden_size"] == 512
-    assert transformer["num_query_heads"] == 8
-    assert transformer["num_kv_heads"] == 2
-    assert transformer["intermediate_size"] == 1536
+    assert model_cfg["hidden_size"] == 768
+    assert transformer["hidden_size"] == 768
+    assert transformer["num_query_heads"] == 12
+    assert transformer["num_kv_heads"] == 4
+    assert transformer["intermediate_size"] == 2048
     assert transformer["max_seq_len"] == 2048
-    assert sum(grades.values()) == 512
+    assert sum(grades.values()) == 768
 
 
 def test_rtx3070_config_builds_model_with_gradient_checkpointing():
@@ -40,11 +40,11 @@ def test_rtx3070_config_builds_model_with_gradient_checkpointing():
 
     assert isinstance(model_cfg, HAGIConfig)
     assert model.cfg.gradient_checkpointing is True
-    assert model.embed.weight.shape == (49152, 512)
-    assert model.lm_head.weight.shape == (49152, 512)
-    assert len(model.perception) == 3
-    assert len(model.reasoning) == 3
-    assert len(model.expression) == 3
+    assert model.embed.weight.shape == (49152, 768)
+    assert model.lm_head.weight.shape == (49152, 768)
+    assert len(model.perception) == 4
+    assert len(model.reasoning) == 4
+    assert len(model.expression) == 4
 
 
 def test_rtx3070_canonical_mix_paths_match_mix_weights():

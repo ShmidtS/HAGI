@@ -49,7 +49,7 @@ training:
   warmup_steps: 200
   cooldown_frac: 0.05
   min_lr_ratio: 0.1
-  max_steps: 2000
+  max_steps: 4000
   batch_size: 2
   grad_accum_steps: 8
   precision: bf16
@@ -60,7 +60,7 @@ training:
   loss_warmup_mode: linear
   ema:
     decay: 0.9995
-    start_step: 200
+    start_step: 400
   composite_loss:
     w_ce: 1.0
     w_aux: 0.1
@@ -69,7 +69,7 @@ training:
   eval_interval: 0
   eval_samples: 500
   log_interval: 25
-  ckpt_interval: 200
+  ckpt_interval: 500
   seed: 42
 
 data:
@@ -80,24 +80,36 @@ data:
   dataset_mode: memmap_packed
   num_workers: 2
   pin_memory: true
-  mix:                             # arch_decision §Data
-    edu: 0.70
-    cosmopedia: 0.15
-    smoltalk: 0.10
-    python_instruct: 0.05
+  mix:                             # arch_decision §Data v2 scale-up
+    edu: 0.5102
+    cosmopedia: 0.1531
+    wikitext: 0.1020
+    smoltalk: 0.0816
+    tinystories: 0.0612
+    python_instruct: 0.0612
+    openwebtext: 0.0307
   mix_paths:
     - name: edu
       path: edu.bin
-      weight: 0.70
+      weight: 0.5102
     - name: cosmopedia
       path: cosmopedia.bin
-      weight: 0.15
+      weight: 0.1531
+    - name: wikitext
+      path: wikitext.bin
+      weight: 0.1020
     - name: smoltalk
       path: smoltalk.bin
-      weight: 0.10
+      weight: 0.0816
+    - name: tinystories
+      path: tinystories.bin
+      weight: 0.0612
     - name: python_instruct
       path: python_instruct.bin
-      weight: 0.05
+      weight: 0.0612
+    - name: openwebtext
+      path: openwebtext.bin
+      weight: 0.0307
 
 eval:
   every_n_steps: 2000

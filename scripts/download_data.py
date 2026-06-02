@@ -49,6 +49,27 @@ DATASET_PRESETS = {
         "dataset": "HuggingFaceTB/cosmopedia-v2",
         "license_note": "Synthetic educational corpus; validate locally before mixing.",
     },
+    "tinystories": {
+        "dataset": "roneneldan/TinyStories",
+        "split": "train",
+        "license_note": "CDLA-Sharing-1.0; synthetic short stories for simple-language modeling.",
+    },
+    "wikitext": {
+        "dataset": "Salesforce/wikitext",
+        "name": "wikitext-103-raw-v1",
+        "split": "train",
+        "license_note": "CC-BY-SA-4.0; Wikipedia-derived, high-quality factual text.",
+    },
+    "openwebtext": {
+        "dataset": "Skylion007/openwebtext",
+        "split": "train",
+        "license_note": "CC-derived web corpus; GPT-2 training data, broad-coverage noise.",
+    },
+    "tinycodes": {
+        "dataset": "nampdn-ai/tiny-codes",
+        "split": "train",
+        "license_note": "Apache-2.0; small code instruction snippets for code reasoning.",
+    },
 }
 
 # arch_decision §Data adapted for unauthenticated download: 70% FineWeb-Edu / 15% Cosmopedia v2 / 10% SmolTalk / 5% Python instruction code.
@@ -59,11 +80,22 @@ DEFAULT_MIX = {
     "python_instruct": 0.05,
 }
 
-# Named mix presets accepted by --mix.
+# arch_decision §Data v2 scale-up: 50M-token RTX 3070 friendly mix spanning
+# web (edu+openwebtext), synthetic textbook (cosmopedia), wiki (wikitext),
+# instruction (smoltalk+python_instruct+tinycodes), and narrative (tinystories).
 MIX_PRESETS: dict[str, dict[str, float]] = {
     "edu70_cosmo15_chat10_py5": dict(DEFAULT_MIX),
     "edu70_cosmo15_chat10_code5": dict(DEFAULT_MIX),
     "default": dict(DEFAULT_MIX),
+    "v2_50m": {
+        "edu": 0.5102,
+        "cosmopedia": 0.1531,
+        "wikitext": 0.1020,
+        "smoltalk": 0.0816,
+        "tinystories": 0.0612,
+        "python_instruct": 0.0612,
+        "openwebtext": 0.0307,
+    },
 }
 
 
@@ -158,6 +190,13 @@ def _row_text(source: str, row: dict[str, Any]) -> str:
     if source == "python_instruct":
         parts = [row.get("instruction", ""), row.get("input", ""), row.get("output", "")]
         return "\n".join(str(part) for part in parts if part)
+    if source == "tinycodes":
+        for key in ("text", "code", "content"):
+            value = row.get(key)
+            if value:
+                return str(value)
+        return ""
+    # edu, cosmopedia, tinystories, wikitext, openwebtext: all expose "text".
     return str(row.get("text", ""))
 
 
@@ -177,34 +216,61 @@ def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:
     tokenizer = TokenizerWrapper.smollm2(SMOLLM2_TOKENIZER, use_fast=True)
     target_tokens = parse_token_count(args.subset)
     tokens_by_source: dict[str, list[int]] = {}
+    paths: dict[str, Path] = {}
+    skip_existing = bool(getattr(args, "skip_existing", False))
+    output_dir = args.output
+    output_dir.mkdir(parents=True, exist_ok=True)
     for source, ratio in args.mix_ratios.items():
+        target_path = output_dir / f"{source}.bin"
+        if skip_existing and target_path.exists():
+            size = target_path.stat().st_size
+            if size > 0 and size % 2 == 0:
+                existing = np.memmap(target_path, dtype=np.uint16, mode="r")
+                existing_count = int(existing.shape[0])
+                del existing
+                if existing_count > 0:
+                    paths[source] = target_path
+                    print(f"source={source} skip_existing tokens={existing_count}")
+                else:
+                    print(f"source={source} existing bin is empty (tokens=0); will re-download")
+            else:
+                print(f"source={source} existing bin size={size}B (invalid); will re-download")
+            continue
         source_target = max(args.min_source_tokens, int(target_tokens * ratio))
         dataset_name, dataset_config, split = _dataset_spec_for_source(source)
         load_kwargs: dict[str, Any] = {"split": split, "streaming": True}
         if dataset_config:
             load_kwargs["name"] = dataset_config
-        dataset = load_dataset(dataset_name, **load_kwargs)
-        tokens: list[int] = []
-        skipped = 0
-        for row in dataset:
-            text = _row_text(source, row if isinstance(row, dict) else {})
-            if not text:
-                continue
-            ids = tokenizer.encode(text, add_special_tokens=False, truncation=True, max_length=8192)
-            if len(ids) < args.min_length:
-                skipped += 1
-                continue
-            if tokenizer.eos_token_id is not None:
-                ids.append(int(tokenizer.eos_token_id))
-            remaining = source_target - len(tokens)
-            tokens.extend(ids[:remaining])
-            if len(tokens) >= source_target:
-                break
+        try:
+            dataset = load_dataset(dataset_name, **load_kwargs)
+            tokens: list[int] = []
+            skipped = 0
+            for row in dataset:
+                text = _row_text(source, row if isinstance(row, dict) else {})
+                if not text:
+                    continue
+                ids = tokenizer.encode(text, add_special_tokens=False, truncation=True, max_length=8192)
+                if len(ids) < args.min_length:
+                    skipped += 1
+                    continue
+                if tokenizer.eos_token_id is not None:
+                    ids.append(int(tokenizer.eos_token_id))
+                remaining = source_target - len(tokens)
+                tokens.extend(ids[:remaining])
+                if len(tokens) >= source_target:
+                    break
+        except Exception as exc:  # HF streaming is fragile on long iterations; skip & continue.
+            print(f"source={source} dataset={dataset_name} FAILED error={exc!r}")
+            continue
         if not tokens:
-            raise ValueError(f"no tokens downloaded for source {source}")
+            print(f"source={source} dataset={dataset_name} empty (no rows yielded)")
+            continue
         tokens_by_source[source] = tokens
+        # Flush after each source so a crash later does not lose progress.
+        materialize_token_bins(output_dir, {source: tokens})
+        paths[source] = output_dir / f"{source}.bin"
         print(f"source={source} dataset={dataset_name} tokens={len(tokens)} skipped={skipped}")
-    return materialize_token_bins(args.output, tokens_by_source)
+    return paths
 
 
 def _convert_messages_to_dicts(row: Any) -> dict[str, Any] | None:
@@ -329,6 +395,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-config", default="all", help="dataset config/subset name (e.g. 'all' for smoltalk)")
     parser.add_argument("--sft", action="store_true", help="download SFT conversational dataset instead of raw tokens")
     parser.add_argument("--materialize-mix", action="store_true", help="download each mix source into source-named .bin files")
+    parser.add_argument("--skip-existing", action="store_true", help="skip sources whose <source>.bin already exists in --output")
     parser.add_argument("--min-source-tokens", type=int, default=1024, help="minimum tokens per materialized mix source")
     parser.add_argument(
         "--mix",
