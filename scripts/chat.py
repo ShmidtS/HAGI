@@ -15,7 +15,7 @@ from hagi.train.checkpoint import load_checkpoint, save_checkpoint
 from hagi.train.loop import LoopConfig, train
 
 
-DEFAULT_CONFIG_PATH = Path("E:/HAGI/configs/rtx3070.yaml")
+DEFAULT_CONFIG_PATH = Path("E:/HAGI/configs/rtx3070_canonical.yaml")
 DEFAULT_CHECKPOINT_DIR = Path("E:/HAGI/checkpoints/rtx3070")
 TOY_CHECKPOINT_PATH = Path("E:/HAGI/checkpoints/toy_chat.pt")
 
@@ -145,7 +145,7 @@ def toy_answer(model: HAGI, question: str, device: str, max_new_tokens: int) -> 
 
 
 def toy_chat(checkpoint_path: Path, device: str, max_new_tokens: int) -> None:
-    model, step = load_checkpoint(str(checkpoint_path), device=device)
+    model, step, _ = load_checkpoint(str(checkpoint_path), device=device)
     model.eval()
     print(f"loaded checkpoint from step {step}: {checkpoint_path}")
     print("Type /quit to exit.")
@@ -179,12 +179,17 @@ def vram_usage() -> str:
     return f"VRAM used={used:.2f}GB reserved={reserved:.2f}GB total={total:.2f}GB"
 
 
-def load_production_model(checkpoint: Path, compile_model: bool) -> tuple[torch.nn.Module, int]:
+def load_production_model(checkpoint: Path, compile_model: bool, use_msa: bool = True, use_nars: bool = True) -> tuple[torch.nn.Module, int]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, step = load_checkpoint(str(checkpoint), device=device)
+    model, step, _ = load_checkpoint(str(checkpoint), device=device)
     if device == "cuda":
         model = model.half()
     model.eval()
+    # Enable MSA and NARS for inference if configured
+    if hasattr(model.cfg, "use_msa"):
+        model.cfg.use_msa = use_msa
+    if hasattr(model.cfg, "use_nars"):
+        model.cfg.use_nars = use_nars
     if compile_model and device == "cuda" and hasattr(torch, "compile"):
         model = torch.compile(model)
         assert isinstance(model, torch.nn.Module)
@@ -207,6 +212,8 @@ def production_repl(args: argparse.Namespace) -> None:
         max_context_length=args.max_context_length,
         compile_model=False,
     )
+    session.rollouts = args.rollouts
+    session.noise_sigma = args.noise_sigma
     print(f"loaded checkpoint step={step}: {checkpoint}")
     print(vram_usage())
     print("Commands: /system TEXT, /clear, /quit")
@@ -254,6 +261,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--system", default=None)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--rollouts", type=int, default=1)
+    parser.add_argument("--noise-sigma", type=float, default=0.0)
     return parser.parse_args()
 
 

@@ -33,7 +33,7 @@ def test_save_checkpoint_and_load_back_preserves_state_dict_and_step(tmp_path, t
     optimizer = torch.optim.AdamW(tiny_model.parameters(), lr=1e-3)
     save_checkpoint(tiny_model, optimizer, step=7, ckpt_dir=str(tmp_path))
 
-    loaded_model, step = load_checkpoint(str(tmp_path / "step-00000007.pt"), device="cpu")
+    loaded_model, step, _ = load_checkpoint(str(tmp_path / "step-00000007.pt"), device="cpu")
 
     assert step == 7
     for name, tensor in tiny_model.state_dict().items():

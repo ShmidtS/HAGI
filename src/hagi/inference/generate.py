@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, Iterator, List
 
 import numpy as np
 
@@ -72,9 +72,22 @@ def _filter_top_p(logits: Any, top_p: float | None) -> Any:
 
 
 def _softmax_np(logits: np.ndarray) -> np.ndarray:
+    # Guard against all -inf (from aggressive top-k/top-p filtering)
+    logits = np.where(np.isneginf(logits), -1e9, logits)
     shifted = logits - np.max(logits, axis=-1, keepdims=True)
     exp = np.exp(shifted)
     return exp / np.sum(exp, axis=-1, keepdims=True)
+
+
+def confidence_score(logits: Any) -> float:
+    """Scalar confidence from top-2 logit gap (PTRM idea)."""
+    if torch is not None and torch.is_tensor(logits):
+        vals, _ = torch.topk(logits, k=2, dim=-1)
+        gap = vals[..., 0] - vals[..., 1]
+        return float(gap.clamp(-10.0, 10.0).mean().item() * 0.1)
+    vals = np.partition(-logits, 2, axis=-1)[..., :2]
+    gap = -vals[..., 0] + vals[..., 1]
+    return float(np.clip(gap, -10.0, 10.0) * 0.1)
 
 
 def sample_next_token(
@@ -150,11 +163,15 @@ def generate(
     use_cache: bool = True,
     compile_model: bool = False,
     pin_memory: bool = False,
+    training_mode: bool = False,
 ) -> Any:
     """Generate token ids with optional KV-cache acceleration."""
     was_training = bool(getattr(model, "training", False))
-    if hasattr(model, "eval"):
+    if not training_mode and hasattr(model, "eval"):
         model.eval()
+
+    if hasattr(model, "clear_rope_cache"):
+        model.clear_rope_cache()
 
     if pin_memory and torch is not None:
         from hagi.model.inference_opt import pin_model_weights
@@ -174,15 +191,18 @@ def generate(
 
         next_input = generated if cache is None else generated[:, -1:]
         active_cache = cache
+        generated_tokens: List[Any] = []
         for _ in range(max_new_tokens):
             logits, active_cache = _forward(model, next_input, active_cache, use_cache)
             next_token = sample_next_token(logits, temperature, top_k, top_p)
             if next_token.dim() == 0:
                 next_token = next_token.unsqueeze(0)
-            generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=-1)
+            generated_tokens.append(next_token.unsqueeze(-1))
             if eos_token_id is not None and torch.all(next_token == eos_token_id):
                 break
             next_input = next_token.unsqueeze(-1)
+        if generated_tokens:
+            generated = torch.cat([generated, *generated_tokens], dim=-1)
     else:
         generated = np.asarray(prompt_ids, dtype=np.int64)
         if generated.ndim == 1:
@@ -198,7 +218,7 @@ def generate(
             if eos_token_id is not None and np.all(next_token == eos_token_id):
                 break
 
-    if was_training and hasattr(model, "train"):
+    if not training_mode and was_training and hasattr(model, "train"):
         model.train()
     return generated
 
@@ -234,6 +254,9 @@ def stream_generate(
                 break
         return
 
+    if hasattr(model, "clear_rope_cache"):
+        model.clear_rope_cache()
+
     was_training = bool(getattr(model, "training", False))
     if hasattr(model, "eval"):
         model.eval()
@@ -262,3 +285,55 @@ def stream_generate(
         next_input = next_token.unsqueeze(-1)
     if was_training and hasattr(model, "train"):
         model.train()
+
+
+@torch.no_grad() if torch is not None else (lambda fn: fn)
+def generate_with_rollouts(
+    model: Any,
+    prompt_ids: Any,
+    max_new_tokens: int = 128,
+    temperature: float = 1.0,
+    top_k: int | None = 50,
+    top_p: float | None = 0.9,
+    eos_token_id: int | None = None,
+    rollouts: int = 1,
+    noise_sigma: float = 0.0,
+    use_cache: bool = True,
+    compile_model: bool = False,
+) -> Any:
+    """Generate with multiple noisy rollouts, select best by confidence (PTRM idea)."""
+    if rollouts <= 1 or noise_sigma <= 0.0:
+        return generate(
+            model, prompt_ids, max_new_tokens, temperature, top_k, top_p,
+            eos_token_id, use_cache=use_cache, compile_model=compile_model,
+        )
+
+    best_generated = None
+    best_score = float("-inf")
+    result = None
+    compiled_model = _maybe_compile(model, compile_model)
+    for k in range(rollouts):
+        old_noise = 0.0
+        if hasattr(model, "cfg") and hasattr(model.cfg, "thinking_noise"):
+            old_noise = model.cfg.thinking_noise
+            model.cfg.thinking_noise = noise_sigma
+        try:
+            result = generate(
+                compiled_model, prompt_ids, max_new_tokens, temperature, top_k, top_p,
+                eos_token_id, use_cache=use_cache, compile_model=False, training_mode=True,
+            )
+        finally:
+            if hasattr(model, "cfg") and hasattr(model.cfg, "thinking_noise"):
+                model.cfg.thinking_noise = old_noise
+        # Confidence score from last-position logits
+        if torch is not None and torch.is_tensor(result):
+            with torch.no_grad():
+                last_logits = compiled_model(result[:, -1:]) if hasattr(compiled_model, "forward") else None
+                if last_logits is not None:
+                    if isinstance(last_logits, tuple):
+                        last_logits = last_logits[0]
+                    score = confidence_score(last_logits[..., -1, :])
+                    if score > best_score:
+                        best_score = score
+                        best_generated = result
+    return best_generated if best_generated is not None else result

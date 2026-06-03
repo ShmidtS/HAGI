@@ -4,6 +4,7 @@ import argparse
 import copy
 import importlib.util
 import math
+import os
 import platform
 import time
 import warnings
@@ -16,6 +17,8 @@ import torch
 import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader, Dataset, Subset
+
+# Note: expandable_segments not supported on Windows; skip
 
 from hagi.data import (
     MemmapDataset,
@@ -73,6 +76,8 @@ def resolve_train_path(cfg: dict[str, Any], train_path_override: Path | None, da
         path = Path(configured)
         if not path.is_absolute():
             path = ROOT / path
+        if not path.exists():
+            raise FileNotFoundError(f"train path not found: {path}")
         return path
     if data_dir is None:
         raise ValueError("data_dir is required when no train_path override or configured path")
@@ -227,26 +232,7 @@ def gpu_util(device: str) -> str:
 
 
 def maybe_compile(model: HAGI, device: str) -> torch.nn.Module:
-    if not device.startswith("cuda") or not hasattr(torch, "compile"):
-        return model
-    if platform.system() == "Windows":
-        if importlib.util.find_spec("triton") is None:
-            print("torch.compile skipped: triton unavailable on Windows (install triton-windows or use WSL)")
-            return model
-        import shutil
-        if shutil.which("cl") is None and shutil.which("cl.exe") is None:
-            print("torch.compile skipped: MSVC compiler (cl) not found on Windows")
-            return model
-    try:
-        compiled = torch.compile(model, mode="reduce-overhead")  # type: ignore[return-value]
-        assert isinstance(compiled, torch.nn.Module)
-        with torch.no_grad():
-            dummy = torch.zeros(1, 1, dtype=torch.long, device=device)
-            compiled(dummy)
-        return compiled
-    except Exception as exc:
-        print(f"torch.compile skipped: {exc}")
-        return model
+    return model
 
 
 def to_device(batch: Any, device: str, non_blocking: bool) -> Any:
@@ -290,7 +276,7 @@ def resolve_mix_paths(data_cfg: dict[str, Any], data_dir: Path) -> list[tuple[Pa
     resolved: list[tuple[Path, float]] = []
     for entry in mix_paths:
         path = Path(entry["path"])
-        if not path.is_absolute():
+        if not path.exists():
             path = data_dir / path
         resolved.append((path, float(entry["weight"])))
     return resolved
@@ -303,6 +289,8 @@ def resolve_eval_path(data_cfg: dict[str, Any], data_dir: Path) -> Path | None:
     path = Path(configured)
     if not path.is_absolute():
         path = data_dir / path
+    if not path.exists():
+        raise FileNotFoundError(f"eval path not found: {path}")
     return path
 
 
@@ -344,13 +332,13 @@ def build_full_dataloader(
 
     dtype = data_cfg.get("dtype", "uint16")
 
-    def _make_loader(ds: Any, shuffle: bool) -> Any:
+    def _make_loader(ds: Any, shuffle: bool, drop_last: bool = True) -> Any:
         kwargs: dict[str, Any] = {
             "batch_size": batch_size,
             "shuffle": shuffle,
             "num_workers": num_workers,
             "pin_memory": pin_memory,
-            "drop_last": True,
+            "drop_last": drop_last,
         }
         if use_prefix_lm:
             kwargs["collate_fn"] = partial(prefix_lm_collate, seq_len=seq_len)
@@ -386,6 +374,8 @@ def build_full_dataloader(
         raise ValueError("train_path is required when no mix_paths")
     dataset = MemmapDataset(train_path, seq_len=seq_len, dtype=dtype)
     total = len(dataset)
+    if total <= 0:
+        raise ValueError(f"dataset is empty: {train_path}")
     if eval_samples > 0:
         eval_samples = min(eval_samples, total // 10)
         train_ds = Subset(cast(Any, dataset), list(range(total - eval_samples)))
@@ -393,9 +383,11 @@ def build_full_dataloader(
     else:
         train_ds = dataset
         eval_ds = None
+    if len(train_ds) < batch_size:
+        raise ValueError(f"train dataset size {len(train_ds)} < batch_size {batch_size}")
 
-    train_loader = _make_loader(train_ds, shuffle=True)
-    eval_loader = _make_loader(eval_ds, shuffle=False) if eval_ds is not None else None
+    train_loader = _make_loader(train_ds, shuffle=True, drop_last=True)
+    eval_loader = _make_loader(eval_ds, shuffle=False, drop_last=False) if eval_ds is not None else None
     return train_loader, eval_loader, batch_size, seq_len, pin_memory
 
 
@@ -417,28 +409,57 @@ def compute_loss(
 ) -> tuple[torch.Tensor, dict[str, float]]:
     if weights is None:
         loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)).float(),
+            logits.reshape(-1, logits.size(-1)),
             targets.reshape(-1),
             ignore_index=-100,
         )
         return loss, {}
-    losses = composite_loss(
-        logits,
-        targets,
-        auxiliary_output=model_output.get("auxiliary_output") if isinstance(model_output, dict) else None,
-        model_output=model_output.get("model_output") if isinstance(model_output, dict) else None,
-        weights=weights,
-        invariant_src=model_output.get("invariant_src") if isinstance(model_output, dict) else None,
-        invariant_tgt=model_output.get("invariant_tgt") if isinstance(model_output, dict) else None,
-    )
-    return losses["L_total"], {name: value.detach().float().item() for name, value in losses.items()}
+    # Reuse pre-computed loss from model forward if available
+    precomputed_loss = model_output.get("loss") if isinstance(model_output, dict) else None
+    if precomputed_loss is not None:
+        losses = composite_loss(
+            logits,
+            targets,
+            auxiliary_output=model_output.get("auxiliary_output") if isinstance(model_output, dict) else None,
+            model_output=model_output.get("model_output") if isinstance(model_output, dict) else None,
+            weights=weights,
+            invariant_src=model_output.get("invariant_src") if isinstance(model_output, dict) else None,
+            invariant_tgt=model_output.get("invariant_tgt") if isinstance(model_output, dict) else None,
+            precomputed_loss=precomputed_loss,
+        )
+    else:
+        losses = composite_loss(
+            logits,
+            targets,
+            auxiliary_output=model_output.get("auxiliary_output") if isinstance(model_output, dict) else None,
+            model_output=model_output.get("model_output") if isinstance(model_output, dict) else None,
+            weights=weights,
+            invariant_src=model_output.get("invariant_src") if isinstance(model_output, dict) else None,
+            invariant_tgt=model_output.get("invariant_tgt") if isinstance(model_output, dict) else None,
+        )
+    total_loss = losses["L_total"]
+    moe_aux_loss = model_output.get("moe_aux_loss") if isinstance(model_output, dict) else None
+    if moe_aux_loss is not None:
+        w_moe = weights.get("w_moe", 0.01) if weights else 0.01
+        total_loss = total_loss + w_moe * moe_aux_loss
+    components = {name: value.detach().float().item() for name, value in losses.items()}
+    if moe_aux_loss is not None:
+        components["L_moe"] = moe_aux_loss.detach().float().item()
+    return total_loss, components
 
 
 def get_grad_norm(model: torch.nn.Module) -> float:
-    parameters = [p for p in model.parameters() if p.grad is not None]
-    if not parameters:
+    total = 0.0
+    device = None
+    for p in model.parameters():
+        if p.grad is not None:
+            grad = p.grad
+            if device is None:
+                device = grad.device
+            total += grad.pow(2).sum().item()
+    if total == 0.0:
         return 0.0
-    return float(torch.nn.utils.get_total_norm(parameters).item())
+    return float(total ** 0.5)
 
 
 @torch.no_grad()
@@ -465,7 +486,7 @@ def run_eval(
         targets = apply_prefix_mask(targets, batch)
         tokens = batch.tokens if isinstance(batch, PrefixLMBatch) else batch
         with autocast_ctx(precision, device):
-            output = model(tokens, training_mode=True)
+            output = model(tokens, training_mode=False)
             logits = unwrap_logits(output)
             ce = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)).float(),
@@ -485,6 +506,8 @@ def run_eval(
         num_batches += 1
     if was_training:
         model.train()
+    if num_batches == 0:
+        return {"ppl": float("nan"), "acc": float("nan"), "L_aux": float("nan"), "L_iso": float("nan")}
     return {
         "ppl": math.exp(total_ce / max(1, total_tokens)),
         "acc": 100.0 * total_correct / max(1, total_tokens),
@@ -495,10 +518,23 @@ def run_eval(
 
 def update_ema(model: torch.nn.Module, model_ema: torch.nn.Module, decay: float) -> None:
     with torch.no_grad():
-        for ema_param, param in zip(model_ema.parameters(), model.parameters(), strict=True):
-            ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
+        params = list(model.parameters())
+        ema_params = list(model_ema.parameters())
+        if hasattr(torch, '_foreach_mul'):
+            ema_device = ema_params[0].device if ema_params else None
+            if ema_device == params[0].device:
+                param_tensors: list[torch.Tensor] = [p for p in params]
+                ema_param_tensors: list[torch.Tensor] = [p for p in ema_params]
+                torch._foreach_mul_(ema_param_tensors, decay)
+                torch._foreach_add_(ema_param_tensors, [p.detach() for p in param_tensors], alpha=1.0 - decay)
+            else:
+                for ema_param, param in zip(ema_params, params, strict=True):
+                    ema_param.mul_(decay).add_(param.detach().cpu(), alpha=1.0 - decay)
+        else:
+            for ema_param, param in zip(ema_params, params, strict=True):
+                ema_param.mul_(decay).add_(param.detach().cpu(), alpha=1.0 - decay)
         for ema_buffer, buffer in zip(model_ema.buffers(), model.buffers(), strict=True):
-            ema_buffer.copy_(buffer)
+            ema_buffer.copy_(buffer.cpu())
 
 
 def magic_norm_clip(model: torch.nn.Module, max_norm: float, blade_count: int = 8) -> float:
@@ -530,13 +566,42 @@ def save_training_checkpoint(
     step: int,
     ckpt_dir: Path,
 ) -> None:
-    save_checkpoint(model, optimizer, step, str(ckpt_dir))
+    use_moe = getattr(model.cfg, "use_moe", False)
+    if use_moe:
+        from hagi.train.checkpoint import save_sharded_checkpoint
+        path = ckpt_dir / f"step-{step:08d}"
+        save_sharded_checkpoint(
+            model,
+            optimizer,
+            model_ema,
+            path,
+            step=step,
+            config=config_to_dict(model.cfg),
+        )
+        return
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     path = ckpt_dir / f"step-{step:08d}.pt"
-    state = torch.load(path, map_location="cpu", weights_only=True)
-    state["model_ema"] = {name: value.detach().cpu() for name, value in model_ema.state_dict().items()}
-    state["optimizer"] = optimizer.state_dict()
-    state["config"] = config_to_dict(model.cfg)
+    state: dict[str, Any] = {
+        "model": model.state_dict(),
+        "step": step,
+        "optimizer": optimizer.state_dict(),
+        "model_ema": {name: value.detach().cpu() for name, value in model_ema.state_dict().items()},
+        "config": config_to_dict(model.cfg),
+    }
     torch.save(state, path)
+
+
+def save_inference_only_checkpoint(
+    model: HAGI,
+    model_ema: torch.nn.Module | None,
+    path: Path,
+) -> None:
+    """Save only model state_dict and optional EMA state_dict for inference."""
+    path.mkdir(parents=True, exist_ok=True)
+    state: dict[str, Any] = {"model": model.state_dict()}
+    if model_ema is not None:
+        state["ema"] = {name: value.detach().cpu() for name, value in model_ema.state_dict().items()}
+    torch.save(state, path / "inference.pt")
 
 
 def print_model_summary(model: HAGI, cfg: Any, device: str, use_prefix_lm: bool, use_composite_loss: bool) -> None:
@@ -633,6 +698,8 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
 
     max_steps = int(args.max_steps if args.max_steps is not None else train_cfg.get("max_steps", 20000))
     grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
+    if grad_accum_steps <= 0:
+        raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
     warmup_steps = int(train_cfg.get("warmup_steps", 500))
     learning_rate = float(train_cfg.get("learning_rate", 1.0e-3))
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
@@ -640,7 +707,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     log_interval = int(train_cfg.get("log_interval", 25))
     ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
     use_scaler = precision == "fp16" and args.device.startswith("cuda")
-    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
     args.ckpt_dir.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
@@ -654,7 +721,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             group["lr"] = lr
 
         optimizer.zero_grad(set_to_none=True)
-        accum_loss = 0.0
+        accum_loss_tensor = None
         for _ in range(grad_accum_steps):
             try:
                 x, y = next(data_iter)
@@ -670,8 +737,9 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
-            accum_loss += loss.item()
+            accum_loss_tensor = loss.detach() if accum_loss_tensor is None else accum_loss_tensor + loss.detach()
             tokens_since_log += x.numel()
+            del loss
 
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
@@ -683,13 +751,16 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         else:
             optimizer.step()  # type: ignore[arg-type]
 
-        last_loss = accum_loss
-        if step % log_interval == 0:
+        if args.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+        last_loss = float(accum_loss_tensor.item()) if accum_loss_tensor is not None else float("nan")
+        if log_interval > 0 and step % log_interval == 0:
             now = time.perf_counter()
             elapsed = max(now - last_log_time, 1e-9)
             tok_per_sec = tokens_since_log / elapsed
             print(
-                f"step {step:6d} | loss {accum_loss:.4f} | lr {lr:.2e} | "
+                f"step {step:6d} | loss {last_loss:.4f} | lr {lr:.2e} | "
                 f"tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}"
             )
             tokens_since_log = 0
@@ -713,12 +784,12 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     if args.device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
 
     start_step = 0
     if args.resume is not None and args.resume.exists():
         from hagi.train.loop import load_checkpoint
-        model, start_step = load_checkpoint(str(args.resume), args.device)
-        model.to(args.device)
+        model, start_step, _ = load_checkpoint(str(args.resume), args.device)
         model_cfg = model.cfg
         print(f"resumed from {args.resume} at step {start_step}")
     else:
@@ -766,6 +837,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
 
     max_steps = int(args.max_steps if args.max_steps is not None else train_cfg.get("max_steps", 50000))
     grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
+    if grad_accum_steps <= 0:
+        raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
     warmup_steps = int(train_cfg.get("warmup_steps", 500))
     learning_rate = float(train_cfg.get("learning_rate", 5.0e-4))
     min_lr_ratio = float(train_cfg.get("min_lr_ratio", 0.1))
@@ -774,7 +847,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     log_interval = int(train_cfg.get("log_interval", 25))
     ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
     use_scaler = precision == "fp16" and args.device.startswith("cuda")
-    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
     print_model_summary(model, model_cfg, args.device, use_prefix_lm, composite_weights is not None)
     if args.dry_run:
@@ -826,7 +899,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             effective_weights["w_iso"] = scheduled_weight(step, w_iso_start, w_iso_final, iso_warmup_steps, loss_warmup_mode)
 
         optimizer.zero_grad(set_to_none=True)
-        accum_loss = 0.0
+        accum_loss_tensor: torch.Tensor | None = None
         accum_components: dict[str, float] = {}
         for _ in range(grad_accum_steps):
             try:
@@ -840,23 +913,21 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             targets = apply_prefix_mask(targets, batch)
             tokens = batch.tokens if isinstance(batch, PrefixLMBatch) else batch
             with autocast_ctx(precision, args.device):
-                try:
-                    output = train_model(tokens, training_mode=effective_weights is not None)
-                except TypeError:
-                    output = train_model(tokens)
+                output = train_model(tokens, targets=targets, training_mode=effective_weights is not None)
                 logits = unwrap_logits(output)
                 loss, components = compute_loss(logits, targets, output, effective_weights)
-                raw_loss = loss.detach().float().item()
+                raw_loss = loss.detach().float()
                 loss = loss / grad_accum_steps
             if use_scaler:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
-            accum_loss += raw_loss
+            accum_loss_tensor = raw_loss if accum_loss_tensor is None else accum_loss_tensor + raw_loss
             if components:
                 for name, value in components.items():
                     accum_components[name] = accum_components.get(name, 0.0) + value
             tokens_since_log += tokens.numel()
+            del output, loss, logits
 
         if accum_components:
             last_components = {name: value / grad_accum_steps for name, value in accum_components.items()}
@@ -881,8 +952,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if step >= ema_start_step:
             update_ema(model, model_ema, ema_decay)
 
-        last_loss = accum_loss / grad_accum_steps
-        if step % log_interval == 0:
+        if args.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+        last_loss = float((accum_loss_tensor / grad_accum_steps).item()) if accum_loss_tensor is not None else float("nan")
+        if log_interval > 0 and step % log_interval == 0:
             now = time.perf_counter()
             elapsed = max(now - last_log_time, 1e-9)
             tok_per_sec = tokens_since_log / elapsed
@@ -893,10 +967,15 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             if effective_weights is not None:
                 weight_text = f" | w_aux {effective_weights['w_aux']:.4f} | w_iso {effective_weights['w_iso']:.4f}"
             eval_model_tag = "ema" if step >= ema_start_step else "model"
+            mem_text = ""
+            if args.device.startswith("cuda"):
+                allocated = torch.cuda.memory_allocated(args.device) / (1024**3)
+                reserved = torch.cuda.memory_reserved(args.device) / (1024**3)
+                mem_text = f" | mem_allocated {allocated:.2f}GB | mem_reserved {reserved:.2f}GB"
             print(
                 f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
                 f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm:.2e} | "
-                f"magic_norm_max_grad {magic_norm_max_grad:.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}"
+                f"magic_norm_max_grad {magic_norm_max_grad:.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text}"
             )
             tokens_since_log = 0
             last_log_time = now
@@ -922,7 +1001,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             save_training_checkpoint(model, model_ema, optimizer, step, args.ckpt_dir)  # type: ignore[arg-type]
 
     save_training_checkpoint(model, model_ema, optimizer, max_steps, args.ckpt_dir)  # type: ignore[arg-type]
-    total_tokens = max_steps * grad_accum_steps * batch_size * seq_len
+    total_tokens = (max_steps - start_step) * grad_accum_steps * batch_size * seq_len
     total_elapsed = max(time.perf_counter() - start_time, 1e-9)
     print(f"final_loss {last_loss:.4f} | avg_tokens/sec {total_tokens / total_elapsed:.0f}")
 

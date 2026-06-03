@@ -13,6 +13,9 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from .binary_factorized import BinaryFactorizedLinear
+from .triton_kernels import TRITON_AVAILABLE, rmsnorm_triton
+
 
 @dataclass
 class TransformerConfig:
@@ -25,6 +28,12 @@ class TransformerConfig:
     max_seq_len: int = 4096
     norm: str = "rmsnorm"
     qk_norm: bool = False
+    use_binary_factorized: bool = False
+    binary_factorized_rank: int = 8
+    use_moe: bool = False
+    num_experts: int = 8
+    moe_top_k: int = 2
+    moe_intermediate_size: int | None = None
 
     def __post_init__(self):
         assert self.hidden_size % self.num_query_heads == 0, (
@@ -35,6 +44,8 @@ class TransformerConfig:
         )
         head_dim = self.hidden_size // self.num_query_heads
         assert head_dim % 2 == 0, f"head_dim {head_dim} must be even for RoPE"
+        if self.use_moe and self.moe_intermediate_size is None:
+            self.moe_intermediate_size = self.intermediate_size // self.num_experts
 
 
 class RMSNorm(nn.Module):
@@ -44,6 +55,8 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if TRITON_AVAILABLE and x.is_cuda:
+            return rmsnorm_triton(x, self.weight, self.eps)
         norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return norm * self.weight
 
@@ -70,6 +83,12 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
     return out
 
 
+def _make_linear(in_features: int, out_features: int, cfg: TransformerConfig) -> nn.Module:
+    if cfg.use_binary_factorized:
+        return BinaryFactorizedLinear(in_features, out_features, cfg.binary_factorized_rank)
+    return nn.Linear(in_features, out_features, bias=False)
+
+
 class GroupedQueryAttention(nn.Module):
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
@@ -77,10 +96,10 @@ class GroupedQueryAttention(nn.Module):
         self.nkv = cfg.num_kv_heads
         self.head_dim = cfg.hidden_size // cfg.num_query_heads
         assert self.nq % self.nkv == 0, "query heads must be divisible by kv heads"
-        self.q_proj = nn.Linear(cfg.hidden_size, self.nq * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(cfg.hidden_size, self.nkv * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(cfg.hidden_size, self.nkv * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.nq * self.head_dim, cfg.hidden_size, bias=False)
+        self.q_proj = _make_linear(cfg.hidden_size, self.nq * self.head_dim, cfg)
+        self.k_proj = _make_linear(cfg.hidden_size, self.nkv * self.head_dim, cfg)
+        self.v_proj = _make_linear(cfg.hidden_size, self.nkv * self.head_dim, cfg)
+        self.o_proj = _make_linear(self.nq * self.head_dim, cfg.hidden_size, cfg)
         self.qk_norm_enabled = bool(getattr(cfg, "qk_norm", False))
         if self.qk_norm_enabled:
             self.q_norm = RMSNorm(self.head_dim, cfg.norm_eps)
@@ -141,9 +160,9 @@ class GroupedQueryAttention(nn.Module):
 class SwiGLU(nn.Module):
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
-        self.gate = nn.Linear(cfg.hidden_size, cfg.intermediate_size, bias=False)
-        self.up = nn.Linear(cfg.hidden_size, cfg.intermediate_size, bias=False)
-        self.down = nn.Linear(cfg.intermediate_size, cfg.hidden_size, bias=False)
+        self.gate = _make_linear(cfg.hidden_size, cfg.intermediate_size, cfg)
+        self.up = _make_linear(cfg.hidden_size, cfg.intermediate_size, cfg)
+        self.down = _make_linear(cfg.intermediate_size, cfg.hidden_size, cfg)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down(F.silu(self.gate(x)) * self.up(x))
@@ -162,7 +181,11 @@ class TransformerBlock(nn.Module):
         self.attn_norm = RMSNorm(cfg.hidden_size, cfg.norm_eps)
         self.attn = GroupedQueryAttention(cfg)
         self.mlp_norm = RMSNorm(cfg.hidden_size, cfg.norm_eps)
-        self.mlp = SwiGLU(cfg)
+        if cfg.use_moe:
+            from .moe import MoESwiGLU
+            self.mlp = MoESwiGLU(cfg)
+        else:
+            self.mlp = SwiGLU(cfg)
 
     def _apply_folded_norm(self, x: torch.Tensor, which: str) -> torch.Tensor:
         """Inline rsqrt-only normalization when the gamma weight has been folded."""
@@ -216,6 +239,12 @@ class TransformerBlock(nn.Module):
                 mlp_out = self.mlp.forward_repacked(h)
             else:
                 mlp_out = self.mlp(h)
+        if isinstance(mlp_out, tuple):
+            mlp_out, aux_loss = mlp_out
+            x = x + mlp_out
+            if use_cache:
+                return (x, next_key_value)
+            return (x, aux_loss)
         assert isinstance(mlp_out, torch.Tensor)
         x = x + mlp_out
         return (x, next_key_value) if use_cache else x

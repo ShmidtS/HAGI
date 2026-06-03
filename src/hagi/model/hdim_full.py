@@ -217,7 +217,7 @@ class DelayedHDIM(HDIMFull):
 
     def reset_buffer(self, total_steps: int | None = None) -> None:
         """Clear the circular buffer and optional step budget."""
-        self._buffer = []
+        self._buffer.clear()
         self._total_steps = total_steps
 
     def forward(

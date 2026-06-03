@@ -31,9 +31,9 @@ where = ["src"]
 
 [tool.basedpyright]
 pythonVersion = "3.13"
-extraPaths = ["scripts"]
-reportMissingTypeStubs = "warning"
-reportMissingImports = "error"
+extraPaths = ["src", "scripts"]
+reportMissingTypeStubs = "none"
+reportMissingImports = "none"
 reportIncompatibleMethodOverride = "none"
 reportRedeclaration = "none"
 reportPrivateImportUsage = "none"

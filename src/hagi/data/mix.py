@@ -107,7 +107,7 @@ def get_mixed_memmap_dataloader(
     dataset = WeightedMemmapDataset(mix, seq_len=seq_len, dtype=dtype, seed=seed)
     kwargs: dict[str, Any] = {
         "batch_size": batch_size,
-        "shuffle": True,
+        "shuffle": False,
         "num_workers": num_workers,
         "pin_memory": pin_memory,
         "collate_fn": _mixed_shift_collate,

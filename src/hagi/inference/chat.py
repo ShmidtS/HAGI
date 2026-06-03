@@ -7,7 +7,7 @@ try:
 except ImportError:  # pragma: no cover - torch is an optional runtime fallback
     torch = None  # type: ignore[assignment]
 
-from hagi.inference.generate import generate, stream_generate
+from hagi.inference.generate import generate, generate_with_rollouts, stream_generate
 
 
 class ChatSession:
@@ -37,6 +37,8 @@ class ChatSession:
         self.max_context_length = max_context_length
         self.clear_cuda_cache = clear_cuda_cache
         self.compile_model = compile_model
+        self.rollouts = 1
+        self.noise_sigma = 0.0
 
     def add_user_message(self, text: str) -> None:
         self.history.append(("user", text))
@@ -73,17 +75,32 @@ class ChatSession:
 
     def generate_response(self) -> str:
         prompt_ids = self._prompt_ids()
-        generated_ids = generate(
-            self.model,
-            prompt_ids,
-            max_new_tokens=self.max_new_tokens,
-            temperature=self.temperature,
-            top_k=self.top_k,
-            top_p=self.top_p,
-            eos_token_id=self.eos_token_id,
-            use_cache=True,
-            compile_model=self.compile_model,
-        )
+        if self.rollouts > 1 and self.noise_sigma > 0.0:
+            generated_ids = generate_with_rollouts(
+                self.model,
+                prompt_ids,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                top_k=self.top_k,
+                top_p=self.top_p,
+                eos_token_id=self.eos_token_id,
+                rollouts=self.rollouts,
+                noise_sigma=self.noise_sigma,
+                use_cache=True,
+                compile_model=self.compile_model,
+            )
+        else:
+            generated_ids = generate(
+                self.model,
+                prompt_ids,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                top_k=self.top_k,
+                top_p=self.top_p,
+                eos_token_id=self.eos_token_id,
+                use_cache=True,
+                compile_model=self.compile_model,
+            )
         new_ids = generated_ids[0, len(prompt_ids):].tolist()
         text = self.tokenizer.decode(new_ids)
         self.add_assistant_message(text)

@@ -160,3 +160,61 @@ def test_parse_args_exposes_skip_existing():
         assert ns.skip_existing is False
     finally:
         sys.argv = saved
+
+
+def test_v3_presets_expose_open_hf_datasets():
+    for key in ("wikipedia_en", "wikipedia_ru", "oscar_ru", "openwebmath"):
+        assert key in download_data.DATASET_PRESETS, f"missing preset {key}"
+        assert "dataset" in download_data.DATASET_PRESETS[key]
+        assert download_data.DATASET_PRESETS[key]["dataset"]
+
+
+def test_v3_presets_target_correct_sources():
+    assert download_data.DATASET_PRESETS["wikipedia_en"]["dataset"] == "wikimedia/wikipedia"
+    assert download_data.DATASET_PRESETS["wikipedia_en"]["name"] == "20231101.simple"
+    assert download_data.DATASET_PRESETS["wikipedia_ru"]["dataset"] == "wikimedia/wikipedia"
+    assert download_data.DATASET_PRESETS["wikipedia_ru"]["name"] == "20231101.ru"
+    # OSCAR-2301 is gated; fall back to FineWeb-2 rus_Cyrl
+    assert download_data.DATASET_PRESETS["oscar_ru"]["dataset"] == "HuggingFaceFW/fineweb-2"
+    assert download_data.DATASET_PRESETS["oscar_ru"]["name"] == "rus_Cyrl"
+    # openbmb/openwebmath is unavailable; use opc-fineweb-math-corpus
+    assert "math" in str(download_data.DATASET_PRESETS["openwebmath"]["dataset"]).lower()
+
+
+def test_v3_150m_preset_present_and_normalized():
+    mix = download_data.parse_mix("v3_150m")
+    assert abs(sum(mix.values()) - 1.0) < 1e-6
+    expected_keys = {
+        "edu",
+        "cosmopedia",
+        "wikipedia_en",
+        "wikipedia_ru",
+        "oscar_ru",
+        "openwebmath",
+        "smoltalk",
+        "tinystories",
+        "python_instruct",
+        "openwebtext",
+    }
+    assert set(mix) == expected_keys
+    # Russian coverage target ~17% (ru.wiki 10% + oscar_ru 6.67%)
+    assert mix["wikipedia_ru"] + mix["oscar_ru"] == pytest.approx(0.1667, abs=1e-3)
+    # Edu is still the largest single source
+    assert mix["edu"] > mix["wikipedia_en"]
+
+
+def test_dataset_spec_for_v3_sources():
+    for source, expected_dataset in [
+        ("wikipedia_en", "wikimedia/wikipedia"),
+        ("wikipedia_ru", "wikimedia/wikipedia"),
+        ("oscar_ru", "HuggingFaceFW/fineweb-2"),
+    ]:
+        spec = download_data._dataset_spec_for_source(source)
+        assert spec[0] == expected_dataset
+
+
+def test_v3_wikipedia_sources_use_different_configs():
+    en_spec = download_data._dataset_spec_for_source("wikipedia_en")
+    ru_spec = download_data._dataset_spec_for_source("wikipedia_ru")
+    assert en_spec[1] == "20231101.simple"
+    assert ru_spec[1] == "20231101.ru"

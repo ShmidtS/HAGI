@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .binary_factorized import BinaryFactorizedLinear
 from .transformer import GroupedQueryAttention, RMSNorm, SwiGLU, TransformerBlock, build_rope_cache
 
 
@@ -37,10 +38,11 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                 assert isinstance(module.attn_norm, RMSNorm)
                 gamma = module.attn_norm.weight.data
                 for proj in (module.attn.q_proj, module.attn.k_proj, module.attn.v_proj):
-                    with torch.no_grad():
-                        # nn.Linear weight shape is (out_features, in_features).
-                        # RMSNorm scales each input dimension, so we scale columns.
-                        proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+                    if isinstance(proj, nn.Linear):
+                        with torch.no_grad():
+                            # nn.Linear weight shape is (out_features, in_features).
+                            # RMSNorm scales each input dimension, so we scale columns.
+                            proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
                 object.__setattr__(module, "_attn_norm_eps", module.attn_norm.eps)
                 object.__setattr__(module, "attn_norm", nn.Identity())
                 folded_any = True
@@ -49,8 +51,9 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                 assert isinstance(module.mlp_norm, RMSNorm)
                 gamma = module.mlp_norm.weight.data
                 for proj in (module.mlp.gate, module.mlp.up):
-                    with torch.no_grad():
-                        proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+                    if isinstance(proj, nn.Linear):
+                        with torch.no_grad():
+                            proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
                 object.__setattr__(module, "_mlp_norm_eps", module.mlp_norm.eps)
                 object.__setattr__(module, "mlp_norm", nn.Identity())
                 folded_any = True
@@ -86,21 +89,23 @@ def repack_qkv_for_contiguous(model: nn.Module) -> nn.Module:
         if isinstance(module, TransformerBlock):
             attn = module.attn
             if isinstance(attn, GroupedQueryAttention) and not hasattr(attn, "qkv_weight"):
-                wq = attn.q_proj.weight.data
-                wk = attn.k_proj.weight.data
-                wv = attn.v_proj.weight.data
-                qkv = torch.cat([wq, wk, wv], dim=0).contiguous()
-                attn.register_buffer("qkv_weight", qkv)
-                object.__setattr__(attn, "_qkv_splits", [wq.size(0), wk.size(0), wv.size(0)])
-                repacked_any = True
+                if isinstance(attn.q_proj, nn.Linear) and isinstance(attn.k_proj, nn.Linear) and isinstance(attn.v_proj, nn.Linear):
+                    wq = attn.q_proj.weight.data
+                    wk = attn.k_proj.weight.data
+                    wv = attn.v_proj.weight.data
+                    qkv = torch.cat([wq, wk, wv], dim=0).contiguous()
+                    attn.register_buffer("qkv_weight", qkv)
+                    object.__setattr__(attn, "_qkv_splits", [wq.size(0), wk.size(0), wv.size(0)])
+                    repacked_any = True
 
             mlp = module.mlp
             if isinstance(mlp, SwiGLU) and not hasattr(mlp, "gate_up_weight"):
-                w1 = mlp.gate.weight.data
-                w3 = mlp.up.weight.data
-                gate_up = torch.cat([w1, w3], dim=0).contiguous()
-                mlp.register_buffer("gate_up_weight", gate_up)
-                repacked_any = True
+                if isinstance(mlp.gate, nn.Linear) and isinstance(mlp.up, nn.Linear):
+                    w1 = mlp.gate.weight.data
+                    w3 = mlp.up.weight.data
+                    gate_up = torch.cat([w1, w3], dim=0).contiguous()
+                    mlp.register_buffer("gate_up_weight", gate_up)
+                    repacked_any = True
 
     if not repacked_any:
         raise RuntimeError("repack_qkv_for_contiguous: no eligible attention/MLP blocks found.")

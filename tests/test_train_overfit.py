@@ -54,7 +54,7 @@ def test_train_for_five_steps_returns_finite_loss_and_checkpoint_roundtrip(tmp_p
     assert torch.isfinite(torch.tensor(loss))
 
     save_checkpoint(tiny_training_model, optimizer, step=5, ckpt_dir=str(tmp_path))
-    loaded_model, step = load_checkpoint(str(tmp_path / "step-00000005.pt"), device="cpu")
+    loaded_model, step, _ = load_checkpoint(str(tmp_path / "step-00000005.pt"), device="cpu")
 
     assert step == 5
     for name, tensor in tiny_training_model.state_dict().items():

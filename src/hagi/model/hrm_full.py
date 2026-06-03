@@ -126,6 +126,7 @@ class HRMCore(nn.Module):
         gdr=None,
         training_mode: bool = False,
         tgt_rotor_idx: int | torch.Tensor = 0,
+        moe_aux_losses: list[torch.Tensor] | None = None,
     ):
         h = hidden_states
         B, T, H = h.shape
@@ -148,8 +149,15 @@ class HRMCore(nn.Module):
                 z_h_hidden = self.z_h_to_hidden(z_H).unsqueeze(1).expand(B, T, H)
                 h_in = h + z_l_hidden + z_h_hidden
                 for block in reasoning_blocks:
-                    h = block(h_in, cos, sin, attn_mask=attn_mask)
+                    result = block(h_in, cos, sin, attn_mask=attn_mask)
+                    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], torch.Tensor) and result[1].ndim == 0:
+                        h = result[0]
+                        if moe_aux_losses is not None:
+                            moe_aux_losses.append(result[1])
+                    else:
+                        h = result
                     h_in = h
+                assert isinstance(h, torch.Tensor)
                 if gdr is not None:
                     current_step = h_cycle * self.l_cycles + l_cycle
                     total_steps = self.h_cycles * self.l_cycles

@@ -1,5 +1,5 @@
-# Canonical RTX 3070 8GB config — G005 implementation
-# Source of truth: .omc/ultragoal/research/arch_decision.md §Canonical Config
+# Canonical RTX 3070 8GB config — v3 multilingual implementation
+# Source of truth: .omc/ultragoal/briefs/hagi-rtx3070-multilingual-data-v3.md
 name: rtx3070_canonical
 
 model:
@@ -9,20 +9,27 @@ model:
   reasoning_layers: 4
   expression_layers: 4
   loop_count: 1
-  use_loop: false
+  use_loop: true
   use_gdr: true
-  hdim_full: false                 # gated: HDIMFull cross-domain disabled
-  use_hdim_cross_domain: false     # arch_decision §HDIM gate
+  hdim_full: true                  # arch_decision §HDIM gate: enabled
+  use_hdim_cross_domain: true      # arch_decision §HDIM gate: enabled
   hdim_heads: 4
   hdim_delay_steps: 1
-  hrm: false
+  hrm: true
   hrm_h_cycles: 1                  # arch_decision §HRM (h=1)
   hrm_l_cycles: 2                  # arch_decision §HRM (l=2)
   h_dim: 256
   l_dim: 256
   rotor_seed: 42
-  use_msa: false                   # arch_decision §MSA: disabled for pretrain
-  gradient_checkpointing: true
+  use_msa: true                   # arch_decision §MSA: enabled
+  msa_slot_count: 100
+  msa_top_k: 5
+  use_nars: true                   # arch_decision §NARS: enabled
+  use_moe: true
+  num_experts: 8
+  moe_top_k: 2
+  moe_intermediate_size: 512
+  gradient_checkpointing: false
   transformer:
     hidden_size: 768
     num_query_heads: 12
@@ -46,21 +53,21 @@ training:
   muon_momentum: 0.95
   muon_ns_steps: 5
   schedule: wsd                    # arch_decision §Schedule
-  warmup_steps: 200
+  warmup_steps: 400                # 5% of 8000 (was 5% of 4000)
   cooldown_frac: 0.05
   min_lr_ratio: 0.1
-  max_steps: 4000
+  max_steps: 8000                  # 2x v2 (4h -> 8h on RTX 3070)
   batch_size: 2
   grad_accum_steps: 8
-  precision: bf16
+  precision: fp16
   weight_decay: 0.1
   grad_clip: 1.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   use_prefix_lm: false
   loss_warmup_mode: linear
   ema:
     decay: 0.9995
-    start_step: 400
+    start_step: 800                # 10% of 8000
   composite_loss:
     w_ce: 1.0
     w_aux: 0.1
@@ -69,47 +76,59 @@ training:
   eval_interval: 0
   eval_samples: 500
   log_interval: 25
-  ckpt_interval: 500
+  ckpt_interval: 1000              # 8 ckpts (was 8 at 500)
   seed: 42
 
 data:
   tokenizer: HuggingFaceTB/SmolLM2-135M
-  train_tokens: 200000000
-  max_seq_len: 2048
-  packing: bfd                     # arch_decision §Data
+  train_tokens: 150000000          # 3x v2 (was 200M cap on 49M unique; now 150M unique target)
+  max_seq_len: 1024
+  packing: bfd
   dataset_mode: memmap_packed
-  num_workers: 2
+  num_workers: 0
   pin_memory: true
-  mix:                             # arch_decision §Data v2 scale-up
-    edu: 0.5102
-    cosmopedia: 0.1531
-    wikitext: 0.1020
-    smoltalk: 0.0816
-    tinystories: 0.0612
-    python_instruct: 0.0612
-    openwebtext: 0.0307
+  mix:                             # v3 150M (multilingual + math/code)
+    edu: 0.3333
+    cosmopedia: 0.1333
+    wikipedia_en: 0.1667
+    wikipedia_ru: 0.1000
+    oscar_ru: 0.0667
+    openwebmath: 0.0667
+    smoltalk: 0.0533
+    tinystories: 0.0333
+    python_instruct: 0.0267
+    openwebtext: 0.0200
   mix_paths:
     - name: edu
       path: edu.bin
-      weight: 0.5102
+      weight: 0.3333
     - name: cosmopedia
       path: cosmopedia.bin
-      weight: 0.1531
-    - name: wikitext
-      path: wikitext.bin
-      weight: 0.1020
+      weight: 0.1333
+    - name: wikipedia_en
+      path: wikipedia_en.bin
+      weight: 0.1667
+    - name: wikipedia_ru
+      path: wikipedia_ru.bin
+      weight: 0.1000
+    - name: oscar_ru
+      path: oscar_ru.bin
+      weight: 0.0667
+    - name: openwebmath
+      path: openwebmath.bin
+      weight: 0.0667
     - name: smoltalk
       path: smoltalk.bin
-      weight: 0.0816
+      weight: 0.0533
     - name: tinystories
       path: tinystories.bin
-      weight: 0.0612
+      weight: 0.0333
     - name: python_instruct
       path: python_instruct.bin
-      weight: 0.0612
+      weight: 0.0267
     - name: openwebtext
       path: openwebtext.bin
-      weight: 0.0307
+      weight: 0.0200
 
 eval:
   every_n_steps: 2000

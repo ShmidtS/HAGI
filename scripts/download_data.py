@@ -70,6 +70,29 @@ DATASET_PRESETS = {
         "split": "train",
         "license_note": "Apache-2.0; small code instruction snippets for code reasoning.",
     },
+    "wikipedia_en": {
+        "dataset": "wikimedia/wikipedia",
+        "name": "20231101.simple",
+        "split": "train",
+        "license_note": "CC-BY-SA-4.0; simple-English Wikipedia, high-quality factual.",
+    },
+    "wikipedia_ru": {
+        "dataset": "wikimedia/wikipedia",
+        "name": "20231101.ru",
+        "split": "train",
+        "license_note": "CC-BY-SA-4.0; Russian Wikipedia, factual text for multilingual coverage.",
+    },
+    "oscar_ru": {
+        "dataset": "HuggingFaceFW/fineweb-2",
+        "name": "rus_Cyrl",
+        "split": "train",
+        "license_note": "FineWeb-2 (CC-BY-SA-4.0); OSCAR-2301 ru is gated, FineWeb-2 rus_Cyrl is the open alternative.",
+    },
+    "openwebmath": {
+        "dataset": "OpenCoder-LLM/opc-fineweb-math-corpus",
+        "split": "train",
+        "license_note": "Open math web extraction; math reasoning signal. openbmb/openwebmath is unavailable on HF.",
+    },
 }
 
 # arch_decision §Data adapted for unauthenticated download: 70% FineWeb-Edu / 15% Cosmopedia v2 / 10% SmolTalk / 5% Python instruction code.
@@ -95,6 +118,18 @@ MIX_PRESETS: dict[str, dict[str, float]] = {
         "tinystories": 0.0612,
         "python_instruct": 0.0612,
         "openwebtext": 0.0307,
+    },
+    "v3_150m": {
+        "edu": 0.3333,
+        "cosmopedia": 0.1333,
+        "wikipedia_en": 0.1667,
+        "wikipedia_ru": 0.1000,
+        "oscar_ru": 0.0667,
+        "openwebmath": 0.0667,
+        "smoltalk": 0.0533,
+        "tinystories": 0.0333,
+        "python_instruct": 0.0267,
+        "openwebtext": 0.0200,
     },
 }
 

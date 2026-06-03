@@ -187,6 +187,7 @@ def composite_loss(
     weights: dict[str, float] | None = None,
     invariant_src=None,
     invariant_tgt=None,
+    precomputed_loss: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
     if (
@@ -206,7 +207,10 @@ def composite_loss(
     if weights is not None:
         merged_weights.update(weights)
 
-    l_ce = cross_entropy_loss(logits.float(), targets)
+    if precomputed_loss is not None:
+        l_ce = precomputed_loss
+    else:
+        l_ce = cross_entropy_loss(logits, targets)
     l_aux = compute_auxiliary_loss(auxiliary_output).to(device=logits.device, dtype=logits.dtype)
     l_iso = compute_isomorphic_loss(invariant_src, invariant_tgt).to(device=logits.device, dtype=logits.dtype)
     l_total = (

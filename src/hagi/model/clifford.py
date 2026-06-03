@@ -26,6 +26,7 @@ from __future__ import annotations
 import torch
 
 from hagi.utils import _reordering_sign
+from .triton_kernels import TRITON_AVAILABLE, geometric_product_triton
 
 BLADE_COUNT = 8
 DIM = 3
@@ -53,9 +54,20 @@ def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
 # Precomputed tables (module-level constants).
 _OUT_INDEX, _SIGN = build_product_table()
 
+# [8, 8, 8] tensor: PROD_TABLE[c, a, b] = sign[a, b] if a^b == c else 0.
+# Lets us vectorise the geometric product as one einsum.
+_PROD_TABLE = torch.zeros(BLADE_COUNT, BLADE_COUNT, BLADE_COUNT, dtype=torch.float32)
+for _a in range(BLADE_COUNT):
+    for _b in range(BLADE_COUNT):
+        _c = int(_OUT_INDEX[_a, _b])
+        _PROD_TABLE[_c, _a, _b] = _SIGN[_a, _b]
+
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
+
+    Vectorised: single einsum over the precomputed product table, or Triton
+    kernel when CUDA is available.
 
     Args:
         x: [..., 8] multivector coefficients.
@@ -66,15 +78,10 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     assert x.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
-
-    out = torch.zeros_like(x)
-    # Accumulate every (a, b) blade pair contribution.
-    for a in range(BLADE_COUNT):
-        for b in range(BLADE_COUNT):
-            c = int(_OUT_INDEX[a, b])
-            s = _SIGN[a, b]
-            out[..., c] = out[..., c] + s * x[..., a] * y[..., b]
-    return out
+    table = _PROD_TABLE if _PROD_TABLE.device == x.device and _PROD_TABLE.dtype == x.dtype else _PROD_TABLE.to(x.device, x.dtype)
+    if TRITON_AVAILABLE and x.is_cuda:
+        return geometric_product_triton(x, y, table)
+    return torch.einsum("cab,...a,...b->...c", table, x, y)
 
 
 def grade_projection(mv: torch.Tensor, grade: int) -> torch.Tensor:
@@ -95,3 +102,78 @@ def reverse(mv: torch.Tensor) -> torch.Tensor:
         device=mv.device,
     )
     return mv * signs
+
+
+def wedge_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Exterior (antisymmetric) product: (xy - yx) / 2 restricted to grade 2.
+
+    For pure vector inputs returns the bivector ab = (xy - yx) / 2 (e.g.
+    e1 ∧ e2 = e12). The result is always grade-2 regardless of input
+    grades (the grade-rising part for scalars or higher-grade inputs is
+    degenerate in Cl(3,0,0), so we project to bivector consistently).
+    """
+    assert x.shape[-1] == BLADE_COUNT
+    assert y.shape[-1] == BLADE_COUNT
+    diff = geometric_product(x, y) - geometric_product(y, x)
+    return 0.5 * grade_projection(diff, 2)
+
+
+def inner_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Inner (symmetric) product: scalar part of (xy + yx) / 2.
+
+    Returns a scalar (the grade-0 component). For pure vector inputs this
+    is the Euclidean inner product. Higher-grade inputs return the scalar
+    part of the symmetric product.
+    """
+    assert x.shape[-1] == BLADE_COUNT
+    assert y.shape[-1] == BLADE_COUNT
+    sym = geometric_product(x, y) + geometric_product(y, x)
+    return 0.5 * grade_projection(sym, 0)[..., 0]
+
+
+def commutator(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Lie commutator [x, y] = (xy - yx) / 2. Bivector-valued for vectors."""
+    return 0.5 * (geometric_product(x, y) - geometric_product(y, x))
+
+
+def anticommutator(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Jordan anticommutator {x, y} = (xy + yx) / 2."""
+    return 0.5 * (geometric_product(x, y) + geometric_product(y, x))
+
+
+def bivector_exp(mv: torch.Tensor) -> torch.Tensor:
+    """Exponentiate a bivector: R = exp(-B/2) where B is the grade-2 part of mv.
+
+    Closed form: in Cl(3,0,0) a bivector B satisfies B^2 = -|B|^2 (negative
+    scalar), so exp(-B/2) = cos(theta/2) - (B / theta) * sin(theta/2)
+    with theta = |B|. Grade-0 and grade-2 components of the result
+    contribute; the input's other grades pass through unchanged.
+
+    For |B| -> 0, falls back to first-order Taylor: 1 - B/2.
+    """
+    assert mv.shape[-1] == BLADE_COUNT
+    bv_mask = torch.tensor(
+        [1.0 if GRADE[i] == 2 else 0.0 for i in range(BLADE_COUNT)],
+        dtype=mv.dtype,
+        device=mv.device,
+    )
+    bivector = mv * bv_mask
+    b_sq = -geometric_product(bivector, bivector)[..., :1]
+    b_sq = b_sq.clamp_min(0.0)
+    theta = torch.sqrt(b_sq.squeeze(-1))
+    half = 0.5 * theta
+    cos_half = torch.cos(half)
+    sin_half = torch.sin(half)
+    safe_theta = theta.clamp_min(1e-8)
+    coeff = -(sin_half / safe_theta)
+    rotor_bv = coeff.unsqueeze(-1) * bivector
+    out = torch.zeros_like(mv)
+    out[..., :1] = cos_half.unsqueeze(-1)
+    out = out + rotor_bv
+    other_mask = torch.tensor(
+        [1.0 if GRADE[i] not in (0, 2) else 0.0 for i in range(BLADE_COUNT)],
+        dtype=mv.dtype,
+        device=mv.device,
+    )
+    out = out + mv * other_mask
+    return out

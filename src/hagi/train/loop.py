@@ -88,6 +88,12 @@ def train(
     use_scaler = cfg.precision == "fp16" and device.startswith("cuda")
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
+    # NARS HRM controller setup
+    nars_hrm = None
+    if hasattr(model, "nars_hrm") and model.nars_hrm is not None:
+        from hagi.nars.adapters import HrmControlPolicy
+        nars_hrm = model.nars_hrm
+
     last_loss = float("nan")
     for step in range(cfg.max_steps):
         lr = _lr_at(step, cfg)
@@ -99,7 +105,8 @@ def train(
         for _ in range(cfg.grad_accum_steps):
             x, y = get_batch()
             with _autocast_ctx(cfg.precision, device):
-                _, loss = model(x, targets=y)
+                result = model(x, targets=y, training_mode=True)
+                loss = result["loss"] if isinstance(result, dict) else result[1]
                 loss = loss / cfg.grad_accum_steps
             scaler.scale(loss).backward() if use_scaler else loss.backward()
             accum_loss += loss.item()
@@ -116,12 +123,29 @@ def train(
             optimizer.step()
 
         last_loss = accum_loss
+
+        # NARS HRM control: observe and adapt
+        if nars_hrm is not None:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf")).item()
+            nars_hrm.observe_train_step(last_loss, grad_norm)
+            policy = nars_hrm.resolve_policy()
+            if hasattr(model, "hrm") and model.hrm is not None:
+                nars_hrm.apply_policy(policy, model.hrm)
+
         if step % cfg.log_interval == 0:
             metrics = {"step": step, "loss": accum_loss, "lr": lr}
+            if nars_hrm is not None:
+                policy = nars_hrm.resolve_policy()
+                metrics["h_cycles"] = policy.h_cycles
+                metrics["l_cycles"] = policy.l_cycles
             if on_log:
                 on_log(metrics)
             else:
-                print(f"step {step:6d} | loss {accum_loss:.4f} | lr {lr:.2e}")
+                extras = ""
+                if nars_hrm is not None:
+                    policy = nars_hrm.resolve_policy()
+                    extras = f" | h={policy.h_cycles} l={policy.l_cycles}"
+                print(f"step {step:6d} | loss {accum_loss:.4f} | lr {lr:.2e}{extras}")
 
         if eval_get_batch is not None and cfg.eval_interval > 0 and step > 0 \
                 and step % cfg.eval_interval == 0:
@@ -134,20 +158,45 @@ def train(
     return last_loss
 
 
-def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str):
-    """Write a checkpoint with config stored as plain primitives."""
+def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str, ema_state: dict[str, Any] | None = None):
+    """Write a checkpoint with config, optimizer, and optional EMA state."""
     out = Path(ckpt_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"step-{step:08d}.pt"
-    torch.save(
-        {"model": model.state_dict(), "step": step, "config": config_to_dict(model.cfg)},
-        path,
-    )
+    payload: dict[str, Any] = {
+        "model": model.state_dict(),
+        "step": step,
+        "config": config_to_dict(model.cfg),
+        "optimizer": optimizer.state_dict(),
+    }
+    if ema_state is not None:
+        payload["model_ema"] = ema_state
+    # Save MSA registry slots if present
+    if hasattr(model, "msa_registry") and model.msa_registry is not None:
+        payload["msa_registry"] = model.msa_registry.state_dict()
+    # Save NARS adapter states if present
+    if hasattr(model, "nars_hrm") and model.nars_hrm is not None:
+        payload["nars_hrm"] = model.nars_hrm.state_dict()
+    if hasattr(model, "nars_hdim") and model.nars_hdim is not None:
+        payload["nars_hdim"] = model.nars_hdim.state_dict()
+    if hasattr(model, "nars_msa") and model.nars_msa is not None:
+        payload["nars_msa"] = model.nars_msa.state_dict()
+    torch.save(payload, path)
     print(f"checkpoint -> {path}")
 
 
-def load_checkpoint(path: str, device: str = "cpu") -> tuple[HAGI, int]:
-    """Rebuild a HAGI model from a checkpoint."""
+def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bool = False) -> tuple[HAGI, int, dict[str, Any] | None]:
+    """Rebuild a HAGI model from a checkpoint.
+
+    Args:
+        path: checkpoint path
+        device: target device
+        optimizer: optional optimizer to load state into
+        load_ema: whether to return EMA state dict
+
+    Returns:
+        (model, step, ema_state | None)
+    """
     from hagi.model import HAGI
 
     state = torch.load(path, map_location=device, weights_only=True)
@@ -167,4 +216,22 @@ def load_checkpoint(path: str, device: str = "cpu") -> tuple[HAGI, int]:
 
     model.load_state_dict(state["model"])
     model.to(device)
-    return model, int(state.get("step", 0))
+
+    # Load optimizer state if provided
+    if optimizer is not None and "optimizer" in state:
+        optimizer.load_state_dict(state["optimizer"])
+
+    # Load MSA registry if present
+    if hasattr(model, "msa_registry") and model.msa_registry is not None and "msa_registry" in state:
+        model.msa_registry.load_state_dict(state["msa_registry"])
+
+    # Load NARS adapter states if present
+    if hasattr(model, "nars_hrm") and model.nars_hrm is not None and "nars_hrm" in state:
+        model.nars_hrm.load_state_dict(state["nars_hrm"])
+    if hasattr(model, "nars_hdim") and model.nars_hdim is not None and "nars_hdim" in state:
+        model.nars_hdim.load_state_dict(state["nars_hdim"])
+    if hasattr(model, "nars_msa") and model.nars_msa is not None and "nars_msa" in state:
+        model.nars_msa.load_state_dict(state["nars_msa"])
+
+    ema_state = state.get("model_ema") if load_ema else None
+    return model, int(state.get("step", 0)), ema_state
