@@ -120,12 +120,10 @@ def memmap_batcher(path: Path, batch_size: int, seq_len: int, device: str, dtype
         raise ValueError(f"memmap dataset is too small for seq_len={seq_len}: {path}")
 
     def get_batch() -> tuple[torch.Tensor, torch.Tensor]:
-        start = torch.randint(len(dataset) - batch_size, (1,), generator=generator).item()
-        # Contiguous slice: zero-copy via from_numpy, then .to(device) for async transfer
-        batch_np = dataset._preload[start : start + batch_size + seq_len]
-        batch_t = torch.from_numpy(batch_np).to(device, non_blocking=True)
-        x = batch_t[:-1].unfold(0, seq_len, 1)
-        y = batch_t[1:].unfold(0, seq_len, 1)
+        indices = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
+        xs, ys = zip(*(dataset[index] for index in indices), strict=True)
+        x = torch.tensor(np.array(xs), dtype=torch.long, device=device)
+        y = torch.tensor(np.array(ys), dtype=torch.long, device=device)
         return x, y
 
     return get_batch
