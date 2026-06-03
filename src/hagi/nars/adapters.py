@@ -330,8 +330,8 @@ class NarsMsaReasoner:
         N = len(slot_ids)
         freq_list = [self.slot_beliefs.get(sid, TruthValue(0.5, 0.0)).frequency for sid in slot_ids]
         recency_list = [self.recency_weights.get(sid, 0.0) for sid in slot_ids]
-        freq_tensor = torch.tensor(freq_list, dtype=torch.float32, device=query_t.device)
-        recency_tensor = torch.tensor(recency_list, dtype=torch.float32, device=query_t.device)
+        freq_tensor = torch.as_tensor(freq_list, dtype=torch.float32).to(query_t.device)
+        recency_tensor = torch.as_tensor(recency_list, dtype=torch.float32).to(query_t.device)
         blended_tensor = (
             nars_weight * freq_tensor
             + recency_weight * recency_tensor
@@ -339,11 +339,10 @@ class NarsMsaReasoner:
         )
         top_k = min(top_k, N)
         top_values, top_indices = torch.topk(blended_tensor, k=top_k)
-        top_k_ids = torch.tensor(
+        top_k_ids = torch.as_tensor(
             [slot_ids[i] for i in top_indices.cpu().tolist()],
             dtype=torch.long,
-            device=query_t.device,
-        )
+        ).to(query_t.device)
 
         return top_k_ids, top_values
 

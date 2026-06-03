@@ -751,7 +751,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         else:
             optimizer.step()  # type: ignore[arg-type]
 
-        if args.device.startswith("cuda"):
+        if args.device.startswith("cuda") and step % 10 == 0:
             torch.cuda.empty_cache()
 
         last_loss = float(accum_loss_tensor.item()) if accum_loss_tensor is not None else float("nan")
