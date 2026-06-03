@@ -707,7 +707,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     if grad_accum_steps <= 0:
         raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
     warmup_steps = int(train_cfg.get("warmup_steps", 500))
-    learning_rate = float(train_cfg.get("learning_rate", 1.0e-3))
+    learning_rate = float(train_cfg.get("learning_rate", train_cfg.get("adamw_lr", 1.0e-3)))
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
     precision = str(train_cfg.get("precision", "fp16"))
     log_interval = int(train_cfg.get("log_interval", 25))
@@ -718,6 +718,9 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         model = model.half()
         print("Using manual FP16: model converted to float16, no autocast")
 
+    for group in optimizer.param_groups:
+        group["initial_lr"] = group["lr"]
+
     args.ckpt_dir.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
     tokens_since_log = 0
@@ -726,8 +729,9 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
 
     for step in range(max_steps):
         lr = lr_at(step, max_steps, warmup_steps, learning_rate)
+        ratio = lr / max(learning_rate, 1e-12)
         for group in optimizer.param_groups:
-            group["lr"] = lr
+            group["lr"] = group["initial_lr"] * ratio
 
         optimizer.zero_grad(set_to_none=True)
         accum_loss_tensor = None
@@ -849,7 +853,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     if grad_accum_steps <= 0:
         raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
     warmup_steps = int(train_cfg.get("warmup_steps", 500))
-    learning_rate = float(train_cfg.get("learning_rate", 5.0e-4))
+    learning_rate = float(train_cfg.get("learning_rate", train_cfg.get("adamw_lr", 5.0e-4)))
     min_lr_ratio = float(train_cfg.get("min_lr_ratio", 0.1))
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
     precision = str(train_cfg.get("precision", "fp16"))
@@ -857,6 +861,10 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
     use_scaler = precision == "fp16" and args.device.startswith("cuda")
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
+    if precision == "manual_fp16" and args.device.startswith("cuda"):
+        model = model.half()
+        model_ema = model_ema.half()
+        print("Using manual FP16: model converted to float16, no autocast")
 
     print_model_summary(model, model_cfg, args.device, use_prefix_lm, composite_weights is not None)
     if args.dry_run:
@@ -879,6 +887,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             except Exception as exc:
                 print(f"EMA state mismatch, starting fresh: {exc}")
 
+    for group in optimizer.param_groups:
+        group["initial_lr"] = group["lr"]
+
     args.ckpt_dir.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
     tokens_since_log = 0
@@ -899,8 +910,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 schedule=str(train_cfg.get("schedule", "cosine")),
                 cooldown_frac=float(train_cfg.get("cooldown_frac", 0.05)),
             )
+        ratio = lr / max(learning_rate, 1e-12)
         for group in optimizer.param_groups:
-            group["lr"] = lr
+            group["lr"] = group["initial_lr"] * ratio
         effective_weights = None
         if composite_weights is not None:
             effective_weights = dict(composite_weights)
