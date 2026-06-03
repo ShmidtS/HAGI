@@ -482,25 +482,31 @@ class MSAAttention(nn.Module):
             k_all = k_all.view(B, top_k, nkv, -1, self.head_dim)
             v_all = v_all.view(B, top_k, nkv, -1, self.head_dim)
 
-        # Vectorized attention using einsum with expand (not repeat_interleave)
-        # to avoid creating new tensors for GQA head repetition.
-        scale = 1.0 / (self.head_dim ** 0.5)
+        # Vectorized attention using matmul (avoids einsum bugs with singleton dims)
+        scale = self.head_dim ** 0.5
 
         if is_3d:
             # GQA: broadcast KV heads instead of repeat_interleave (zero-copy)
-            # k_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, T, top_k, nq, T_slot, head_dim]
+            # k_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, nq, T, top_k, T_slot, head_dim]
             kk = k_all.unsqueeze(3).expand(-1, -1, -1, rep, -1, -1, -1).reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 3, 1, 2, 4, 5)
             # v_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, nq, T, top_k, T_slot, head_dim]
             vk = v_all.unsqueeze(3).expand(-1, -1, -1, rep, -1, -1, -1).reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 3, 1, 2, 4, 5)
 
             qk = q.unsqueeze(3)  # [B, nq, T, 1, head_dim]
-            scores = torch.einsum("bqntd,bqtkzd->bqtkz", qk, kk) / scale
-            # scores: [B, nq, T, top_k, T_slot]
+            qk_mat = qk.reshape(B * self.num_query_heads * T, 1, self.head_dim)
+            kk_mat = kk.reshape(B * self.num_query_heads * T, top_k * kk.size(4), self.head_dim)
+            scores = torch.matmul(qk_mat.float(), kk_mat.transpose(-2, -1).float()) / scale
+            scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(4))
             if attn_mask is not None:
                 scores = scores + attn_mask
-            attn = F.softmax(scores, dim=-1)
-            out_k = torch.einsum("bqtkz,bqtkzd->bqtkd", attn, vk)  # [B, nq, T, top_k, head_dim]
-            slot_out = out_k.permute(0, 1, 3, 2, 4)  # [B, nq, top_k, T, head_dim]
+            attn = F.softmax(scores, dim=-1).to(q.dtype)
+            if nars_weights is not None:
+                w = nars_weights.unsqueeze(1).unsqueeze(-1)  # [B, 1, T, top_k, 1]
+                attn = attn * w
+            attn_mat = attn.reshape(B * self.num_query_heads * T, 1, top_k * kk.size(4))
+            vk_mat = vk.reshape(B * self.num_query_heads * T, top_k * vk.size(4), self.head_dim)
+            out_k = torch.matmul(attn_mat, vk_mat)  # [B*nq*T, 1, head_dim]
+            out_k = out_k.view(B, self.num_query_heads, T, self.head_dim)
         else:
             # GQA: broadcast KV heads instead of repeat_interleave
             # k_all: [B, top_k, nkv, T_slot, head_dim] -> [B, nq, top_k, T_slot, head_dim]
@@ -508,28 +514,24 @@ class MSAAttention(nn.Module):
             vk = v_all.unsqueeze(2).expand(-1, -1, rep, -1, -1, -1).reshape(B, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 2, 1, 3, 4)
 
             qk = q.unsqueeze(2)  # [B, nq, 1, T, head_dim]
-            scores = torch.einsum("bqntd,bqksd->bqtsk", qk, kk) / scale
-            # scores: [B, nq, T, T_slot, top_k]
-            scores = scores.permute(0, 1, 4, 2, 3)  # [B, nq, top_k, T, T_slot]
+            qk_mat = qk.reshape(B * self.num_query_heads, T, self.head_dim)
+            kk_mat = kk.reshape(B * self.num_query_heads, top_k * kk.size(3), self.head_dim)
+            scores = torch.matmul(qk_mat.float(), kk_mat.transpose(-2, -1).float()) / scale
+            scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(3))
+            scores = scores.permute(0, 1, 3, 2, 4)  # [B, nq, top_k, T, T_slot]
             if attn_mask is not None:
                 scores = scores + attn_mask
-            attn = F.softmax(scores, dim=-1)
-            out_k = torch.einsum("bqktz,bqksd->bqktd", attn, vk)  # [B, nq, top_k, T, head_dim]
-            slot_out = out_k
+            attn = F.softmax(scores, dim=-1).to(q.dtype)
+            if nars_weights is not None:
+                w = nars_weights.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # [B, 1, top_k, 1, 1]
+                attn = attn * w
+            attn_mat = attn.permute(0, 1, 3, 2, 4).reshape(B * self.num_query_heads, T, 1, top_k * kk.size(3))
+            vk_mat = vk.reshape(B * self.num_query_heads, 1, top_k * vk.size(3), self.head_dim)
+            out_k = torch.matmul(attn_mat, vk_mat.transpose(-2, -1))  # [B*nq, T, 1, head_dim]
+            out_k = out_k.squeeze(-2)  # [B*nq, T, head_dim]
+            out_k = out_k.view(B, self.num_query_heads, T, self.head_dim)
 
-        # Apply NARS truth-weighted modulation if provided
-        if nars_weights is not None:
-            if is_3d:
-                # [B, T, top_k] -> [B, 1, top_k, T, 1]
-                w = nars_weights.unsqueeze(1).unsqueeze(-1)
-            else:
-                # [B, top_k] -> [B, 1, top_k, 1, 1]
-                w = nars_weights.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
-            slot_out = slot_out * w
-
-        # Aggregate across slots
-        out = slot_out.sum(dim=2)  # [B, nq, T, head_dim]
-        out = out.transpose(1, 2).contiguous().view(B, T, -1)
+        out = out_k.transpose(1, 2).contiguous().view(B, T, -1)
         out = self.o_proj(out)
         return out
 

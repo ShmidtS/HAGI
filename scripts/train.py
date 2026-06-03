@@ -712,7 +712,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     precision = str(train_cfg.get("precision", "fp16"))
     log_interval = int(train_cfg.get("log_interval", 25))
     ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
-    use_scaler = (precision in ("fp16", "manual_fp16")) and args.device.startswith("cuda")
+    use_scaler = precision == "fp16" and args.device.startswith("cuda")
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
     if precision == "manual_fp16" and args.device.startswith("cuda"):
         model = model.half()
@@ -760,7 +760,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         else:
             optimizer.step()  # type: ignore[arg-type]
 
-        if args.device.startswith("cuda") and step % 10 == 0:
+        if args.device.startswith("cuda") and step % 50 == 0:
             torch.cuda.empty_cache()
 
         last_loss = float(accum_loss_tensor.item()) if accum_loss_tensor is not None else float("nan")
@@ -944,11 +944,12 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
 
-        full_grad_norm = get_grad_norm(model)
         if grad_clip > 0:
             full_grad_norm = float(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item()
             )
+        else:
+            full_grad_norm = get_grad_norm(model)
         if not math.isfinite(full_grad_norm) or full_grad_norm > 100.0 or (0.0 < full_grad_norm < 1e-6):
             print(f"WARNING: extreme grad_norm {full_grad_norm:.2e} at step {step}")
 
@@ -961,7 +962,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if step >= ema_start_step:
             update_ema(model, model_ema, ema_decay)
 
-        if args.device.startswith("cuda"):
+        if args.device.startswith("cuda") and step % 50 == 0:
             torch.cuda.empty_cache()
 
         last_loss = float((accum_loss_tensor / grad_accum_steps).item()) if accum_loss_tensor is not None else float("nan")

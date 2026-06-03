@@ -126,7 +126,7 @@ training:
   muon_momentum: 0.95
   muon_ns_steps: 5
   optimizer: muon_adamw
-  precision: manual_fp16
+  precision: fp16
   schedule: wsd
   seed: 42
   use_prefix_lm: false
