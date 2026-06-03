@@ -101,7 +101,7 @@ model:
   vocab_size: 49152
 name: rtx3070_canonical
 training:
-  adamw_lr: 0.0003
+  adamw_lr: 0.0001
   batch_size: 2
   ckpt_interval: 1000
   composite_loss:
@@ -122,7 +122,7 @@ training:
   magic_norm_max: 1.0
   max_steps: 8000
   min_lr_ratio: 0.1
-  muon_lr: 0.02
+  muon_lr: 0.005
   muon_momentum: 0.95
   muon_ns_steps: 5
   optimizer: muon_adamw
