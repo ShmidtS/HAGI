@@ -429,7 +429,7 @@ class HAGI(nn.Module):
 
         if targets is not None:
             loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
+                logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
                 ignore_index=ignore_index,
             )

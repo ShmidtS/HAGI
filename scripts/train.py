@@ -410,9 +410,6 @@ def compute_loss(
     model_output: Any = None,
     weights: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    # Cast logits to float32 for numerical stability in cross-entropy
-    if logits.dtype == torch.float16:
-        logits = logits.float()
     if weights is None:
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -495,7 +492,7 @@ def run_eval(
             output = model(tokens, training_mode=False)
             logits = unwrap_logits(output)
             ce = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
+                logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
                 ignore_index=-100,
                 reduction="sum",
