@@ -246,7 +246,7 @@ def to_device(batch: Any, device: str, non_blocking: bool) -> Any:
             partition=batch.partition.to(device, non_blocking=non_blocking),
         )
     if isinstance(batch, tuple):
-        return tuple(to_device(item, device, non_blocking) for item in batch)
+        return tuple(item.to(device, non_blocking=non_blocking) for item in batch)
     return batch.to(device, non_blocking=non_blocking)
 
 
