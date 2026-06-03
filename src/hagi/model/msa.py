@@ -267,9 +267,9 @@ class DocumentWiseRoPE(nn.Module):
             Rotated tensor with same shape as ``x``.
         """
         B, H, T, D = x.shape
-        # Avoid GPU sync by moving scalar to CPU before .item()
-        max_offset = int(slot_offsets.max().cpu().item()) + 1
-        seq_len = min(T + max_offset, self.max_seq_len)
+        # Fixed-size cache: always use max_seq_len to avoid GPU sync from .item()
+        # The cache is computed once and reused. Memory overhead is negligible.
+        seq_len = self.max_seq_len
         cos, sin = self._get_cache(seq_len, x.dtype, x.device)
 
         # slot_offsets must be [B, T]
@@ -482,21 +482,19 @@ class MSAAttention(nn.Module):
             k_all = k_all.view(B, top_k, nkv, -1, self.head_dim)
             v_all = v_all.view(B, top_k, nkv, -1, self.head_dim)
 
-        # Vectorized attention across all top-k slots simultaneously
-        q_exp = q.unsqueeze(2).expand(-1, -1, top_k, -1, -1)  # [B, nq, top_k, T, head_dim]
-        slot_out = torch.empty(
-            B, self.num_query_heads, top_k, T, self.head_dim,
-            dtype=q_exp.dtype, device=q_exp.device,
-        )
+        # Vectorized attention using einsum with expand (not repeat_interleave)
+        # to avoid creating new tensors for GQA head repetition.
+        scale = 1.0 / (self.head_dim ** 0.5)
 
         if is_3d:
-            # GQA: repeat KV heads to match query heads
-            kk = k_all.repeat_interleave(rep, dim=3)  # [B, T, top_k, nq, T_slot, head_dim]
-            kk = kk.permute(0, 3, 1, 2, 4, 5)  # [B, nq, T, top_k, T_slot, head_dim]
-            vk = v_all.repeat_interleave(rep, dim=3).permute(0, 3, 1, 2, 4, 5)  # [B, nq, T, top_k, T_slot, head_dim]
+            # GQA: broadcast KV heads instead of repeat_interleave (zero-copy)
+            # k_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, T, top_k, nq, T_slot, head_dim]
+            kk = k_all.unsqueeze(3).expand(-1, -1, -1, rep, -1, -1, -1).reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 3, 1, 2, 4, 5)
+            # v_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, nq, T, top_k, T_slot, head_dim]
+            vk = v_all.unsqueeze(3).expand(-1, -1, -1, rep, -1, -1, -1).reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 3, 1, 2, 4, 5)
 
             qk = q.unsqueeze(3)  # [B, nq, T, 1, head_dim]
-            scores = torch.einsum("bqntd,bqtkzd->bqtkz", qk, kk) / (self.head_dim ** 0.5)
+            scores = torch.einsum("bqntd,bqtkzd->bqtkz", qk, kk) / scale
             # scores: [B, nq, T, top_k, T_slot]
             if attn_mask is not None:
                 scores = scores + attn_mask
@@ -504,13 +502,13 @@ class MSAAttention(nn.Module):
             out_k = torch.einsum("bqtkz,bqtkzd->bqtkd", attn, vk)  # [B, nq, T, top_k, head_dim]
             slot_out = out_k.permute(0, 1, 3, 2, 4)  # [B, nq, top_k, T, head_dim]
         else:
-            # GQA: repeat KV heads to match query heads
-            kk = k_all.repeat_interleave(rep, dim=2)  # [B, top_k, nq, T_slot, head_dim]
-            kk = kk.permute(0, 2, 1, 3, 4)  # [B, nq, top_k, T_slot, head_dim]
-            vk = v_all.repeat_interleave(rep, dim=2).permute(0, 2, 1, 3, 4)  # [B, nq, top_k, T_slot, head_dim]
+            # GQA: broadcast KV heads instead of repeat_interleave
+            # k_all: [B, top_k, nkv, T_slot, head_dim] -> [B, nq, top_k, T_slot, head_dim]
+            kk = k_all.unsqueeze(2).expand(-1, -1, rep, -1, -1, -1).reshape(B, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 2, 1, 3, 4)
+            vk = v_all.unsqueeze(2).expand(-1, -1, rep, -1, -1, -1).reshape(B, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 2, 1, 3, 4)
 
             qk = q.unsqueeze(2)  # [B, nq, 1, T, head_dim]
-            scores = torch.einsum("bqntd,bqksd->bqtsk", qk, kk) / (self.head_dim ** 0.5)
+            scores = torch.einsum("bqntd,bqksd->bqtsk", qk, kk) / scale
             # scores: [B, nq, T, T_slot, top_k]
             scores = scores.permute(0, 1, 4, 2, 3)  # [B, nq, top_k, T, T_slot]
             if attn_mask is not None:

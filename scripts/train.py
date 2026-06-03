@@ -216,6 +216,9 @@ def scheduled_weight(step: int, start: float, final: float, warmup_steps: int, m
 def autocast_ctx(precision: str, device: str):
     if precision == "fp32" or not device.startswith("cuda"):
         return torch.autocast(device_type="cpu", enabled=False)
+    if precision == "manual_fp16":
+        # Manual FP16: model is already in float16, no autocast needed
+        return torch.autocast(device_type="cpu", enabled=False)
     dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     return torch.autocast(device_type="cuda", dtype=dtype)
 
@@ -407,6 +410,9 @@ def compute_loss(
     model_output: Any = None,
     weights: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
+    # Cast logits to float32 for numerical stability in cross-entropy
+    if logits.dtype == torch.float16:
+        logits = logits.float()
     if weights is None:
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -706,8 +712,11 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     precision = str(train_cfg.get("precision", "fp16"))
     log_interval = int(train_cfg.get("log_interval", 25))
     ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
-    use_scaler = precision == "fp16" and args.device.startswith("cuda")
+    use_scaler = (precision in ("fp16", "manual_fp16")) and args.device.startswith("cuda")
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
+    if precision == "manual_fp16" and args.device.startswith("cuda"):
+        model = model.half()
+        print("Using manual FP16: model converted to float16, no autocast")
 
     args.ckpt_dir.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
