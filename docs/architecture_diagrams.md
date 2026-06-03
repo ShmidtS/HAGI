@@ -26,7 +26,7 @@ This document describes what is **actually implemented** in the Python code, not
                          ▲
                          │
                        NARS
-                 (control layer)
+                 (active controller)
 ```
 
 The core is a standard Transformer. Everything else is optional and gated by config flags.
@@ -92,11 +92,10 @@ flowchart TB
 - `z_h_to_hidden` / `z_l_to_hidden` — linear projections that broadcast recurrent states to token level
 - H-cycles (outer) × L-cycles (inner)
 - GDR can be injected inside each L-cycle
+- **NARS active controller** — `compute_gating()` truth-weighted modulation of `z_H` and `z_L` before broadcast
 
 **What it actually is:**
-> A latent controller + iterative refinement loop on top of Transformer.
-
-It is NOT a full HRM from research literature. It is a simpler two-level recurrent wrapper.
+> A latent controller + iterative refinement loop on top of Transformer, with NARS truth-weighted gating.
 
 ---
 
@@ -128,6 +127,8 @@ flowchart LR
 **What works:**
 - Mathematical transformations are implemented and run.
 - GDR splits hidden state into 5 grades, applies per-grade MLPs, adds geometric interaction.
+- **Sparse gating** — `gate_scalar`, `gate_vector`, `gate_bivector`, `gate_trivector` (sigmoid) control grade activation, allowing unused grades to be soft-gated off.
+- **HDIM bypass** — when `use_hdim_cross_domain=False`, projection is skipped entirely (identity pass).
 
 **What is NOT proven by the code:**
 - That Clifford representations improve training quality.
@@ -150,16 +151,16 @@ flowchart TB
 
 **What actually exists:**
 - `MemorySlot` — slot with routing key, K cache, V cache, domain_id
-- `SlotRegistry` — append-only, lazy tensor caching, pinned memory for non-blocking GPU transfer
+- `SlotRegistry` — **LRU eviction**, lazy tensor caching, pinned memory for non-blocking GPU transfer
 - `SparseRouter` — dot-product top-k selection
 - `HDIMSlotRouter` — routing key derived from Clifford scalar invariant
-- `MSAAttention` — GQA attention across fetched slots with document-wise RoPE
+- `MSAAttention` — GQA attention across fetched slots with document-wise RoPE, **NARS truth-weighted modulation**
 - `batch_create_slots` / `batch_register` — vectorized slot creation
 
 **What it actually is:**
-> Append-only slots + nearest-neighbor routing. Simple external KV cache.
+> LRU slots + nearest-neighbor routing + NARS truth-weighted attention. Simple external KV cache with active control.
 
-There is NO complex long-term cognitive memory. Just a registry of K/V tensors with dot-product retrieval.
+There is NO complex long-term cognitive memory. Just a registry of K/V tensors with dot-product retrieval and LRU eviction.
 
 ---
 
@@ -187,26 +188,22 @@ flowchart TB
 
 | Adapter | Input | Output | Role |
 |---|---|---|---|
-| `NarsHrmController` | loss, grad_norm | `HrmControlPolicy` (h_cycles, l_cycles) | Observer — sets loop counts |
+| `NarsHrmController` | loss, grad_norm | `HrmControlPolicy` (h_cycles, l_cycles) + **truth-weighted gating** | Active controller — sets loop counts and modulates z_H/z_L |
 | `NarsHdimReasoner` | transfer fidelity | Recommended domain pair | Observer — suggests domains |
-| `NarsMsaReasoner` | slot usefulness | Blended top-k (0.6 truth + 0.3 recency + 0.1 dot) | Observer — reranks slots |
+| `NarsMsaReasoner` | slot usefulness | Blended top-k + **attention weights** | Active controller — reranks slots and modulates attention |
 
 **What it actually is:**
-> A control layer that observes and suggests. NOT a central reasoning mechanism.
+> An active control layer that both observes and drives the model. NOT a central reasoning mechanism, but it directly modulates HRM and MSA forward passes.
 
-NARS does not drive the model. It watches training and proposes adjustments.
+NARS watches training and proposes adjustments, while also applying truth-weighted gating to recurrent states and attention weights.
 
 ---
 
-## 7. Lean — Not Part of the Compute Graph
+## 7. Lean — Removed from Python Runtime
 
-File: `lean/bridge.py`
+The Python `lean/` bridge has been removed. Formal verification specification lives in `formalization/HAGI/` (Lean4 source) and is not part of the Python compute graph.
 
-- A Python bridge to Lean exists.
-- The model does NOT depend on Lean during forward/backward.
-- Without Lean, everything works.
-
-**Conclusion:** Lean is a verification/research sidecar, not a runtime component.
+The model does NOT depend on Lean during forward/backward.
 
 ---
 
@@ -232,8 +229,7 @@ MoE        — mixture of experts
 ### Overlays (remove these and model trains identically)
 
 ```
-NARS       — observer/controller suggestions
-Lean       — formal verification bridge
+Lean       — formal verification (in formalization/, not in Python runtime)
 ```
 
 ---
@@ -243,14 +239,14 @@ Lean       — formal verification bridge
 | Component | Originality | Assessment |
 |---|---|---|
 | Transformer | Standard | Well-known architecture |
-| HRM | Unusual | Real two-level recurrent controller, but not full research HRM |
-| Clifford/GDR | Rare | Uncommon idea, but unproven benefit in this codebase |
-| MSA | Variation | Standard external memory pattern (slots + routing) |
-| NARS integration | Most original | Novel bridge between symbolic control and neural training |
+| HRM | Unusual | Real two-level recurrent controller with NARS truth-weighted gating |
+| Clifford/GDR | Rare | Uncommon idea, sparse gating improves efficiency, unproven benefit |
+| MSA | Variation | Standard external memory + LRU + NARS attention modulation |
+| NARS integration | Most original | Active controller: modulates HRM gating and MSA attention weights |
 
 **Overall characterization:**
 
-> A **neuro-symbolic modular transformer framework** with a recurrent controller and external memory. Not a fundamentally new type of network, but an unusual combination of existing ideas.
+> A **neuro-symbolic modular transformer framework** with an active symbolic control layer that modulates recurrent states and attention weights. Not a fundamentally new type of network, but an unusual combination with real feedback loops.
 
 ---
 
@@ -308,8 +304,8 @@ scripts/
 ├── chat.py             # Interactive inference
 └── download_data.py    # Data download
 
-lean/
-└── bridge.py           # Lean bridge — NOT part of compute graph
+formalization/
+└── HAGI/               # Lean4 verification spec (not part of Python runtime)
 ```
 
 ---
