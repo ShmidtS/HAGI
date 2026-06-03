@@ -64,12 +64,12 @@ class SlotRegistry:
 
     def batch_register(self, slots: List[MemorySlot]) -> None:
         """Register multiple slots at once, invalidating caches only once."""
+        ids_to_remove = {s.slot_id for s in slots}
+        self._slot_ids = [sid for sid in self._slot_ids if sid not in ids_to_remove]
         for slot in slots:
             self._evict_if_full()
             self._slots[slot.slot_id] = slot
-            if slot.slot_id in self._slot_ids:
-                self._slot_ids.remove(slot.slot_id)
-            self._slot_ids.append(slot.slot_id)
+        self._slot_ids.extend(s.slot_id for s in slots)
         self._routing_keys = None
         self._slot_ids_tensor = None
 
@@ -100,15 +100,14 @@ class SlotRegistry:
             if not self._slots:
                 raise RuntimeError("No slots registered")
             keys = [self._slots[sid].routing_key for sid in self._slot_ids]
-            if device is not None:
-                keys = [k.to(device) for k in keys]
-            self._routing_keys = torch.stack(keys, dim=0)
+            stacked = torch.stack(keys, dim=0)
+            self._routing_keys = stacked.to(device) if device is not None else stacked
         elif device is not None and self._routing_keys.device.type != device.split(':')[0]:
             # Rebuild if device changed to avoid mixed-device cat
             keys = [self._slots[sid].routing_key for sid in self._slot_ids]
-            keys = [k.to(device) for k in keys]
-            self._routing_keys = torch.stack(keys, dim=0)
-        if device is not None:
+            stacked = torch.stack(keys, dim=0)
+            self._routing_keys = stacked.to(device)
+        elif device is not None:
             self._routing_keys = self._routing_keys.to(device)
         return self._routing_keys
 
@@ -525,10 +524,10 @@ class MSAAttention(nn.Module):
             if nars_weights is not None:
                 w = nars_weights.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # [B, 1, top_k, 1, 1]
                 attn = attn * w
-            attn_mat = attn.permute(0, 1, 3, 2, 4).reshape(B * self.num_query_heads, T, 1, top_k * kk.size(3))
-            vk_mat = vk.reshape(B * self.num_query_heads, 1, top_k * vk.size(3), self.head_dim)
-            out_k = torch.matmul(attn_mat, vk_mat.transpose(-2, -1))  # [B*nq, T, 1, head_dim]
-            out_k = out_k.squeeze(-2)  # [B*nq, T, head_dim]
+            attn_mat = attn.permute(0, 1, 3, 2, 4).reshape(B * self.num_query_heads * T, 1, top_k * kk.size(3))
+            vk_mat = vk.reshape(B * self.num_query_heads, top_k * vk.size(3), self.head_dim).unsqueeze(1).expand(-1, T, -1, -1).reshape(B * self.num_query_heads * T, top_k * vk.size(3), self.head_dim)
+            out_k = torch.matmul(attn_mat, vk_mat)  # [B*nq*T, 1, head_dim]
+            out_k = out_k.squeeze(1)  # [B*nq*T, head_dim]
             out_k = out_k.view(B, self.num_query_heads, T, self.head_dim)
 
         out = out_k.transpose(1, 2).contiguous().view(B, T, -1)
@@ -628,16 +627,21 @@ class HDIMSlotRouter(nn.Module):
         v_t = v_cache.transpose(1, 2)
 
         # Flatten batch dimension and create per-token [nkv, 1, head_dim] slices
-        k_flat = k_t.reshape(total, k_cache.size(1), k_cache.size(-1))
-        v_flat = v_t.reshape(total, v_cache.size(1), v_cache.size(-1))
+        k_flat = k_t.reshape(total, k_cache.size(1), k_cache.size(-1)).unsqueeze(2)
+        v_flat = v_t.reshape(total, v_cache.size(1), v_cache.size(-1)).unsqueeze(2)
+
+        # Unbind once to avoid per-iteration Python overhead
+        inv_list = inv_flat.unsqueeze(1).unbind(0)
+        k_list = k_flat.unbind(0)
+        v_list = v_flat.unbind(0)
 
         slots = [
             MemorySlot(
                 slot_id=slot_id_base + i,
                 domain_id=domain_id,
-                routing_key=inv_flat[i].unsqueeze(0),
-                k_cache=k_flat[i].unsqueeze(-2),
-                v_cache=v_flat[i].unsqueeze(-2),
+                routing_key=inv_list[i],
+                k_cache=k_list[i],
+                v_cache=v_list[i],
             )
             for i in range(total)
         ]

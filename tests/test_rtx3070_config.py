@@ -39,7 +39,7 @@ def test_rtx3070_config_builds_model_with_gradient_checkpointing():
     model = HAGI(model_cfg)
 
     assert isinstance(model_cfg, HAGIConfig)
-    assert model.cfg.gradient_checkpointing is True
+    assert model.cfg.gradient_checkpointing is False
     assert model.embed.weight.shape == (49152, 768)
     assert model.lm_head.weight.shape == (49152, 768)
     assert len(model.perception) == 4

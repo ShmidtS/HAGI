@@ -160,8 +160,7 @@ def test_document_wise_rope_cache_reuses_same_seq_len():
     x = torch.randn(1, 2, 4, 8)
     offsets = torch.zeros(1, 4, dtype=torch.long)
     _ = rope(x, offsets)
-    # seq_len = T + max(offset) + 1 = 4 + 0 + 1 = 5
-    cache_key = (5, x.dtype, x.device)
+    cache_key = (rope.max_seq_len, x.dtype, x.device)
     assert cache_key in rope._cache
     _ = rope(x, offsets)
     assert len(rope._cache) == 1

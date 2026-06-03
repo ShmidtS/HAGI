@@ -409,7 +409,7 @@ def compute_loss(
     targets: torch.Tensor,
     model_output: Any = None,
     weights: dict[str, float] | None = None,
-) -> tuple[torch.Tensor, dict[str, float]]:
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if weights is None:
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -445,9 +445,9 @@ def compute_loss(
     if moe_aux_loss is not None:
         w_moe = weights.get("w_moe", 0.01) if weights else 0.01
         total_loss = total_loss + w_moe * moe_aux_loss
-    components = {name: value.detach().float().item() for name, value in losses.items()}
+    components = {name: value.detach().float() for name, value in losses.items()}
     if moe_aux_loss is not None:
-        components["L_moe"] = moe_aux_loss.detach().float().item()
+        components["L_moe"] = moe_aux_loss.detach().float()
     return total_loss, components
 
 
@@ -504,8 +504,8 @@ def run_eval(
             total_correct += ((preds == targets) & valid).sum().item()
             if composite_weights is not None:
                 _, components = compute_loss(logits, targets, output, composite_weights)
-                total_aux += components.get("L_aux", 0.0)
-                total_iso += components.get("L_iso", 0.0)
+                total_aux += components.get("L_aux", torch.tensor(0.0)).item()
+                total_iso += components.get("L_iso", torch.tensor(0.0)).item()
         num_batches += 1
     if was_training:
         model.train()
@@ -547,8 +547,8 @@ def magic_norm_clip(model: torch.nn.Module, max_norm: float, blade_count: int = 
     first_param = next((p for p in gdr.parameters() if p.grad is not None), None)
     if first_param is None:
         return 0.0
-    max_norm_t = torch.tensor(max_norm, dtype=torch.float32, device=first_param.device)
-    max_seen_t = torch.zeros((), dtype=torch.float32, device=first_param.device)
+    max_norm_t = first_param.new_full((), max_norm, dtype=torch.float32)
+    max_seen_t = first_param.new_zeros((), dtype=torch.float32)
     for param in gdr.parameters():
         grad = param.grad
         if grad is None or grad.ndim == 0 or grad.shape[-1] % blade_count != 0:
@@ -748,7 +748,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
-            accum_loss_tensor = loss.detach().cpu() if accum_loss_tensor is None else accum_loss_tensor + loss.detach().cpu()
+            accum_loss_tensor = loss.detach() if accum_loss_tensor is None else accum_loss_tensor + loss.detach()
             tokens_since_log += x.numel()
             del loss
 
@@ -765,7 +765,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if args.device.startswith("cuda") and step % 50 == 0:
             torch.cuda.empty_cache()
 
-        last_loss = float(accum_loss_tensor.item()) if accum_loss_tensor is not None else float("nan")
+        last_loss = float(accum_loss_tensor.cpu().item()) if accum_loss_tensor is not None else float("nan")
         if log_interval > 0 and step % log_interval == 0:
             now = time.perf_counter()
             elapsed = max(now - last_log_time, 1e-9)
@@ -920,7 +920,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
 
         optimizer.zero_grad(set_to_none=True)
         accum_loss_tensor: torch.Tensor | None = None
-        accum_components: dict[str, float] = {}
+        accum_components: dict[str, torch.Tensor] = {}
+        need_components = log_interval > 0 and step % log_interval == 0
         for _ in range(grad_accum_steps):
             try:
                 batch, targets = next(data_iter)
@@ -942,15 +943,15 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
-            accum_loss_tensor = raw_loss.cpu() if accum_loss_tensor is None else accum_loss_tensor + raw_loss.cpu()
-            if components:
+            accum_loss_tensor = raw_loss if accum_loss_tensor is None else accum_loss_tensor + raw_loss
+            if components and need_components:
                 for name, value in components.items():
-                    accum_components[name] = accum_components.get(name, 0.0) + value
+                    accum_components[name] = accum_components.get(name, torch.tensor(0.0, device=value.device, dtype=value.dtype)) + value
             tokens_since_log += tokens.numel()
             del output, loss, logits
 
         if accum_components:
-            last_components = {name: value / grad_accum_steps for name, value in accum_components.items()}
+            last_components = {name: (value / grad_accum_steps).item() for name, value in accum_components.items()}
 
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
@@ -980,7 +981,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if args.device.startswith("cuda") and step % 50 == 0:
             torch.cuda.empty_cache()
 
-        last_loss = float((accum_loss_tensor / grad_accum_steps).item()) if accum_loss_tensor is not None else float("nan")
+        last_loss = float((accum_loss_tensor / grad_accum_steps).cpu().item()) if accum_loss_tensor is not None else float("nan")
         if log_interval > 0 and step % log_interval == 0:
             now = time.perf_counter()
             elapsed = max(now - last_log_time, 1e-9)

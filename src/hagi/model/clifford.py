@@ -34,6 +34,37 @@ DIM = 3
 # Grade (popcount) of each blade index.
 GRADE = [bin(i).count("1") for i in range(BLADE_COUNT)]  # [0,1,1,2,1,2,2,3]
 
+# Precomputed constant tensors for frequent Clifford ops
+_REVERSE_SIGNS = torch.tensor([(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)], dtype=torch.float32)
+_GRADE_MASKS = {g: torch.tensor([1.0 if GRADE[i] == g else 0.0 for i in range(BLADE_COUNT)], dtype=torch.float32) for g in range(DIM + 1)}
+
+# Lazily cached GPU copies to avoid repeated host-device transfers
+_reverse_signs_cuda: torch.Tensor | None = None
+_grade_masks_cuda: dict[tuple[int, str, torch.dtype], torch.Tensor] | None = None
+
+
+def _get_reverse_signs(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    global _reverse_signs_cuda
+    if device.type == "cuda":
+        if _reverse_signs_cuda is None or _reverse_signs_cuda.device != device or _reverse_signs_cuda.dtype != dtype:
+            _reverse_signs_cuda = _REVERSE_SIGNS.to(device=device, dtype=dtype)
+        return _reverse_signs_cuda
+    return _REVERSE_SIGNS.to(device=device, dtype=dtype)
+
+
+def _get_grade_mask(grade: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    global _grade_masks_cuda
+    if device.type == "cuda":
+        if _grade_masks_cuda is None:
+            _grade_masks_cuda = {}
+        key = (grade, str(device), dtype)
+        mask = _grade_masks_cuda.get(key)
+        if mask is None:
+            mask = _GRADE_MASKS[grade].to(device=device, dtype=dtype)
+            _grade_masks_cuda[key] = mask
+        return mask
+    return _GRADE_MASKS[grade].to(device=device, dtype=dtype)
+
 
 def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
     """Build the Cl(3,0,0) Cayley table.
@@ -62,6 +93,23 @@ for _a in range(BLADE_COUNT):
         _c = int(_OUT_INDEX[_a, _b])
         _PROD_TABLE[_c, _a, _b] = _SIGN[_a, _b]
 
+# Lazily cached GPU copies for product table keyed by (device, dtype)
+_prod_table_cuda: dict[tuple[str, torch.dtype], torch.Tensor] | None = None
+
+
+def _get_prod_table(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    global _prod_table_cuda
+    if device.type == "cuda":
+        if _prod_table_cuda is None:
+            _prod_table_cuda = {}
+        key = (str(device), dtype)
+        table = _prod_table_cuda.get(key)
+        if table is None:
+            table = _PROD_TABLE.to(device=device, dtype=dtype)
+            _prod_table_cuda[key] = table
+        return table
+    return _PROD_TABLE.to(device=device, dtype=dtype)
+
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
@@ -78,7 +126,7 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     assert x.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
-    table = _PROD_TABLE if _PROD_TABLE.device == x.device and _PROD_TABLE.dtype == x.dtype else _PROD_TABLE.to(x.device, x.dtype)
+    table = _get_prod_table(x.device, x.dtype)
     if TRITON_AVAILABLE and x.is_cuda:
         return geometric_product_triton(x, y, table)
     return torch.einsum("cab,...a,...b->...c", table, x, y)
@@ -86,21 +134,13 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 def grade_projection(mv: torch.Tensor, grade: int) -> torch.Tensor:
     """Zero out all blades not of the given grade. Returns [..., 8]."""
-    mask = torch.tensor(
-        [1.0 if GRADE[i] == grade else 0.0 for i in range(BLADE_COUNT)],
-        dtype=mv.dtype,
-        device=mv.device,
-    )
+    mask = _get_grade_mask(grade, mv.device, mv.dtype)
     return mv * mask
 
 
 def reverse(mv: torch.Tensor) -> torch.Tensor:
     """Clifford reverse: sign (-1)^(k(k-1)/2) per grade k. Returns [..., 8]."""
-    signs = torch.tensor(
-        [(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)],
-        dtype=mv.dtype,
-        device=mv.device,
-    )
+    signs = _get_reverse_signs(mv.device, mv.dtype)
     return mv * signs
 
 

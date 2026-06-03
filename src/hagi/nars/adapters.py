@@ -18,6 +18,10 @@ from hagi.nars.truth import TruthValue, truth_revision
 
 DomainId = int
 
+# Singleton defaults to avoid repeated dataclass construction overhead
+_DEFAULT_TV_00 = TruthValue(0.5, 0.0)
+_DEFAULT_TV_01 = TruthValue(0.5, 0.1)
+
 
 @dataclass(frozen=True, slots=True)
 class HrmControlPolicy:
@@ -61,7 +65,7 @@ class NarsHrmController:
         loss_freq = 1.0 / (1.0 + loss)
         loss_truth = TruthValue(loss_freq, 0.9)
         self.control_truths["loss_low"] = truth_revision(
-            self.control_truths.get("loss_low", TruthValue(0.5, 0.0)),
+            self.control_truths.get("loss_low", _DEFAULT_TV_00),
             loss_truth,
         )
 
@@ -69,7 +73,7 @@ class NarsHrmController:
         grad_freq = 1.0 / (1.0 + grad_norm)
         grad_truth = TruthValue(grad_freq, 0.9)
         self.control_truths["grad_stable"] = truth_revision(
-            self.control_truths.get("grad_stable", TruthValue(0.5, 0.0)),
+            self.control_truths.get("grad_stable", _DEFAULT_TV_00),
             grad_truth,
         )
 
@@ -90,8 +94,8 @@ class NarsHrmController:
 
     def _build_policy(self) -> HrmControlPolicy:
         """Derive a control policy from the current control truths."""
-        loss_tv = self.control_truths.get("loss_low", TruthValue(0.5, 0.0))
-        grad_tv = self.control_truths.get("grad_stable", TruthValue(0.5, 0.0))
+        loss_tv = self.control_truths.get("loss_low", _DEFAULT_TV_00)
+        grad_tv = self.control_truths.get("grad_stable", _DEFAULT_TV_00)
 
         h_cycles = max(1, min(5, int(2 + (1.0 - loss_tv.frequency) * 3)))
         l_cycles = max(1, min(5, int(2 + (1.0 - grad_tv.frequency) * 3)))
@@ -185,19 +189,17 @@ class NarsHrmController:
                 if hasattr(hrm_config, attr):
                     setattr(hrm_config, attr, value)
 
-    def compute_gating(self, z_H: torch.Tensor, z_L: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def compute_gating(self, z_H: torch.Tensor, z_L: torch.Tensor) -> tuple[float, float]:
         """Return truth-weighted gating coefficients for z_H and z_L.
 
         Higher loss / unstable grad -> lower gate (reduce influence).
         """
-        loss_tv = self.control_truths.get("loss_low", TruthValue(0.5, 0.0))
-        grad_tv = self.control_truths.get("grad_stable", TruthValue(0.5, 0.0))
+        loss_tv = self.control_truths.get("loss_low", _DEFAULT_TV_00)
+        grad_tv = self.control_truths.get("grad_stable", _DEFAULT_TV_00)
         # Combined truth strength: high = stable training -> full gate
         h_gate = float(loss_tv.frequency * grad_tv.frequency)
         l_gate = float(grad_tv.frequency)
-        h_t = torch.tensor(h_gate, dtype=z_H.dtype, device=z_H.device)
-        l_t = torch.tensor(l_gate, dtype=z_L.dtype, device=z_L.device)
-        return h_t, l_t
+        return h_gate, l_gate
 
 
 class NarsHdimReasoner:
@@ -219,7 +221,7 @@ class NarsHdimReasoner:
         best_target = known_targets[0]
         best_score = -1.0
         for tgt in known_targets:
-            belief = self.transfer_beliefs.get((source, tgt), TruthValue(0.5, 0.1))
+            belief = self.transfer_beliefs.get((source, tgt), _DEFAULT_TV_01)
             score = belief.frequency * belief.confidence
             if score > best_score:
                 best_score = score
@@ -232,7 +234,7 @@ class NarsHdimReasoner:
         """Revise the transfer belief for ``(source, target)`` with observed fidelity."""
         new_truth = TruthValue(fidelity, 0.9)
         key = (source, target)
-        existing = self.transfer_beliefs.get(key, TruthValue(0.5, 0.0))
+        existing = self.transfer_beliefs.get(key, _DEFAULT_TV_00)
         self.transfer_beliefs[key] = truth_revision(existing, new_truth)
 
     def transfer_domain_reasoned_or_fallback(
@@ -252,7 +254,7 @@ class NarsHdimReasoner:
             known_targets = [target_hint]
 
         reasoned = self.recommend_transfer(source, known_targets)
-        belief = self.transfer_beliefs.get((source, reasoned), TruthValue(0.5, 0.0))
+        belief = self.transfer_beliefs.get((source, reasoned), _DEFAULT_TV_00)
 
         target = (
             reasoned
@@ -342,7 +344,7 @@ class NarsMsaReasoner:
 
         # Vectorized: build tensors for frequency, recency, and dot scores
         N = len(slot_ids)
-        freq_list = [self.slot_beliefs.get(sid, TruthValue(0.5, 0.0)).frequency for sid in slot_ids]
+        freq_list = [self.slot_beliefs.get(sid, _DEFAULT_TV_00).frequency for sid in slot_ids]
         recency_list = [self.recency_weights.get(sid, 0.0) for sid in slot_ids]
         freq_tensor = torch.as_tensor(freq_list, dtype=torch.float32).to(query_t.device)
         recency_tensor = torch.as_tensor(recency_list, dtype=torch.float32).to(query_t.device)
@@ -354,7 +356,7 @@ class NarsMsaReasoner:
         top_k = min(top_k, N)
         top_values, top_indices = torch.topk(blended_tensor, k=top_k)
         top_k_ids = torch.as_tensor(
-            [slot_ids[i] for i in top_indices.cpu().tolist()],
+            [slot_ids[i] for i in top_indices.tolist()],
             dtype=torch.long,
         ).to(query_t.device)
 
@@ -373,17 +375,17 @@ class NarsMsaReasoner:
             return None
         ids_list = slot_ids.flatten().tolist()
         weights = [
-            self.slot_beliefs.get(sid, TruthValue(0.5, 0.0)).frequency
+            self.slot_beliefs.get(sid, _DEFAULT_TV_00).frequency
             for sid in ids_list
         ]
-        return torch.tensor(
+        return torch.as_tensor(
             weights, dtype=torch.float32, device=slot_ids.device
         ).view_as(slot_ids)
 
     def observe_route_feedback(self, slot_id: int, usefulness: float) -> None:
         """Revise slot truth, bump its budget, and update recency weights."""
         new_truth = TruthValue(usefulness, 0.9)
-        existing = self.slot_beliefs.get(slot_id, TruthValue(0.5, 0.0))
+        existing = self.slot_beliefs.get(slot_id, _DEFAULT_TV_00)
         self.slot_beliefs[slot_id] = truth_revision(existing, new_truth)
         # Update slot budget with usefulness as priority
         self.slot_budgets[slot_id] = BudgetValue(
