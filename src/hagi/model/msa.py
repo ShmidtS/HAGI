@@ -116,9 +116,9 @@ class SlotRegistry:
     def slot_ids_tensor(self, device: str | None = None) -> torch.Tensor:
         """Return a cached tensor of slot IDs."""
         if self._slot_ids_tensor is None:
-            self._slot_ids_tensor = torch.tensor(self._slot_ids, dtype=torch.long)
+            self._slot_ids_tensor = torch.tensor(self._slot_ids, dtype=torch.long).pin_memory()
         if device is not None:
-            return self._slot_ids_tensor.to(device)
+            return self._slot_ids_tensor.to(device, non_blocking=True)
         return self._slot_ids_tensor
 
     def clear(self) -> None:

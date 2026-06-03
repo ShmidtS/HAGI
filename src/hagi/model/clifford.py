@@ -33,14 +33,6 @@ DIM = 3
 
 # Grade (popcount) of each blade index.
 GRADE = [bin(i).count("1") for i in range(BLADE_COUNT)]  # [0,1,1,2,1,2,2,3]
-GRADE_TENSOR = torch.tensor(GRADE, dtype=torch.float32)
-GRADE_TENSOR_CUDA = torch.tensor(GRADE, dtype=torch.float32, device='cuda')
-
-
-def _grade_tensor(device: torch.device) -> torch.Tensor:
-    if device.type == 'cuda':
-        return GRADE_TENSOR_CUDA
-    return GRADE_TENSOR.to(device)
 
 
 def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
@@ -70,17 +62,6 @@ for _a in range(BLADE_COUNT):
         _c = int(_OUT_INDEX[_a, _b])
         _PROD_TABLE[_c, _a, _b] = _SIGN[_a, _b]
 
-# CUDA-pinned copies for graph capture
-_PROD_TABLE_CUDA = _PROD_TABLE.pin_memory().cuda(non_blocking=True)
-_OUT_INDEX_CUDA = _OUT_INDEX.pin_memory().cuda(non_blocking=True)
-_SIGN_CUDA = _SIGN.pin_memory().cuda(non_blocking=True)
-
-
-def _prod_table(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    if device.type == 'cuda':
-        return _PROD_TABLE_CUDA.to(dtype)
-    return _PROD_TABLE.to(device, dtype)
-
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
@@ -97,7 +78,7 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     assert x.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
-    table = _prod_table(x.device, x.dtype)
+    table = _PROD_TABLE if _PROD_TABLE.device == x.device and _PROD_TABLE.dtype == x.dtype else _PROD_TABLE.to(x.device, x.dtype)
     if TRITON_AVAILABLE and x.is_cuda:
         return geometric_product_triton(x, y, table)
     return torch.einsum("cab,...a,...b->...c", table, x, y)
@@ -105,17 +86,21 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 def grade_projection(mv: torch.Tensor, grade: int) -> torch.Tensor:
     """Zero out all blades not of the given grade. Returns [..., 8]."""
-    grade_t = _grade_tensor(mv.device)
-    mask = (grade_t == grade).to(mv.dtype)
+    mask = torch.tensor(
+        [1.0 if GRADE[i] == grade else 0.0 for i in range(BLADE_COUNT)],
+        dtype=mv.dtype,
+        device=mv.device,
+    )
     return mv * mask
 
 
 def reverse(mv: torch.Tensor) -> torch.Tensor:
     """Clifford reverse: sign (-1)^(k(k-1)/2) per grade k. Returns [..., 8]."""
-    grade_t = _grade_tensor(mv.device)
-    # Use multiplication instead of where to avoid scalar tensor creation
-    is_odd = ((grade_t == 2) | (grade_t == 3)).to(mv.dtype)
-    signs = 1.0 - 2.0 * is_odd  # 1.0 where even, -1.0 where odd
+    signs = torch.tensor(
+        [(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)],
+        dtype=mv.dtype,
+        device=mv.device,
+    )
     return mv * signs
 
 

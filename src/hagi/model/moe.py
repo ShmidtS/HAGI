@@ -53,11 +53,20 @@ class MoESwiGLU(nn.Module):
 
         output = torch.zeros_like(flat)
         for i, expert in enumerate(self.experts):
-            # Fixed-shape: compute expert for all tokens, mask unused ones
-            expert_mask = (top_k_indices == i).float()  # [B*T, top_k]
-            weights = (top_k_probs * expert_mask).sum(dim=-1)  # [B*T]
-            expert_out = expert(flat)  # [B*T, D]
-            output = output + expert_out * weights.unsqueeze(-1)
+            # Vectorized: find all positions where expert i is selected
+            expert_mask = top_k_indices == i  # [B*T, top_k]
+            # Get token indices and corresponding k positions
+            nz = expert_mask.nonzero()
+            # Gather inputs and weights only when there are selected tokens
+            if nz.numel() > 0:
+                flat_indices = nz[:, 0]
+                k_pos = nz[:, 1]
+                selected = flat[flat_indices]
+                weights = top_k_probs[flat_indices, k_pos]
+                # Compute expert output
+                expert_out = expert(selected)
+                # Accumulate weighted outputs
+                output.index_add_(0, flat_indices, expert_out * weights.unsqueeze(-1))
 
         output = output.view(B, T, D)
 

@@ -302,6 +302,7 @@ def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]
         eps=eps,
         weight_decay=0.0,
         fused=True,
+        capturable=True,
     )
     return CombinedOptimizer([muon, adam])
 
@@ -329,6 +330,7 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
             ],
             lr=lr, betas=betas_cfg, eps=eps,
             fused=True,
+            capturable=True,
         )
 
     if kind == "schedule-free-adamw":
