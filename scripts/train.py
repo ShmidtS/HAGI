@@ -532,12 +532,12 @@ def update_ema(model: torch.nn.Module, model_ema: torch.nn.Module, decay: float)
                 torch._foreach_add_(ema_param_tensors, [p.detach() for p in param_tensors], alpha=1.0 - decay)
             else:
                 for ema_param, param in zip(ema_params, params, strict=True):
-                    ema_param.mul_(decay).add_(param.detach().cpu(), alpha=1.0 - decay)
+                    ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
         else:
             for ema_param, param in zip(ema_params, params, strict=True):
-                ema_param.mul_(decay).add_(param.detach().cpu(), alpha=1.0 - decay)
+                ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
         for ema_buffer, buffer in zip(model_ema.buffers(), model.buffers(), strict=True):
-            ema_buffer.copy_(buffer.cpu())
+            ema_buffer.copy_(buffer)
 
 
 def magic_norm_clip(model: torch.nn.Module, max_norm: float, blade_count: int = 8) -> float:
@@ -554,7 +554,7 @@ def magic_norm_clip(model: torch.nn.Module, max_norm: float, blade_count: int = 
         if grad is None or grad.ndim == 0 or grad.shape[-1] % blade_count != 0:
             continue
         view = grad.view(*grad.shape[:-1], grad.shape[-1] // blade_count, blade_count)
-        norms = view.float().norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        norms = view.norm(dim=-1, keepdim=True).clamp_min(1e-4).float()
         local_max = norms.max().detach()
         max_seen_t = torch.maximum(max_seen_t, local_max)
         if local_max > max_norm:
@@ -895,6 +895,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     last_log_time = start_time
     last_loss = float("nan")
     last_components: dict[str, float] = {}
+    accum_loss_tensor: torch.Tensor | None = None
 
     for step in range(start_step, max_steps):
         if optimizer_kind == "schedule-free-adamw":
@@ -919,7 +920,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             effective_weights["w_iso"] = scheduled_weight(step, w_iso_start, w_iso_final, iso_warmup_steps, loss_warmup_mode)
 
         optimizer.zero_grad(set_to_none=True)
-        accum_loss_tensor: torch.Tensor | None = None
+        accum_loss_tensor = None
         accum_components: dict[str, torch.Tensor] = {}
         need_components = log_interval > 0 and step % log_interval == 0
         for _ in range(grad_accum_steps):
@@ -950,9 +951,6 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             tokens_since_log += tokens.numel()
             del output, loss, logits
 
-        if accum_components:
-            last_components = {name: (value / grad_accum_steps).item() for name, value in accum_components.items()}
-
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
 
@@ -969,7 +967,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             if not math.isfinite(full_grad_norm_val) or full_grad_norm_val > 100.0 or (0.0 < full_grad_norm_val < 1e-6):
                 print(f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}")
 
-        magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
+        magic_norm_max_grad = magic_norm_clip(model, magic_norm_max) if step % 10 == 0 else 0.0
         if use_scaler:
             scaler.step(optimizer)  # type: ignore[arg-type]
             scaler.update()
@@ -981,8 +979,12 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if args.device.startswith("cuda") and step % 50 == 0:
             torch.cuda.empty_cache()
 
-        last_loss = float((accum_loss_tensor / grad_accum_steps).cpu().item()) if accum_loss_tensor is not None else float("nan")
+        last_loss = float("nan")
+        last_components: dict[str, float] = {}
         if log_interval > 0 and step % log_interval == 0:
+            last_loss = float((accum_loss_tensor / grad_accum_steps).cpu().item()) if accum_loss_tensor is not None else float("nan")
+            if accum_components:
+                last_components = {name: (value / grad_accum_steps).item() for name, value in accum_components.items()}
             now = time.perf_counter()
             elapsed = max(now - last_log_time, 1e-9)
             tok_per_sec = tokens_since_log / elapsed
@@ -1029,7 +1031,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     save_training_checkpoint(model, model_ema, optimizer, max_steps, args.ckpt_dir)  # type: ignore[arg-type]
     total_tokens = (max_steps - start_step) * grad_accum_steps * batch_size * seq_len
     total_elapsed = max(time.perf_counter() - start_time, 1e-9)
-    print(f"final_loss {last_loss:.4f} | avg_tokens/sec {total_tokens / total_elapsed:.0f}")
+    final_loss_val = float((accum_loss_tensor / grad_accum_steps).cpu().item()) if accum_loss_tensor is not None else float("nan")
+    print(f"final_loss {final_loss_val:.4f} | avg_tokens/sec {total_tokens / total_elapsed:.0f}")
 
 
 def main() -> None:

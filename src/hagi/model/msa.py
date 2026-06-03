@@ -407,7 +407,7 @@ class MSAAttention(nn.Module):
         slots = registry.batch_get(unique_ids)
         unique_k = torch.stack([s.k_cache for s in slots], dim=0).to(device)
         unique_v = torch.stack([s.v_cache for s in slots], dim=0).to(device)
-        unique_offsets = torch.tensor(
+        unique_offsets = torch.as_tensor(
             [s.k_cache.size(-2) for s in slots],
             dtype=torch.long, device=device,
         )
