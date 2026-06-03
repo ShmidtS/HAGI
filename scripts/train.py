@@ -677,6 +677,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     data_cfg = cfg.get("data", {})
 
     if args.device.startswith("cuda"):
+        torch.set_float32_matmul_precision('high')
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
@@ -795,6 +796,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         train_cfg["learning_rate"] = args.learning_rate
 
     if args.device.startswith("cuda"):
+        torch.set_float32_matmul_precision('high')
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
