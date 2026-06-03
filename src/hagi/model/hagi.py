@@ -240,7 +240,7 @@ class HAGI(nn.Module):
                 result = block(hidden, cos, sin, gradient_checkpointing=self.cfg.gradient_checkpointing)
             if not use_cache and isinstance(result, tuple) and len(result) == 2:
                 h_out, aux_loss = result
-                if isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0:
+                if isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0 and training_mode:
                     moe_aux_losses.append(aux_loss)
                     return h_out
             return result
