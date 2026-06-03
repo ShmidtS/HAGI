@@ -211,11 +211,19 @@ def composite_loss(
         l_ce = precomputed_loss
     else:
         l_ce = cross_entropy_loss(logits, targets)
-    l_aux = compute_auxiliary_loss(auxiliary_output).to(device=logits.device, dtype=logits.dtype)
-    l_iso = compute_isomorphic_loss(invariant_src, invariant_tgt).to(device=logits.device, dtype=logits.dtype)
-    l_total = (
-        merged_weights["w_ce"] * l_ce
-        + merged_weights["w_aux"] * l_aux
-        + merged_weights["w_iso"] * l_iso
-    )
-    return {"L_CE": l_ce, "L_aux": l_aux, "L_iso": l_iso, "L_total": l_total}
+    l_total = merged_weights["w_ce"] * l_ce
+    result = {"L_CE": l_ce}
+    if merged_weights.get("w_aux", 0.0) != 0.0 and auxiliary_output is not None:
+        l_aux = compute_auxiliary_loss(auxiliary_output).to(device=logits.device, dtype=logits.dtype)
+        l_total = l_total + merged_weights["w_aux"] * l_aux
+        result["L_aux"] = l_aux
+    else:
+        result["L_aux"] = l_ce.new_zeros(())
+    if merged_weights.get("w_iso", 0.0) != 0.0 and (invariant_src is not None or invariant_tgt is not None):
+        l_iso = compute_isomorphic_loss(invariant_src, invariant_tgt).to(device=logits.device, dtype=logits.dtype)
+        l_total = l_total + merged_weights["w_iso"] * l_iso
+        result["L_iso"] = l_iso
+    else:
+        result["L_iso"] = l_ce.new_zeros(())
+    result["L_total"] = l_total
+    return result

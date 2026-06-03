@@ -495,7 +495,7 @@ class MSAAttention(nn.Module):
             qk = q.unsqueeze(3)  # [B, nq, T, 1, head_dim]
             qk_mat = qk.reshape(B * self.num_query_heads * T, 1, self.head_dim)
             kk_mat = kk.reshape(B * self.num_query_heads * T, top_k * kk.size(4), self.head_dim)
-            scores = torch.matmul(qk_mat.float(), kk_mat.transpose(-2, -1).float()) / scale
+            scores = torch.matmul(qk_mat, kk_mat.transpose(-2, -1)) / scale
             scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(4))
             if attn_mask is not None:
                 scores = scores + attn_mask
@@ -516,7 +516,7 @@ class MSAAttention(nn.Module):
             qk = q.unsqueeze(2)  # [B, nq, 1, T, head_dim]
             qk_mat = qk.reshape(B * self.num_query_heads, T, self.head_dim)
             kk_mat = kk.reshape(B * self.num_query_heads, top_k * kk.size(3), self.head_dim)
-            scores = torch.matmul(qk_mat.float(), kk_mat.transpose(-2, -1).float()) / scale
+            scores = torch.matmul(qk_mat, kk_mat.transpose(-2, -1)) / scale
             scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(3))
             scores = scores.permute(0, 1, 3, 2, 4)  # [B, nq, top_k, T, T_slot]
             if attn_mask is not None:
