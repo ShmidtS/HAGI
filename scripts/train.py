@@ -750,7 +750,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
-            accum_loss_tensor = loss.detach() if accum_loss_tensor is None else accum_loss_tensor + loss.detach()
+            accum_loss_tensor = loss.detach().cpu() if accum_loss_tensor is None else accum_loss_tensor + loss.detach().cpu()
             tokens_since_log += x.numel()
             del loss
 
@@ -943,7 +943,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
-            accum_loss_tensor = raw_loss if accum_loss_tensor is None else accum_loss_tensor + raw_loss
+            accum_loss_tensor = raw_loss.cpu() if accum_loss_tensor is None else accum_loss_tensor + raw_loss.cpu()
             if components:
                 for name, value in components.items():
                     accum_components[name] = accum_components.get(name, 0.0) + value
@@ -957,13 +957,17 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
 
         if grad_clip > 0:
-            full_grad_norm = float(
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item()
-            )
+            full_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            if log_interval > 0 and step % log_interval == 0:
+                full_grad_norm_val = float(full_grad_norm.item())
+                if not math.isfinite(full_grad_norm_val) or full_grad_norm_val > 100.0 or (0.0 < full_grad_norm_val < 1e-6):
+                    print(f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}")
+            else:
+                full_grad_norm_val = 0.0
         else:
-            full_grad_norm = get_grad_norm(model)
-        if not math.isfinite(full_grad_norm) or full_grad_norm > 100.0 or (0.0 < full_grad_norm < 1e-6):
-            print(f"WARNING: extreme grad_norm {full_grad_norm:.2e} at step {step}")
+            full_grad_norm_val = get_grad_norm(model)
+            if not math.isfinite(full_grad_norm_val) or full_grad_norm_val > 100.0 or (0.0 < full_grad_norm_val < 1e-6):
+                print(f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}")
 
         magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
         if use_scaler:
@@ -996,7 +1000,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 mem_text = f" | mem_allocated {allocated:.2f}GB | mem_reserved {reserved:.2f}GB"
             print(
                 f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
-                f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm:.2e} | "
+                f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm_val:.2e} | "
                 f"magic_norm_max_grad {magic_norm_max_grad:.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text}"
             )
             tokens_since_log = 0
