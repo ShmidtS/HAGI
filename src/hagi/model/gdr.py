@@ -73,7 +73,9 @@ class GradeDecomposedRecurrence(nn.Module):
         self.geo_to_scalar = nn.Linear(cfg.vector, cfg.scalar, bias=False)
         self.geo_to_bivector = nn.Linear(cfg.vector, cfg.bivector, bias=False)
         self.gate_scalar = nn.Parameter(torch.zeros(1))
+        self.gate_vector = nn.Parameter(torch.zeros(1))
         self.gate_bivector = nn.Parameter(torch.zeros(1))
+        self.gate_trivector = nn.Parameter(torch.zeros(1))
 
     def split(self, h: torch.Tensor):
         b = self.cfg.bounds
@@ -108,7 +110,13 @@ class GradeDecomposedRecurrence(nn.Module):
         trivector_new = self.mlp_trivector(ctx)
 
         geo_scalar, geo_bivector = self.geometric_interaction(vector_new)
-        scalar_new = scalar_new + geo_scalar
-        bivector_new = bivector_new + geo_bivector
+        scalar_new = scalar_new + torch.sigmoid(self.gate_scalar) * geo_scalar
+        bivector_new = bivector_new + torch.sigmoid(self.gate_bivector) * geo_bivector
+
+        # Sparse gating: each grade can be soft-gated off
+        scalar_new = torch.sigmoid(self.gate_scalar) * scalar_new
+        vector_new = torch.sigmoid(self.gate_vector) * vector_new
+        bivector_new = torch.sigmoid(self.gate_bivector) * bivector_new
+        trivector_new = torch.sigmoid(self.gate_trivector) * trivector_new
 
         return torch.cat([scalar_new, vector_new, bivector_new, trivector_new, residual], dim=-1)

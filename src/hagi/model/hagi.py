@@ -276,6 +276,7 @@ class HAGI(nn.Module):
                         training_mode=training_mode,
                         tgt_rotor_idx=tgt_idx,
                         moe_aux_losses=moe_aux_losses,
+                        nars_controller=self.nars_hrm,
                     )
                 elif training_mode and isinstance(self.gdr, HDIMFull):
                     num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
@@ -283,13 +284,13 @@ class HAGI(nn.Module):
                     gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                     pre_gdr_h = h.clone()
                     h = gdr_state["fused"]
-                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses)
+                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
                 else:
                     h = self.gdr(h)
-                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses)
+                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
                 gdr_output = h
             else:
-                h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses)
+                h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
             layer_idx += len(self.reasoning)
         else:
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
@@ -392,6 +393,7 @@ class HAGI(nn.Module):
             )
             self.msa_registry.batch_register(slots)
 
+            nars_weights = None
             if self.cfg.use_nars and self.nars_msa is not None:
                 with torch.no_grad():
                     inv = self.hdim_slot_router.routing_key(h)
@@ -401,13 +403,14 @@ class HAGI(nn.Module):
                     )
                     msa_slot_ids = top_k_ids.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
                     msa_scores = top_values.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
+                    nars_weights = self.nars_msa.compute_attention_weights(msa_slot_ids)
             else:
                 msa_slot_ids, _raw_scores, msa_weights = self.msa_router.route_top_k(
                     h, self.msa_registry, self.cfg.msa_top_k
                 )
                 msa_scores = msa_weights
 
-            msa_out = self.msa(h, msa_slot_ids, self.msa_registry)
+            msa_out = self.msa(h, msa_slot_ids, self.msa_registry, nars_weights=nars_weights)
             h = h + msa_out
 
         for block in self.expression:

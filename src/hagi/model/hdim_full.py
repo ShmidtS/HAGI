@@ -161,11 +161,9 @@ class HDIMFull(nn.Module):
     ) -> torch.Tensor | dict[str, torch.Tensor | None]:
         if not self.use_hdim_cross_domain:
             if return_state:
-                B, T, _ = hidden_states.shape
-                empty_mv = self.project(hidden_states)
                 return {
                     "fused": hidden_states,
-                    "multivector": empty_mv,
+                    "multivector": None,
                     "invariant": None,
                     "target_multivector": None,
                     "target_invariant": None,

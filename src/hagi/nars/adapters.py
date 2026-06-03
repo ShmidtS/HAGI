@@ -185,6 +185,20 @@ class NarsHrmController:
                 if hasattr(hrm_config, attr):
                     setattr(hrm_config, attr, value)
 
+    def compute_gating(self, z_H: torch.Tensor, z_L: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return truth-weighted gating coefficients for z_H and z_L.
+
+        Higher loss / unstable grad -> lower gate (reduce influence).
+        """
+        loss_tv = self.control_truths.get("loss_low", TruthValue(0.5, 0.0))
+        grad_tv = self.control_truths.get("grad_stable", TruthValue(0.5, 0.0))
+        # Combined truth strength: high = stable training -> full gate
+        h_gate = float(loss_tv.frequency * grad_tv.frequency)
+        l_gate = float(grad_tv.frequency)
+        h_t = torch.tensor(h_gate, dtype=z_H.dtype, device=z_H.device)
+        l_t = torch.tensor(l_gate, dtype=z_L.dtype, device=z_L.device)
+        return h_t, l_t
+
 
 class NarsHdimReasoner:
     """NARS-based reasoner for HDIM domain transfer.
@@ -345,6 +359,26 @@ class NarsMsaReasoner:
         ).to(query_t.device)
 
         return top_k_ids, top_values
+
+    def compute_attention_weights(self, slot_ids: torch.Tensor) -> torch.Tensor | None:
+        """Return truth-weighted attention weights for slot IDs.
+
+        Args:
+            slot_ids: [B, T, top_k] or [B, top_k] long tensor.
+
+        Returns:
+            Tensor of same shape with truth frequencies, or None if no beliefs.
+        """
+        if not self.slot_beliefs:
+            return None
+        ids_list = slot_ids.flatten().tolist()
+        weights = [
+            self.slot_beliefs.get(sid, TruthValue(0.5, 0.0)).frequency
+            for sid in ids_list
+        ]
+        return torch.tensor(
+            weights, dtype=torch.float32, device=slot_ids.device
+        ).view_as(slot_ids)
 
     def observe_route_feedback(self, slot_id: int, usefulness: float) -> None:
         """Revise slot truth, bump its budget, and update recency weights."""

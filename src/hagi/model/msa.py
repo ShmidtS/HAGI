@@ -45,28 +45,31 @@ class SlotRegistry:
         self._slot_ids_tensor: torch.Tensor | None = None
         self._max_slots = max_slots
 
-    def register(self, slot: MemorySlot) -> None:
-        """Register a slot and invalidate the key tensor cache."""
-        if len(self._slots) >= self._max_slots:
+    def _evict_if_full(self) -> None:
+        """LRU eviction: remove oldest slot when at capacity."""
+        if len(self._slots) >= self._max_slots and self._slot_ids:
             oldest = self._slot_ids[0]
             self._slots.pop(oldest, None)
             self._slot_ids.pop(0)
+
+    def register(self, slot: MemorySlot) -> None:
+        """Register a slot and invalidate the key tensor cache."""
+        self._evict_if_full()
         self._slots[slot.slot_id] = slot
         self._routing_keys = None
         self._slot_ids_tensor = None
-        if slot.slot_id not in self._slot_ids:
-            self._slot_ids.append(slot.slot_id)
+        if slot.slot_id in self._slot_ids:
+            self._slot_ids.remove(slot.slot_id)
+        self._slot_ids.append(slot.slot_id)
 
     def batch_register(self, slots: List[MemorySlot]) -> None:
         """Register multiple slots at once, invalidating caches only once."""
         for slot in slots:
-            if len(self._slots) >= self._max_slots:
-                oldest = self._slot_ids[0]
-                self._slots.pop(oldest, None)
-                self._slot_ids.pop(0)
+            self._evict_if_full()
             self._slots[slot.slot_id] = slot
-            if slot.slot_id not in self._slot_ids:
-                self._slot_ids.append(slot.slot_id)
+            if slot.slot_id in self._slot_ids:
+                self._slot_ids.remove(slot.slot_id)
+            self._slot_ids.append(slot.slot_id)
         self._routing_keys = None
         self._slot_ids_tensor = None
 
@@ -432,6 +435,7 @@ class MSAAttention(nn.Module):
         slot_ids: torch.Tensor,
         registry: SlotRegistry,
         attn_mask: torch.Tensor | None = None,
+        nars_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sparse attention over selected slots.
 
@@ -440,6 +444,8 @@ class MSAAttention(nn.Module):
             slot_ids: [B, T, top_k] or [B, top_k] selected slot IDs.
             registry: slot registry.
             attn_mask: optional broadcast-compatible mask.
+            nars_weights: optional [B, T, top_k] or [B, top_k] truth-weighted
+                attention multipliers from NARS.
 
         Returns:
             [B, T, hidden_size] attention output.
@@ -512,6 +518,16 @@ class MSAAttention(nn.Module):
             attn = F.softmax(scores, dim=-1)
             out_k = torch.einsum("bqktz,bqksd->bqktd", attn, vk)  # [B, nq, top_k, T, head_dim]
             slot_out = out_k
+
+        # Apply NARS truth-weighted modulation if provided
+        if nars_weights is not None:
+            if is_3d:
+                # [B, T, top_k] -> [B, 1, top_k, T, 1]
+                w = nars_weights.unsqueeze(1).unsqueeze(-1)
+            else:
+                # [B, top_k] -> [B, 1, top_k, 1, 1]
+                w = nars_weights.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+            slot_out = slot_out * w
 
         # Aggregate across slots
         out = slot_out.sum(dim=2)  # [B, nq, T, head_dim]

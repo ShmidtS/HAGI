@@ -127,6 +127,7 @@ class HRMCore(nn.Module):
         training_mode: bool = False,
         tgt_rotor_idx: int | torch.Tensor = 0,
         moe_aux_losses: list[torch.Tensor] | None = None,
+        nars_controller=None,
     ):
         h = hidden_states
         B, T, H = h.shape
@@ -140,6 +141,12 @@ class HRMCore(nn.Module):
             z_H = self.h_init(pooled)
         if z_L is None:
             z_L = self.l_init(pooled)
+
+        # NARS truth-weighted gating — active controller
+        if nars_controller is not None:
+            h_gate, l_gate = nars_controller.compute_gating(z_H, z_L)
+            z_H = z_H * h_gate
+            z_L = z_L * l_gate
 
         gdr_state = None
         pre_gdr_h = None
