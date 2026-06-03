@@ -242,7 +242,7 @@ class HAGI(nn.Module):
                 h_out, aux_loss = result
                 if isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0 and training_mode:
                     moe_aux_losses.append(aux_loss)
-                    return h_out
+                return h_out
             return result
 
         for block in self.perception:
