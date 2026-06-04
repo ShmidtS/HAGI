@@ -63,7 +63,7 @@ def _is_muon_param(name: str, p: nn.Parameter) -> bool:
     if p.ndim != 2:
         return False
     lowered = name.lower()
-    excluded = ("embed", "lm_head", "norm", "iter_embed", "gate")
+    excluded = ("embed", "lm_head", "norm", "iter_embed", "gate", "router")
     if any(tok in lowered for tok in excluded):
         return False
     return True

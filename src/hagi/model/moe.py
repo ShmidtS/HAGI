@@ -46,18 +46,13 @@ class MoESwiGLU(nn.Module):
 
         flat = x.view(B * T, D)
         router_logits = self.router(flat)
+        router_probs = F.softmax(router_logits, dim=-1)
 
-        if self.training and self.top_k == 1:
-            # Gumbel-softmax hard top-1: forward = one-hot, backward = softmax
-            weight_matrix = F.gumbel_softmax(router_logits, tau=1.0, hard=True)
-            router_probs = F.softmax(router_logits, dim=-1)
-            top_k_indices = weight_matrix.argmax(dim=-1, keepdim=True)
-        else:
-            router_probs = F.softmax(router_logits, dim=-1)
-            top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
-            top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
-            weight_matrix = torch.zeros(B * T, self.num_experts, device=x.device, dtype=x.dtype)
-            weight_matrix.scatter_(1, top_k_indices, top_k_probs)
+        top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
+        top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
+
+        weight_matrix = torch.zeros(B * T, self.num_experts, device=x.device, dtype=x.dtype)
+        weight_matrix.scatter_(1, top_k_indices, top_k_probs)
 
         output = torch.zeros_like(flat)
         for i, expert in enumerate(self.experts):
