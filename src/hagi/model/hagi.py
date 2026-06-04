@@ -177,8 +177,13 @@ class HAGI(nn.Module):
 
     def _rope_cache(self, T: int, device, dtype, offset: int = 0):
         if hasattr(self, "_rope_cos") and hasattr(self, "_rope_sin"):
-            cos = self._rope_cos.to(device=device, dtype=dtype)
-            sin = self._rope_sin.to(device=device, dtype=dtype)
+            cos = self._rope_cos
+            sin = self._rope_sin
+            if cos.device != device or cos.dtype != dtype:
+                cos = cos.to(device=device, dtype=dtype)
+                sin = sin.to(device=device, dtype=dtype)
+                self._rope_cos = cos
+                self._rope_sin = sin
             assert isinstance(cos, torch.Tensor)
             assert isinstance(sin, torch.Tensor)
             return cos[offset : offset + T], sin[offset : offset + T]

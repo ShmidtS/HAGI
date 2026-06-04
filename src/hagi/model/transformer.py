@@ -120,12 +120,14 @@ class GroupedQueryAttention(nn.Module):
             k = torch.cat([past_key, k], dim=2)
             v = torch.cat([past_value, v], dim=2)
         next_key_value = (k, v) if use_cache else None
-        rep = self.nq // self.nkv
-        attn_k = k.repeat_interleave(rep, dim=1)
-        attn_v = v.repeat_interleave(rep, dim=1)
         is_causal = attn_mask is None and past_key_value is None
         # PyTorch 2.0+ automatically selects flash-attention backend on Ampere+ when
         # head_dim <= 128 and dtype is FP16/BF16; no explicit context manager needed.
+        # Use zero-copy expand+view instead of repeat_interleave to avoid materialising copies.
+        rep = self.nq // self.nkv
+        B, _, T, D = k.shape
+        attn_k = k.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
+        attn_v = v.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         out = self.o_proj(out)
@@ -147,10 +149,11 @@ class GroupedQueryAttention(nn.Module):
             k = torch.cat([past_key, k], dim=2)
             v = torch.cat([past_value, v], dim=2)
         next_key_value = (k, v) if use_cache else None
-        rep = self.nq // self.nkv
-        attn_k = k.repeat_interleave(rep, dim=1)
-        attn_v = v.repeat_interleave(rep, dim=1)
         is_causal = attn_mask is None and past_key_value is None
+        rep = self.nq // self.nkv
+        B, _, T, D = k.shape
+        attn_k = k.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
+        attn_v = v.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         out = self.o_proj(out)

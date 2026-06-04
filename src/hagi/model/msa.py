@@ -20,7 +20,7 @@ from .clifford import BLADE_COUNT, geometric_product, inner_product
 from .triton_kernels import TRITON_AVAILABLE, sparse_attention_triton
 
 
-@dataclass
+@dataclass(slots=True)
 class MemorySlot:
     """A single memory slot with routing key and append-only K/V cache."""
 
@@ -70,7 +70,17 @@ class SlotRegistry:
             self._evict_if_full()
             self._slots[slot.slot_id] = slot
         self._slot_ids.extend(s.slot_id for s in slots)
-        self._routing_keys = None
+        # Fast-path: build _routing_keys directly from slots without torch.stack later
+        if slots:
+            keys = torch.stack([s.routing_key for s in slots], dim=0)
+            if self._routing_keys is not None and len(self._slot_ids) > len(slots):
+                # Append to existing keys (slow path if registry not cleared)
+                old_keys = self._routing_keys
+                self._routing_keys = torch.cat([old_keys, keys], dim=0)
+            else:
+                self._routing_keys = keys
+        else:
+            self._routing_keys = None
         self._slot_ids_tensor = None
 
     def get(self, slot_id: int) -> MemorySlot:
@@ -405,8 +415,11 @@ class MSAAttention(nn.Module):
 
         # Fetch unique caches once using vectorised batch_get
         slots = registry.batch_get(unique_ids)
-        unique_k = torch.stack([s.k_cache for s in slots], dim=0).to(device)
-        unique_v = torch.stack([s.v_cache for s in slots], dim=0).to(device)
+        unique_k = torch.stack([s.k_cache for s in slots], dim=0)
+        unique_v = torch.stack([s.v_cache for s in slots], dim=0)
+        if unique_k.device != device:
+            unique_k = unique_k.to(device)
+            unique_v = unique_v.to(device)
         unique_offsets = torch.as_tensor(
             [s.k_cache.size(-2) for s in slots],
             dtype=torch.long, device=device,

@@ -38,32 +38,29 @@ GRADE = [bin(i).count("1") for i in range(BLADE_COUNT)]  # [0,1,1,2,1,2,2,3]
 _REVERSE_SIGNS = torch.tensor([(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)], dtype=torch.float32)
 _GRADE_MASKS = {g: torch.tensor([1.0 if GRADE[i] == g else 0.0 for i in range(BLADE_COUNT)], dtype=torch.float32) for g in range(DIM + 1)}
 
-# Lazily cached GPU copies to avoid repeated host-device transfers
-_reverse_signs_cuda: torch.Tensor | None = None
-_grade_masks_cuda: dict[tuple[int, str, torch.dtype], torch.Tensor] | None = None
+# Lazily cached copies keyed by (device_str, dtype) to avoid repeated host-device transfers
+_reverse_signs_cache: dict[tuple[str, torch.dtype], torch.Tensor] = {}
+_grade_masks_cache: dict[tuple[int, str, torch.dtype], torch.Tensor] = {}
 
 
 def _get_reverse_signs(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    global _reverse_signs_cuda
-    if device.type == "cuda":
-        if _reverse_signs_cuda is None or _reverse_signs_cuda.device != device or _reverse_signs_cuda.dtype != dtype:
-            _reverse_signs_cuda = _REVERSE_SIGNS.to(device=device, dtype=dtype)
-        return _reverse_signs_cuda
-    return _REVERSE_SIGNS.to(device=device, dtype=dtype)
+    global _reverse_signs_cache
+    key = (str(device), dtype)
+    cached = _reverse_signs_cache.get(key)
+    if cached is None:
+        cached = _REVERSE_SIGNS.to(device=device, dtype=dtype)
+        _reverse_signs_cache[key] = cached
+    return cached
 
 
 def _get_grade_mask(grade: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    global _grade_masks_cuda
-    if device.type == "cuda":
-        if _grade_masks_cuda is None:
-            _grade_masks_cuda = {}
-        key = (grade, str(device), dtype)
-        mask = _grade_masks_cuda.get(key)
-        if mask is None:
-            mask = _GRADE_MASKS[grade].to(device=device, dtype=dtype)
-            _grade_masks_cuda[key] = mask
-        return mask
-    return _GRADE_MASKS[grade].to(device=device, dtype=dtype)
+    global _grade_masks_cache
+    key = (grade, str(device), dtype)
+    cached = _grade_masks_cache.get(key)
+    if cached is None:
+        cached = _GRADE_MASKS[grade].to(device=device, dtype=dtype)
+        _grade_masks_cache[key] = cached
+    return cached
 
 
 def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
@@ -93,22 +90,18 @@ for _a in range(BLADE_COUNT):
         _c = int(_OUT_INDEX[_a, _b])
         _PROD_TABLE[_c, _a, _b] = _SIGN[_a, _b]
 
-# Lazily cached GPU copies for product table keyed by (device, dtype)
-_prod_table_cuda: dict[tuple[str, torch.dtype], torch.Tensor] | None = None
+# Lazily cached copies for product table keyed by (device_str, dtype)
+_prod_table_cache: dict[tuple[str, torch.dtype], torch.Tensor] = {}
 
 
 def _get_prod_table(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    global _prod_table_cuda
-    if device.type == "cuda":
-        if _prod_table_cuda is None:
-            _prod_table_cuda = {}
-        key = (str(device), dtype)
-        table = _prod_table_cuda.get(key)
-        if table is None:
-            table = _PROD_TABLE.to(device=device, dtype=dtype)
-            _prod_table_cuda[key] = table
-        return table
-    return _PROD_TABLE.to(device=device, dtype=dtype)
+    global _prod_table_cache
+    key = (str(device), dtype)
+    cached = _prod_table_cache.get(key)
+    if cached is None:
+        cached = _PROD_TABLE.to(device=device, dtype=dtype)
+        _prod_table_cache[key] = cached
+    return cached
 
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
