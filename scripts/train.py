@@ -454,7 +454,7 @@ def compute_loss(
     if moe_aux_loss is not None:
         w_moe = weights.get("w_moe", 0.01) if weights else 0.01
         # Normalize MoE aux loss by the number of MoE layers to prevent gradient stealing
-        num_moe_layers = getattr(model_output, "num_moe_layers", None)
+        num_moe_layers = model_output.get("num_moe_layers") if isinstance(model_output, dict) else None
         if num_moe_layers is None:
             # Estimate: 12 layers total (perception + reasoning + expression)
             num_moe_layers = 12

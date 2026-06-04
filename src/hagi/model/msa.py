@@ -546,11 +546,13 @@ class HDIMSlotRouter(nn.Module):
     rotor with the hidden state.
     """
 
-    def __init__(self, hidden_size: int, blade_count: int = BLADE_COUNT):
+    def __init__(self, hidden_size: int, blade_count: int = BLADE_COUNT, key_dim: int = 64):
         super().__init__()
         self.hidden_size = hidden_size
         self.blade_count = blade_count
+        self.key_dim = key_dim
         self.hidden_to_mv = nn.Linear(hidden_size, blade_count)
+        self.key_proj = nn.Linear(blade_count, key_dim)
 
     def routing_key(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Compute scalar Clifford invariant from hidden states.
@@ -559,12 +561,12 @@ class HDIMSlotRouter(nn.Module):
             hidden_states: [B, T, hidden_size] or [hidden_size].
 
         Returns:
-            [B, T] or scalar tensor of invariant values.
+            [B, T, key_dim] or [key_dim] tensor of invariant values.
         """
         mv = self.hidden_to_mv(hidden_states)
-        # Inner product of mv with itself gives the scalar norm-like invariant
-        inv = inner_product(mv, mv)
-        return inv
+        # Project multivector to key_dim
+        return self.key_proj(mv)
+
 
     def create_slot(
         self,
@@ -621,8 +623,8 @@ class HDIMSlotRouter(nn.Module):
             List of ``MemorySlot`` (length B*T).
         """
         B, T, _ = hidden_states.shape
-        inv = self.routing_key(hidden_states)  # [B, T]
-        inv_flat = inv.view(-1)
+        inv = self.routing_key(hidden_states)  # [B, T, key_dim]
+        inv_flat = inv.reshape(B * T, -1)
         total = B * T
 
         # Transpose to [B, T, nkv, head_dim] for per-token slicing
@@ -634,7 +636,7 @@ class HDIMSlotRouter(nn.Module):
         v_flat = v_t.reshape(total, v_cache.size(1), v_cache.size(-1)).unsqueeze(2)
 
         # Unbind once to avoid per-iteration Python overhead
-        inv_list = inv_flat.unsqueeze(1).unbind(0)
+        inv_list = inv_flat.unbind(0)
         k_list = k_flat.unbind(0)
         v_list = v_flat.unbind(0)
 

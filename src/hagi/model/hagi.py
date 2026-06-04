@@ -137,7 +137,7 @@ class HAGI(nn.Module):
                 binary_factorized_rank=cfg.binary_factorized_rank,
             )
             self.msa_router = SparseRouter(cfg.hidden_size, key_dim=64)
-            self.hdim_slot_router = HDIMSlotRouter(cfg.hidden_size)
+            self.hdim_slot_router = HDIMSlotRouter(cfg.hidden_size, key_dim=64)
             self.msa_registry = SlotRegistry(max_slots=cfg.msa_slot_count)
 
         self.nars_hrm = None
@@ -447,6 +447,7 @@ class HAGI(nn.Module):
                 result["loss"] = loss
             if moe_aux_losses:
                 result["moe_aux_loss"] = sum(moe_aux_losses)
+                result["num_moe_layers"] = len(moe_aux_losses)
             if gdr_state is not None and isinstance(gdr_state, dict):
                 if "fused" in gdr_state or "features" in gdr_state:
                     if any(k in gdr_state for k in ("features", "embeddings", "output")):

@@ -36,6 +36,7 @@ class MoESwiGLU(nn.Module):
         self.top_k = cfg.moe_top_k
         self.hidden_size = cfg.hidden_size
         self.intermediate_size = cfg.moe_intermediate_size or (cfg.intermediate_size // cfg.num_experts)
+        self.router_temperature = getattr(cfg, "moe_router_temperature", 1.0)
 
         self.router = nn.Linear(cfg.hidden_size, cfg.num_experts, bias=False)
         self.experts = nn.ModuleList(_SwiGLUExpert(cfg) for _ in range(cfg.num_experts))
@@ -46,6 +47,8 @@ class MoESwiGLU(nn.Module):
 
         flat = x.view(B * T, D)
         router_logits = self.router(flat)
+        if self.router_temperature != 1.0:
+            router_logits = router_logits / self.router_temperature
         router_probs = F.softmax(router_logits, dim=-1)
 
         top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)

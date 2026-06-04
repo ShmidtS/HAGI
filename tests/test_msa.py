@@ -223,7 +223,7 @@ def test_hdim_slot_router_routing_key_is_scalar_invariant():
     router = HDIMSlotRouter(hidden_size=8)
     hidden = torch.randn(2, 4, 8)
     inv = router.routing_key(hidden)
-    assert inv.shape == (2, 4)
+    assert inv.shape == (2, 4, 64)
     assert inv.dtype == hidden.dtype
 
 
@@ -236,7 +236,7 @@ def test_hdim_slot_router_create_slot_routing_key_shape():
     assert slot.slot_id == 5
     assert slot.domain_id == 2
     assert isinstance(slot.routing_key, torch.Tensor)
-    assert slot.routing_key.numel() == 1
+    assert slot.routing_key.shape == (64,)
 
 
 def test_hdim_slot_router_create_slot_with_1d_hidden():
@@ -246,7 +246,7 @@ def test_hdim_slot_router_create_slot_with_1d_hidden():
     v_cache = torch.randn(2, 4, 4)
     slot = router.create_slot(slot_id=0, domain_id=0, hidden_states=hidden, k_cache=k_cache, v_cache=v_cache)
     assert isinstance(slot.routing_key, torch.Tensor)
-    assert slot.routing_key.numel() == 1
+    assert slot.routing_key.shape == (64,)
 
 
 # ---------------------------------------------------------------------------
