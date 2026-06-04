@@ -75,11 +75,11 @@ model:
   hrm_l_cycles: 2
   l_dim: 256
   loop_count: 1
-  moe_intermediate_size: 512
-  moe_top_k: 2
+  moe_intermediate_size: 1024
+  moe_top_k: 1
   msa_slot_count: 100
   msa_top_k: 5
-  num_experts: 8
+  num_experts: 4
   perception_layers: 4
   reasoning_layers: 4
   rotor_seed: 42

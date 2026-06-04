@@ -56,7 +56,7 @@ class ResetL(nn.Module):
         h = self.act(self.up(x))
         h = self.dropout(self.down(h))
         g = torch.sigmoid(self.gate(x))
-        return g * h
+        return g * h + (1 - g) * x
 
 
 class LTransition(nn.Module):

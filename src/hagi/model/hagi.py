@@ -136,7 +136,7 @@ class HAGI(nn.Module):
                 use_binary_factorized=cfg.use_binary_factorized,
                 binary_factorized_rank=cfg.binary_factorized_rank,
             )
-            self.msa_router = SparseRouter(cfg.hidden_size, key_dim=1)
+            self.msa_router = SparseRouter(cfg.hidden_size, key_dim=64)
             self.hdim_slot_router = HDIMSlotRouter(cfg.hidden_size)
             self.msa_registry = SlotRegistry(max_slots=cfg.msa_slot_count)
 

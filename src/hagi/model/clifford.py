@@ -204,7 +204,7 @@ def bivector_exp(mv: torch.Tensor) -> torch.Tensor:
     half = 0.5 * theta
     cos_half = torch.cos(half)
     sin_half = torch.sin(half)
-    safe_theta = theta.clamp_min(1e-8)
+    safe_theta = torch.sqrt(b_sq.squeeze(-1) + 1e-6)
     coeff = -(sin_half / safe_theta)
     rotor_bv = coeff.unsqueeze(-1) * bivector
     out = torch.zeros_like(mv)

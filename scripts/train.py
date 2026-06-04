@@ -453,7 +453,12 @@ def compute_loss(
     moe_aux_loss = model_output.get("moe_aux_loss") if isinstance(model_output, dict) else None
     if moe_aux_loss is not None:
         w_moe = weights.get("w_moe", 0.01) if weights else 0.01
-        total_loss = total_loss + w_moe * moe_aux_loss
+        # Normalize MoE aux loss by the number of MoE layers to prevent gradient stealing
+        num_moe_layers = getattr(model_output, "num_moe_layers", None)
+        if num_moe_layers is None:
+            # Estimate: 16 layers total (perception + reasoning + expression)
+            num_moe_layers = 16
+        total_loss = total_loss + w_moe * moe_aux_loss / num_moe_layers
     components = {name: value.detach().float() for name, value in losses.items()}
     if moe_aux_loss is not None:
         components["L_moe"] = moe_aux_loss.detach().float()
@@ -833,6 +838,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     w_iso_start = float(train_cfg.get("w_iso_start", 0.0))
     w_iso_final = float(train_cfg.get("w_iso_final", composite_weights.get("w_iso", 0.01) if composite_weights else 0.01))
     iso_warmup_steps = int(train_cfg.get("iso_warmup_steps", train_cfg.get("iso_warmup", 5000)))
+    w_moe_start = float(train_cfg.get("w_moe_start", 0.0))
+    w_moe_final = float(train_cfg.get("w_moe_final", composite_weights.get("w_moe", 0.1) if composite_weights else 0.1))
+    moe_warmup_steps = int(train_cfg.get("moe_warmup_steps", train_cfg.get("moe_warmup", 2000)))
     loss_warmup_mode = str(train_cfg.get("loss_warmup_mode", "linear"))
     ema_cfg = train_cfg.get("ema", {})
     ema_decay = float(ema_cfg.get("decay", train_cfg.get("ema_decay", 0.999)))
@@ -940,6 +948,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             effective_weights = dict(composite_weights)
             effective_weights["w_aux"] = scheduled_weight(step, w_aux_start, w_aux_final, aux_warmup_steps, loss_warmup_mode)
             effective_weights["w_iso"] = scheduled_weight(step, w_iso_start, w_iso_final, iso_warmup_steps, loss_warmup_mode)
+            effective_weights["w_moe"] = scheduled_weight(step, w_moe_start, w_moe_final, moe_warmup_steps, loss_warmup_mode)
 
         optimizer.zero_grad(set_to_none=True)
         accum_loss_tensor = None
@@ -992,7 +1001,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             if not math.isfinite(full_grad_norm_val) or full_grad_norm_val > 100.0 or (0.0 < full_grad_norm_val < 1e-6):
                 print(f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}")
 
-        magic_norm_max_grad = magic_norm_clip(model, magic_norm_max) if step % 10 == 0 else 0.0
+        magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
         if use_scaler:
             scaler.step(optimizer)  # type: ignore[arg-type]
             scaler.update()
