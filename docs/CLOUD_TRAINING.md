@@ -109,6 +109,14 @@ memory levers.
 
 ---
 
+## Notebook launcher (Colab / Kaggle / Lightning Jupyter)
+
+`notebooks/hagi_cloud_train.ipynb` runs the whole flow cell-by-cell: clone →
+install → **auto-detect GPU and pick the config** (bf16 `baseline` on Ampere+,
+fp16 `colab_t4` on a T4) → mount persistent storage → tokenize → train with
+`--resume auto`. Easiest path on Colab (mounts Drive automatically). For a
+terminal (Lightning AI), the `scripts/cloud_*.sh` below are equivalent.
+
 ## Recommended workflow
 
 1. **Tokenize once, store as a Dataset** (Kaggle Dataset / Drive folder /

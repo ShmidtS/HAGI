@@ -2,9 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, experimental]
   pull_request:
-    branches: [main]
 
 jobs:
   python:
@@ -16,19 +15,23 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
+        # Minimal set the 27 tests + lint need. transformers/datasets/lm-eval are
+        # lazy-imported inside functions (not at test-collection), so the gate stays
+        # fast and reliable without the heavy eval/data tree. CPU torch wheel.
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-      - name: Lint
-        run: |
-          ruff format --check prototype/ || true
-          ruff check prototype/ || true
-      - name: Test
-        run: |
-          if [ -d prototype/tests ] || ls prototype/**/test_*.py 1>/dev/null 2>&1; then pytest -q; else echo "no tests yet"; fi
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy pyyaml pytest ruff
+      - name: Lint (gates)
+        run: ruff check prototype/
+      - name: Test (gates)
+        run: pytest
 
   rust:
     name: Rust (check + clippy + fmt)
+    # Rust is Stage 5 (scaffolded). Run only on main to keep experimental fast and
+    # avoid red noise while the port is not under active development.
+    if: github.event_name == 'push' && github.ref_name == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +47,8 @@ jobs:
 
   lean:
     name: Lean4 (build)
+    # Lean is Stage 6. Main-only, same rationale as Rust.
+    if: github.event_name == 'push' && github.ref_name == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
