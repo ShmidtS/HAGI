@@ -442,12 +442,22 @@ class HAGI(nn.Module):
                 result["loss"] = loss
             if moe_aux_losses:
                 result["moe_aux_loss"] = sum(moe_aux_losses)
-            if gdr_output is not None and isinstance(gdr_output, dict):
-                result["auxiliary_output"] = gdr_output
+            if gdr_state is not None and isinstance(gdr_state, dict):
+                if "fused" in gdr_state or "features" in gdr_state:
+                    if any(k in gdr_state for k in ("features", "embeddings", "output")):
+                        result["auxiliary_output"] = gdr_state
+                    else:
+                        result["auxiliary_output"] = {"features": gdr_state["fused"]}
             if gdr_state is not None:
                 assert pre_gdr_h is not None
-                result["invariant_src"] = pre_gdr_h
-                result["invariant_tgt"] = gdr_state["fused"]
+                if "invariant" in gdr_state and gdr_state["invariant"] is not None:
+                    result["invariant_src"] = gdr_state["invariant"]
+                else:
+                    result["invariant_src"] = pre_gdr_h
+                if "target_invariant" in gdr_state and gdr_state["target_invariant"] is not None:
+                    result["invariant_tgt"] = gdr_state["target_invariant"]
+                else:
+                    result["invariant_tgt"] = gdr_state["fused"]
             if pre_logits_hidden is not None:
                 result["model_output"] = pre_logits_hidden
             if msa_slot_ids is not None:

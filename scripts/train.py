@@ -174,6 +174,15 @@ def build_loop_config(cfg: dict[str, Any], ckpt_dir: Path, max_steps: int | None
 
 
 def load_resume(model: HAGI, resume: Path, device: str) -> int:
+    if resume.is_dir():
+        model_path = resume / "model.pt"
+        if model_path.exists():
+            model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        meta_path = resume / "meta.pt"
+        if meta_path.exists():
+            meta = torch.load(meta_path, map_location=device, weights_only=True)
+            return int(meta.get("step", 0))
+        return 0
     state = torch.load(resume, map_location=device, weights_only=True)
     if "model" in state:
         model.load_state_dict(state["model"])
@@ -869,19 +878,35 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
 
     optimizer = build_optimizer(model, train_cfg)
     if args.resume is not None and args.resume.exists():
-        state = torch.load(args.resume, map_location=args.device, weights_only=True)
-        if "optimizer" in state:
-            try:
-                optimizer.load_state_dict(state["optimizer"])
-                print("loaded optimizer state")
-            except Exception as exc:
-                print(f"optimizer state mismatch, starting fresh: {exc}")
-        if "model_ema" in state:
-            try:
-                model_ema.load_state_dict(state["model_ema"])
-                print("loaded EMA state")
-            except Exception as exc:
-                print(f"EMA state mismatch, starting fresh: {exc}")
+        if args.resume.is_dir():
+            optimizer_path = args.resume / "optimizer.pt"
+            if optimizer_path.exists():
+                try:
+                    optimizer.load_state_dict(torch.load(optimizer_path, map_location=args.device, weights_only=True))
+                    print("loaded optimizer state")
+                except Exception as exc:
+                    print(f"optimizer state mismatch, starting fresh: {exc}")
+            ema_path = args.resume / "ema.pt"
+            if ema_path.exists():
+                try:
+                    model_ema.load_state_dict(torch.load(ema_path, map_location=args.device, weights_only=True))
+                    print("loaded EMA state")
+                except Exception as exc:
+                    print(f"EMA state mismatch, starting fresh: {exc}")
+        else:
+            state = torch.load(args.resume, map_location=args.device, weights_only=True)
+            if "optimizer" in state:
+                try:
+                    optimizer.load_state_dict(state["optimizer"])
+                    print("loaded optimizer state")
+                except Exception as exc:
+                    print(f"optimizer state mismatch, starting fresh: {exc}")
+            if "model_ema" in state:
+                try:
+                    model_ema.load_state_dict(state["model_ema"])
+                    print("loaded EMA state")
+                except Exception as exc:
+                    print(f"EMA state mismatch, starting fresh: {exc}")
 
     for group in optimizer.param_groups:
         group["initial_lr"] = group["lr"]
@@ -933,6 +958,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             tokens = batch.tokens if isinstance(batch, PrefixLMBatch) else batch
             with autocast_ctx(precision, args.device):
                 output = train_model(tokens, targets=targets, training_mode=effective_weights is not None)
+                if not train_cfg.get("use_gdr_aux", False):
+                    if isinstance(output, dict):
+                        output.pop("auxiliary_output", None)
                 logits = unwrap_logits(output)
                 loss, components = compute_loss(logits, targets, output, effective_weights)
                 raw_loss = loss.detach().float()

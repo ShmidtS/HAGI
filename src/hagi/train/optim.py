@@ -300,7 +300,7 @@ def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]
         lr=adamw_lr,
         betas=betas_cfg,
         eps=eps,
-        weight_decay=0.0,
+        weight_decay=wd,
         fused=True,
         capturable=True,
     )
