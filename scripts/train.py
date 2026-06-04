@@ -762,9 +762,6 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         else:
             optimizer.step()  # type: ignore[arg-type]
 
-        if args.device.startswith("cuda") and step % 50 == 0:
-            torch.cuda.empty_cache()
-
         last_loss = float(accum_loss_tensor.cpu().item()) if accum_loss_tensor is not None else float("nan")
         if log_interval > 0 and step % log_interval == 0:
             now = time.perf_counter()
@@ -975,9 +972,6 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             optimizer.step()  # type: ignore[arg-type]
         if step >= ema_start_step:
             update_ema(model, model_ema, ema_decay)
-
-        if args.device.startswith("cuda") and step % 50 == 0:
-            torch.cuda.empty_cache()
 
         last_loss = float("nan")
         last_components: dict[str, float] = {}

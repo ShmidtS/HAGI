@@ -62,11 +62,11 @@ class RMSNorm(nn.Module):
 
 
 def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):
-    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
-    t = torch.arange(seq_len, device=device).float()
+    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device, dtype=dtype) / head_dim))
+    t = torch.arange(seq_len, device=device, dtype=dtype)
     freqs = torch.outer(t, inv_freq)
-    cos = freqs.cos().to(dtype)
-    sin = freqs.sin().to(dtype)
+    cos = freqs.cos()
+    sin = freqs.sin()
     return cos, sin
 
 

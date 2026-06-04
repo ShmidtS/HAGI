@@ -198,6 +198,21 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
         (model, step, ema_state | None)
     """
     from hagi.model import HAGI
+    from pathlib import Path
+
+    p = Path(path)
+    # Handle sharded checkpoint directories (model.pt, optimizer.pt, ema.pt, meta.pt)
+    if p.is_dir() and (p / "model.pt").exists():
+        meta = torch.load(p / "meta.pt", map_location=device, weights_only=True) if (p / "meta.pt").exists() else {}
+        cfg = config_from_dict(meta["config"])
+        model = HAGI(cfg)
+        model.load_state_dict(torch.load(p / "model.pt", map_location=device, weights_only=True))
+        model.to(device)
+        if load_ema and (p / "ema.pt").exists():
+            ema_state = torch.load(p / "ema.pt", map_location=device, weights_only=True)
+        else:
+            ema_state = None
+        return model, int(meta.get("step", 0)), ema_state
 
     state = torch.load(path, map_location=device, weights_only=True)
     cfg = config_from_dict(state["config"])

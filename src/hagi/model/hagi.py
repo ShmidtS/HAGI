@@ -442,7 +442,7 @@ class HAGI(nn.Module):
                 result["loss"] = loss
             if moe_aux_losses:
                 result["moe_aux_loss"] = sum(moe_aux_losses)
-            if gdr_output is not None:
+            if gdr_output is not None and isinstance(gdr_output, dict):
                 result["auxiliary_output"] = gdr_output
             if gdr_state is not None:
                 assert pre_gdr_h is not None
