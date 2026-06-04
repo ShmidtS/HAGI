@@ -456,8 +456,8 @@ def compute_loss(
         # Normalize MoE aux loss by the number of MoE layers to prevent gradient stealing
         num_moe_layers = getattr(model_output, "num_moe_layers", None)
         if num_moe_layers is None:
-            # Estimate: 16 layers total (perception + reasoning + expression)
-            num_moe_layers = 16
+            # Estimate: 12 layers total (perception + reasoning + expression)
+            num_moe_layers = 12
         total_loss = total_loss + w_moe * moe_aux_loss / num_moe_layers
     components = {name: value.detach().float() for name, value in losses.items()}
     if moe_aux_loss is not None:

@@ -97,8 +97,10 @@ def train(
     last_loss = float("nan")
     for step in range(cfg.max_steps):
         lr = _lr_at(step, cfg)
+        base_lr = max(cfg.learning_rate, 1e-12)
         for group in optimizer.param_groups:
-            group["lr"] = lr
+            init_lr = group.get("initial_lr", group["lr"])
+            group["lr"] = init_lr * (lr / base_lr)
 
         optimizer.zero_grad(set_to_none=True)
         accum_loss = 0.0

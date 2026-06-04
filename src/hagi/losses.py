@@ -90,8 +90,8 @@ def compute_auxiliary_loss(aux_output) -> torch.Tensor:
         return torch.tensor(0.0)
     flat = features.float().reshape(-1, features.size(-1))
     if labels is None:
-        logger.debug("auxiliary contrastive labels missing; using L2 regularization for L_aux")
-        return flat.float().pow(2).mean()
+        logger.debug("auxiliary contrastive labels missing; L_aux set to 0")
+        return flat.new_zeros(())
     if not isinstance(labels, torch.Tensor):
         labels = torch.as_tensor(labels, device=features.device)
 

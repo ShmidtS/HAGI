@@ -31,12 +31,19 @@ def test_weights_affect_total_loss_correctly():
     assert torch.allclose(losses["L_total"], expected)
 
 
+def test_auxiliary_loss_zero_without_labels():
+    features = torch.eye(3)
+    loss = compute_auxiliary_loss(features)
+    assert loss.item() == 0.0
+
+
 def test_auxiliary_loss_encourages_grade_separation():
     separated = torch.eye(3)
     similar = torch.ones(3, 3)
+    labels = torch.tensor([0, 1, 0])
 
-    separated_loss = compute_auxiliary_loss(separated)
-    similar_loss = compute_auxiliary_loss(similar)
+    separated_loss = compute_auxiliary_loss((separated, labels))
+    similar_loss = compute_auxiliary_loss((similar, labels))
 
     assert separated_loss < similar_loss
 

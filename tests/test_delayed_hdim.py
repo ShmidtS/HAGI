@@ -92,12 +92,12 @@ def test_delayed_hdim_loss_components_nonzero_on_aggregation():
     l_iso1 = compute_isomorphic_loss(hidden, state1["fused"])
     assert l_iso1.item() > 0.0
 
-    # L_aux is always > 0 because it is L2 of the features.
+    # L_aux without labels is now 0 (no L2 regularization to avoid killing gradients)
     from hagi.losses import compute_auxiliary_loss
     l_aux0 = compute_auxiliary_loss(state0["fused"])
     l_aux1 = compute_auxiliary_loss(state1["fused"])
-    assert l_aux0.item() > 0.0
-    assert l_aux1.item() > 0.0
+    assert l_aux0.item() == 0.0
+    assert l_aux1.item() == 0.0
 
 
 def test_delayed_hdim_last_step_aggregates_remaining_buffer():

@@ -154,8 +154,8 @@ class HRMCore(nn.Module):
             for l_cycle in range(self.l_cycles):
                 z_l_hidden = self.z_l_to_hidden(z_L).unsqueeze(1).expand(B, T, H)
                 z_h_hidden = self.z_h_to_hidden(z_H).unsqueeze(1).expand(B, T, H)
-                h_in = h + z_l_hidden + z_h_hidden
                 for block in reasoning_blocks:
+                    h_in = h + z_l_hidden + z_h_hidden
                     result = block(h_in, cos, sin, attn_mask=attn_mask)
                     if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], torch.Tensor) and result[1].ndim == 0:
                         h = result[0]
@@ -163,7 +163,6 @@ class HRMCore(nn.Module):
                             moe_aux_losses.append(result[1])
                     else:
                         h = result
-                    h_in = h
                 assert isinstance(h, torch.Tensor)
                 if gdr is not None:
                     current_step = h_cycle * self.l_cycles + l_cycle

@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .clifford import BLADE_COUNT, geometric_product, grade_projection
@@ -91,12 +92,15 @@ class GradeDecomposedRecurrence(nn.Module):
         """Self geometric product of the vector grade, projected to scalar+bivector."""
         *lead, _ = vector.shape
         mv = vector.reshape(*lead, self.n_mv, BLADE_COUNT)
+        mv = F.normalize(mv, dim=-1)
         prod = geometric_product(mv, mv)  # [..., n_mv, 8]
         # Keep grade-0 and grade-2 parts, flatten back to [..., vector_dim].
         g0 = grade_projection(prod, 0).reshape(*lead, self.cfg.vector)
         g2 = grade_projection(prod, 2).reshape(*lead, self.cfg.vector)
-        scalar_signal = torch.sigmoid(self.gate_scalar) * self.geo_to_scalar(g0)
-        bivector_signal = torch.sigmoid(self.gate_bivector) * self.geo_to_bivector(g2)
+        g_scalar = torch.sigmoid(self.gate_scalar)
+        g_bivector = torch.sigmoid(self.gate_bivector)
+        scalar_signal = g_scalar * self.geo_to_scalar(g0)
+        bivector_signal = g_bivector * self.geo_to_bivector(g2)
         return scalar_signal, bivector_signal
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
@@ -110,13 +114,13 @@ class GradeDecomposedRecurrence(nn.Module):
         trivector_new = self.mlp_trivector(ctx)
 
         geo_scalar, geo_bivector = self.geometric_interaction(vector_new)
-        scalar_new = scalar_new + torch.sigmoid(self.gate_scalar) * geo_scalar
-        bivector_new = bivector_new + torch.sigmoid(self.gate_bivector) * geo_bivector
-
-        # Sparse gating: each grade can be soft-gated off
-        scalar_new = torch.sigmoid(self.gate_scalar) * scalar_new
-        vector_new = torch.sigmoid(self.gate_vector) * vector_new
-        bivector_new = torch.sigmoid(self.gate_bivector) * bivector_new
-        trivector_new = torch.sigmoid(self.gate_trivector) * trivector_new
+        g_scalar = torch.sigmoid(self.gate_scalar)
+        g_vector = torch.sigmoid(self.gate_vector)
+        g_bivector = torch.sigmoid(self.gate_bivector)
+        g_trivector = torch.sigmoid(self.gate_trivector)
+        scalar_new = g_scalar * (scalar_new + geo_scalar)
+        vector_new = g_vector * vector_new
+        bivector_new = g_bivector * (bivector_new + geo_bivector)
+        trivector_new = g_trivector * trivector_new
 
         return torch.cat([scalar_new, vector_new, bivector_new, trivector_new, residual], dim=-1)

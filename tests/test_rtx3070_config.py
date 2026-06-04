@@ -27,7 +27,7 @@ def test_rtx3070_yaml_matches_8gb_model_shape():
     assert transformer["num_kv_heads"] == 4
     assert transformer["intermediate_size"] == 2048
     assert transformer["max_seq_len"] == 2048
-    assert sum(grades.values()) == 768
+    assert sum(v for v in grades.values() if isinstance(v, int)) == 768
 
 
 def test_rtx3070_config_builds_model_with_gradient_checkpointing():

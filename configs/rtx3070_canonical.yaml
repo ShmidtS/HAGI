@@ -62,8 +62,10 @@ model:
     bivector: 192
     residual: 256
     scalar: 64
+    scalar_momentum: 0.5
     trivector: 64
     vector: 192
+    vector_momentum: 0.5
   gradient_checkpointing: false
   h_dim: 256
   hdim_delay_steps: 1
