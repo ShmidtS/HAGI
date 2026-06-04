@@ -70,17 +70,7 @@ class SlotRegistry:
             self._evict_if_full()
             self._slots[slot.slot_id] = slot
         self._slot_ids.extend(s.slot_id for s in slots)
-        # Fast-path: build _routing_keys directly from slots without torch.stack later
-        if slots:
-            keys = torch.stack([s.routing_key for s in slots], dim=0)
-            if self._routing_keys is not None and len(self._slot_ids) > len(slots):
-                # Append to existing keys (slow path if registry not cleared)
-                old_keys = self._routing_keys
-                self._routing_keys = torch.cat([old_keys, keys], dim=0)
-            else:
-                self._routing_keys = keys
-        else:
-            self._routing_keys = None
+        self._routing_keys = None
         self._slot_ids_tensor = None
 
     def get(self, slot_id: int) -> MemorySlot:
