@@ -17,8 +17,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def push_checkpoint(path: str, repo_id: str) -> None:
-    """Upload one checkpoint file to repo_id (private model repo). Best-effort."""
+def push_checkpoint(path: str, repo_id: str, keep: int = 3) -> None:
+    """Upload one checkpoint to repo_id (private model repo), then prune old ones.
+
+    Each checkpoint is ~1.4GB (model + AdamW optimizer state), and only the latest
+    is needed to resume, so we keep just the newest `keep` to bound repo size.
+    Best-effort — failures never interrupt training.
+    """
     try:
         from huggingface_hub import HfApi
 
@@ -31,6 +36,18 @@ def push_checkpoint(path: str, repo_id: str) -> None:
             repo_type="model",
         )
         print(f"hf: pushed {Path(path).name} -> {repo_id}")
+
+        ckpts = sorted(
+            f
+            for f in api.list_repo_files(repo_id, repo_type="model")
+            if f.startswith("step-") and f.endswith(".pt")
+        )
+        for old in ckpts[:-keep]:
+            try:
+                api.delete_file(old, repo_id, repo_type="model")
+                print(f"hf: pruned {old}")
+            except Exception:  # noqa: BLE001
+                pass
     except Exception as e:  # noqa: BLE001 — never let a sync error kill training
         print(f"hf: push failed ({e}) — checkpoint is still saved locally")
 
