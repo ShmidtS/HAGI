@@ -103,6 +103,7 @@ def main():
         precision=tcfg.get("precision", "bf16"),
         eval_interval=cfg["eval"].get("every_n_steps", 2000),
         ckpt_interval=tcfg.get("ckpt_interval", 5000),
+        log_interval=tcfg.get("log_interval", 50),
         ckpt_dir=ckpt_dir,
     )
 

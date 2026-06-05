@@ -53,6 +53,7 @@ training:
   weight_decay: 0.1
   grad_clip: 1.0
   ckpt_interval: 200           # crash-safety within a session; --steps adds a session-end ckpt
+  log_interval: 10             # frequent loss + tok/s for live monitoring
   seed: 42
 
 data:
