@@ -55,7 +55,7 @@ class Muon(torch.optim.Optimizer):
                 buf.mul_(momentum).add_(g)
                 update = g.add(buf, alpha=momentum) if nesterov else buf
                 update = zeropower_via_newtonschulz5(update, ns_steps)
-                scale = max(1.0, p.size(0) / p.size(1)) ** 0.5
+                scale = min(max(1.0, p.size(0) / p.size(1)) ** 0.5, 2.0)
                 p.add_(update.reshape(p.shape).type_as(p), alpha=-lr * scale)
 
 

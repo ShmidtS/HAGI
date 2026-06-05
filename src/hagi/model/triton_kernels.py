@@ -504,7 +504,7 @@ class RMSNormTriton(torch.autograd.Function):
     def backward(ctx, grad_output):
         x, weight = ctx.saved_tensors
         eps = ctx.eps
-        # Manual RMSNorm backward in float32 for numerical stability
+        # Manual RMSNorm backward — fp32 for stability in training
         grad_f = grad_output.float()
         x_f = x.float()
         w_f = weight.float()

@@ -19,8 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import importlib.util
 _train_spec = importlib.util.spec_from_file_location("train", str(Path(__file__).resolve().parent / "train.py"))
+assert _train_spec is not None
 _train_mod = importlib.util.module_from_spec(_train_spec)
 sys.modules["train"] = _train_mod
+assert _train_spec.loader is not None
 _train_spec.loader.exec_module(_train_mod)
 
 load_yaml = _train_mod.load_yaml

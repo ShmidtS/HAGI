@@ -56,7 +56,9 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if TRITON_AVAILABLE and x.is_cuda:
-            return RMSNormTriton.apply(x, self.weight, self.eps)
+            result = RMSNormTriton.apply(x, self.weight, self.eps)
+            assert isinstance(result, torch.Tensor)
+            return result
         norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return norm * self.weight
 

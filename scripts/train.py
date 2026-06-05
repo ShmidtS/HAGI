@@ -952,6 +952,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         accum_loss_tensor = None
         accum_components: dict[str, torch.Tensor] = {}
         need_components = log_interval > 0 and step % log_interval == 0
+        backward_count = 0
         for _ in range(grad_accum_steps):
             try:
                 batch, targets = next(data_iter)
@@ -981,12 +982,33 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
+            backward_count += 1
             accum_loss_tensor = raw_loss if accum_loss_tensor is None else accum_loss_tensor + raw_loss
             if components and need_components:
                 for name, value in components.items():
                     accum_components[name] = accum_components.get(name, torch.tensor(0.0, device=value.device, dtype=value.dtype)) + value
             tokens_since_log += tokens.numel()
             del output, loss, logits
+
+        if backward_count == 0:
+            if log_interval > 0 and step % log_interval == 0:
+                print(f"WARNING: all {grad_accum_steps} accum steps skipped at step {step}; no optimizer step")
+            last_loss = float("nan")
+            last_components = {}
+            if log_interval > 0 and step % log_interval == 0:
+                now = time.perf_counter()
+                elapsed = max(now - last_log_time, 1e-9)
+                tok_per_sec = tokens_since_log / elapsed
+                component_text = ""
+                if last_components:
+                    component_text = " | " + " | ".join(f"{name} {value:.4f}" for name, value in last_components.items())
+                print(
+                    f"step {step:6d} | loss nan{component_text} | lr {lr:.2e} | "
+                    f"tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)} | SKIPPED"
+                )
+                tokens_since_log = 0
+                last_log_time = now
+            continue
 
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
