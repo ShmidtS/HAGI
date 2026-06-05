@@ -12,7 +12,8 @@ Utility + cloud-launch scripts. The cloud scripts target Linux notebooks
 ## Typical free-tier session (Colab / Kaggle)
 
 ```bash
-git clone https://github.com/ShmidtS/HAGI.git && cd HAGI
+# Clone the active branch (all current work lives on `experimental`, not main).
+git clone -b experimental https://github.com/ShmidtS/HAGI.git && cd HAGI
 
 # 1. Tokenize once (or pull pre-tokenized shards from persistent storage)
 bash scripts/cloud_tokenize.sh HuggingFaceFW/fineweb-edu sample-10BT data/fineweb-edu
