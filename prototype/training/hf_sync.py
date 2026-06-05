@@ -14,7 +14,12 @@ token in the `HF_TOKEN` env var (or `huggingface-cli login`).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+# Quiet the per-file upload progress bars (they flood a training log with hundreds
+# of lines per 1.4GB push). User can override by setting this before import.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 
 def push_checkpoint(path: str, repo_id: str, keep: int = 3) -> None:
