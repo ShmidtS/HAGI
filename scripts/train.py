@@ -972,6 +972,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 loss, components = compute_loss(logits, targets, output, effective_weights)
                 raw_loss = loss.detach().float()
                 loss = loss / grad_accum_steps
+            if not torch.isfinite(loss).all():
+                if log_interval > 0 and step % log_interval == 0:
+                    print(f"WARNING: non-finite loss at step {step}; skipping accum step")
+                del output, loss, logits
+                continue
             if use_scaler:
                 scaler.scale(loss).backward()
             else:
