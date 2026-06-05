@@ -52,6 +52,7 @@ class MoESwiGLU(nn.Module):
             noise = torch.randn_like(router_logits) * 0.01
             router_logits = router_logits + noise.detach()
         router_logits = router_logits / self.router_temperature
+        router_logits = router_logits.clamp(-10, 10)
         router_probs = F.softmax(router_logits, dim=-1)
 
         top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)

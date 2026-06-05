@@ -504,15 +504,13 @@ class RMSNormTriton(torch.autograd.Function):
     def backward(ctx, grad_output):
         x, weight = ctx.saved_tensors
         eps = ctx.eps
-        # Manual RMSNorm backward — fp32 for stability in training
-        grad_f = grad_output.float()
-        x_f = x.float()
-        w_f = weight.float()
-        var = x_f.pow(2).mean(-1, keepdim=True) + eps
+        # Manual RMSNorm backward — use input dtype for speed
+        grad_output = grad_output.to(x.dtype)
+        var = x.pow(2).mean(-1, keepdim=True) + eps
         rstd = torch.rsqrt(var)
-        grad_w = (grad_f * x_f * rstd).sum(dim=list(range(grad_f.ndim - 1)))
-        grad_x = grad_f * w_f * rstd - x_f * rstd * (grad_f * x_f * w_f).mean(-1, keepdim=True) / var
-        return grad_x.to(x.dtype), grad_w.to(weight.dtype), None
+        grad_w = (grad_output * x * rstd).sum(dim=list(range(grad_output.ndim - 1)))
+        grad_x = grad_output * weight * rstd - x * rstd * (grad_output * x * weight).mean(-1, keepdim=True) / var
+        return grad_x, grad_w, None
 
 
 class GeometricProductTriton(torch.autograd.Function):
@@ -526,14 +524,13 @@ class GeometricProductTriton(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         x, y, table = ctx.saved_tensors
-        # Manual backward in float32 for numerical stability
-        grad_f = grad_output.float()
-        x_f = x.float()
-        y_f = y.float()
-        table_f = table.float()
-        grad_x = torch.einsum("cab,...c,...b->...a", table_f, grad_f, y_f)
-        grad_y = torch.einsum("cab,...c,...a->...b", table_f, grad_f, x_f)
-        return grad_x.to(x.dtype), grad_y.to(y.dtype), None
+        # Manual backward — use input dtype for speed
+        dtype = grad_output.dtype
+        grad_output = grad_output.to(dtype)
+        table = table.to(dtype)
+        grad_x = torch.einsum("cab,...c,...b->...a", table, grad_output, y.to(dtype))
+        grad_y = torch.einsum("cab,...c,...a->...b", table, grad_output, x.to(dtype))
+        return grad_x, grad_y, None
 
 
 # ---------------------------------------------------------------------------
