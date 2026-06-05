@@ -129,7 +129,7 @@ class GroupedQueryAttention(nn.Module):
         attn_k = k.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         attn_v = v.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
-        out = out.transpose(1, 2).contiguous().view(B, T, -1)
+        out = out.transpose(1, 2).contiguous().view(B, out.shape[2], -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out
 
@@ -155,7 +155,7 @@ class GroupedQueryAttention(nn.Module):
         attn_k = k.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         attn_v = v.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
-        out = out.transpose(1, 2).contiguous().view(B, T, -1)
+        out = out.transpose(1, 2).contiguous().view(B, out.shape[2], -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out
 

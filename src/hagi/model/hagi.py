@@ -402,7 +402,7 @@ class HAGI(nn.Module):
             if self.cfg.use_nars and self.nars_msa is not None:
                 with torch.no_grad():
                     inv = self.hdim_slot_router.routing_key(h)
-                    query_nars = inv.mean().unsqueeze(0)
+                    query_nars = inv.mean(dim=(0, 1))  # [key_dim]
                     top_k_ids, top_values = self.nars_msa.route_top_k_with_nars(
                         self.msa_registry, query_nars, self.cfg.msa_top_k
                     )
