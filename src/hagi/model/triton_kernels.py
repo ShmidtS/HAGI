@@ -489,12 +489,62 @@ def rmsnorm_triton(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> 
 
 
 # ---------------------------------------------------------------------------
+# Autograd wrappers (Triton forward, PyTorch backward)
+# ---------------------------------------------------------------------------
+class RMSNormTriton(torch.autograd.Function):
+    """Triton RMSNorm forward with manual backward for gradient correctness."""
+
+    @staticmethod
+    def forward(ctx, x, weight, eps):
+        ctx.save_for_backward(x, weight)
+        ctx.eps = eps
+        return rmsnorm_triton(x, weight, eps)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, weight = ctx.saved_tensors
+        eps = ctx.eps
+        # Manual RMSNorm backward in float32 for numerical stability
+        grad_f = grad_output.float()
+        x_f = x.float()
+        w_f = weight.float()
+        var = x_f.pow(2).mean(-1, keepdim=True) + eps
+        rstd = torch.rsqrt(var)
+        grad_w = (grad_f * x_f * rstd).sum(dim=list(range(grad_f.ndim - 1)))
+        grad_x = grad_f * w_f * rstd - x_f * rstd * (grad_f * x_f * w_f).mean(-1, keepdim=True) / var
+        return grad_x.to(x.dtype), grad_w.to(weight.dtype), None
+
+
+class GeometricProductTriton(torch.autograd.Function):
+    """Triton geometric product forward with manual backward for gradient correctness."""
+
+    @staticmethod
+    def forward(ctx, x, y, table):
+        ctx.save_for_backward(x, y, table)
+        return geometric_product_triton(x, y, table)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, y, table = ctx.saved_tensors
+        # Manual backward in float32 for numerical stability
+        grad_f = grad_output.float()
+        x_f = x.float()
+        y_f = y.float()
+        table_f = table.float()
+        grad_x = torch.einsum("cab,...c,...b->...a", table_f, grad_f, y_f)
+        grad_y = torch.einsum("cab,...c,...a->...b", table_f, grad_f, x_f)
+        return grad_x.to(x.dtype), grad_y.to(y.dtype), None
+
+
+# ---------------------------------------------------------------------------
 # Module exports
 # ---------------------------------------------------------------------------
 __all__ = [
     "geometric_product_triton",
     "sparse_attention_triton",
     "rmsnorm_triton",
+    "RMSNormTriton",
+    "GeometricProductTriton",
     "TRITON_AVAILABLE",
 ]
 

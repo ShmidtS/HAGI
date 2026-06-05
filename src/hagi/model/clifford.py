@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 
 from hagi.utils import _reordering_sign
-from .triton_kernels import TRITON_AVAILABLE, geometric_product_triton
+from .triton_kernels import TRITON_AVAILABLE, GeometricProductTriton
 
 BLADE_COUNT = 8
 DIM = 3
@@ -107,8 +107,8 @@ def _get_prod_table(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
 
-    Vectorised: single einsum over the precomputed product table, or Triton
-    kernel when CUDA is available.
+    Vectorised: single einsum over the precomputed product table.
+    Triton path is disabled because the Triton kernel does not support autograd.
 
     Args:
         x: [..., 8] multivector coefficients.
@@ -121,7 +121,7 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
     table = _get_prod_table(x.device, x.dtype)
     if TRITON_AVAILABLE and x.is_cuda:
-        return geometric_product_triton(x, y, table)
+        return GeometricProductTriton.apply(x, y, table)
     return torch.einsum("cab,...a,...b->...c", table, x, y)
 
 

@@ -54,7 +54,7 @@ class MoESwiGLU(nn.Module):
         top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
         top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
 
-        weight_matrix = torch.zeros(B * T, self.num_experts, device=x.device, dtype=x.dtype)
+        weight_matrix = torch.zeros(B * T, self.num_experts, device=x.device, dtype=top_k_probs.dtype)
         weight_matrix.scatter_(1, top_k_indices, top_k_probs)
 
         output = torch.zeros_like(flat)
