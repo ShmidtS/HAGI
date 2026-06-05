@@ -111,7 +111,7 @@ training:
     w_ce: 1.0
     w_iso: 0.005
     w_moe: 0.005
-  use_gdr_aux: false
+  use_gdr_aux: true
   cooldown_frac: 0.05
   ema:
     decay: 0.9995

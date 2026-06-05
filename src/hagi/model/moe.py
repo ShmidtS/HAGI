@@ -39,6 +39,7 @@ class MoESwiGLU(nn.Module):
         self.router_temperature = getattr(cfg, "moe_router_temperature", 1.0)
 
         self.router = nn.Linear(cfg.hidden_size, cfg.num_experts, bias=False)
+        nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
         self.experts = nn.ModuleList(_SwiGLUExpert(cfg) for _ in range(cfg.num_experts))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -47,8 +48,10 @@ class MoESwiGLU(nn.Module):
 
         flat = x.view(B * T, D)
         router_logits = self.router(flat)
-        if self.router_temperature != 1.0:
-            router_logits = router_logits / self.router_temperature
+        if self.training:
+            noise = torch.randn_like(router_logits) * 0.01
+            router_logits = router_logits + noise
+        router_logits = router_logits / self.router_temperature
         router_probs = F.softmax(router_logits, dim=-1)
 
         top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)

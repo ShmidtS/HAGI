@@ -63,34 +63,6 @@ class TokenizerWrapper:
     def decode(self, tokens: list[int], **kwargs: Any) -> str:
         return str(self.tokenizer.decode(tokens, **kwargs))
 
-    def batch_encode(
-        self,
-        texts: list[str],
-        padding: bool | str = False,
-        truncation: bool = False,
-        max_length: int | None = None,
-        return_tensors: str | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        if hasattr(self.tokenizer, "__call__"):
-            assert callable(self.tokenizer)
-            return self.tokenizer(
-                texts,
-                padding=padding,
-                truncation=truncation,
-                max_length=max_length,
-                return_tensors=return_tensors,
-                **kwargs,
-            )
-        encoded = [self.encode(text, **kwargs) for text in texts]
-        if truncation and max_length is not None:
-            encoded = [ids[:max_length] for ids in encoded]
-        if padding:
-            pad_to = max_length if max_length is not None else max((len(ids) for ids in encoded), default=0)
-            pad_id = self.pad_token_id or 0
-            encoded = [ids + [pad_id] * max(0, pad_to - len(ids)) for ids in encoded]
-        return encoded
-
     def batch_decode(self, batch_tokens: list[list[int]], **kwargs: Any) -> list[str]:
         if hasattr(self.tokenizer, "batch_decode"):
             return list(self.tokenizer.batch_decode(batch_tokens, **kwargs))

@@ -67,6 +67,7 @@ class LTransition(nn.Module):
         h_dim: int | None = None,
         mult: int = 2,
         dropout: float = 0.0,
+        h_cycles: int = 2,
     ):
         super().__init__()
         in_dim = l_dim + hidden_size
@@ -76,7 +77,10 @@ class LTransition(nn.Module):
         self.down = nn.Linear(mult * l_dim, l_dim)
         self.gate = nn.Linear(in_dim, l_dim)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.reset_l = ResetL(h_dim if h_dim is not None else hidden_size, l_dim, mult, dropout)
+        if h_cycles > 1:
+            self.reset_l = ResetL(h_dim if h_dim is not None else hidden_size, l_dim, mult, dropout)
+        else:
+            self.reset_l = None
 
     def forward(self, z_L_prev: torch.Tensor, transformer_output: torch.Tensor) -> torch.Tensor:
         pooled = transformer_output.mean(dim=1)
@@ -88,6 +92,8 @@ class LTransition(nn.Module):
         return z_L_prev + g * h
 
     def reset(self, z_H: torch.Tensor) -> torch.Tensor:
+        if self.reset_l is None:
+            return z_H
         return self.reset_l(z_H)
 
 
@@ -109,8 +115,8 @@ class HRMCore(nn.Module):
 
         self.h_init = nn.Linear(hidden_size, h_dim)
         self.l_init = nn.Linear(hidden_size, l_dim)
-        self.h_transition = HTransition(h_dim, l_dim, transition_mult, transition_dropout)
-        self.l_transition = LTransition(l_dim, hidden_size, h_dim, transition_mult, transition_dropout)
+        self.h_transition = HTransition(h_dim, l_dim, transition_mult, transition_dropout) if h_cycles > 1 else None
+        self.l_transition = LTransition(l_dim, hidden_size, h_dim, transition_mult, transition_dropout, h_cycles=h_cycles)
         self.z_l_to_hidden = nn.Linear(l_dim, hidden_size)
         self.z_h_to_hidden = nn.Linear(h_dim, hidden_size)
 
@@ -185,9 +191,11 @@ class HRMCore(nn.Module):
                     else:
                         h = gdr(h)
                 z_L = self.l_transition(z_L, h)
-            z_H = self.h_transition(z_H, z_L)
-            assert isinstance(z_H, torch.Tensor)
-            z_L = self.l_transition.reset(z_H)
+            if self.h_cycles > 1:
+                assert self.h_transition is not None
+                z_H = self.h_transition(z_H, z_L)
+                assert isinstance(z_H, torch.Tensor)
+                z_L = self.l_transition.reset(z_H)
 
         assert isinstance(z_L, torch.Tensor)
         assert isinstance(z_H, torch.Tensor)

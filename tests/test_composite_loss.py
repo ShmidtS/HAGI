@@ -14,7 +14,7 @@ def test_composite_loss_returns_all_components():
 
     losses = composite_loss(logits, targets, model_output, auxiliary_output)
 
-    assert set(losses) == {"L_CE", "L_aux", "L_iso", "L_total"}
+    assert set(losses) == {"L_CE", "L_aux", "L_iso", "L_moe", "L_total"}
     assert all(loss.ndim == 0 for loss in losses.values())
 
 

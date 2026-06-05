@@ -34,6 +34,9 @@ class DomainRotor(nn.Module):
 
         rotor_params = torch.zeros(num_rotors, heads, blade_count)
         rotor_params[..., 0] = 1.0
+        if num_rotors > 1:
+            rotor_params[1:] = torch.randn(num_rotors - 1, heads, blade_count) * 0.01
+            rotor_params[1:, ..., 0] += 1.0
         self.rotor_params = nn.Parameter(rotor_params)
 
         even_mask = torch.tensor(
@@ -112,7 +115,8 @@ class GatedFusion(nn.Module):
         self.blade_count = blade_count
         mv_size = heads * blade_count
         self.mv_to_hidden = nn.Linear(mv_size, hidden_size)
-        self.gate = nn.Linear(hidden_size + hidden_size, hidden_size)
+        self.gate = nn.Linear(hidden_size * 2, hidden_size)
+        nn.init.constant_(self.gate.bias, -2.0)
 
     def forward(
         self,

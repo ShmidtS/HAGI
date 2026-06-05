@@ -428,6 +428,11 @@ def compute_loss(
         return loss, {}
     # Reuse pre-computed loss from model forward if available
     precomputed_loss = model_output.get("loss") if isinstance(model_output, dict) else None
+    moe_aux_loss = model_output.get("moe_aux_loss") if isinstance(model_output, dict) else None
+    num_moe_layers = model_output.get("num_moe_layers") if isinstance(model_output, dict) else None
+    if num_moe_layers is None:
+        # Estimate: 12 layers total (perception + reasoning + expression)
+        num_moe_layers = 12
     if precomputed_loss is not None:
         losses = composite_loss(
             logits,
@@ -438,6 +443,8 @@ def compute_loss(
             invariant_src=model_output.get("invariant_src") if isinstance(model_output, dict) else None,
             invariant_tgt=model_output.get("invariant_tgt") if isinstance(model_output, dict) else None,
             precomputed_loss=precomputed_loss,
+            moe_aux_loss=moe_aux_loss,
+            num_moe_layers=num_moe_layers,
         )
     else:
         losses = composite_loss(
@@ -448,20 +455,11 @@ def compute_loss(
             weights=weights,
             invariant_src=model_output.get("invariant_src") if isinstance(model_output, dict) else None,
             invariant_tgt=model_output.get("invariant_tgt") if isinstance(model_output, dict) else None,
+            moe_aux_loss=moe_aux_loss,
+            num_moe_layers=num_moe_layers,
         )
     total_loss = losses["L_total"]
-    moe_aux_loss = model_output.get("moe_aux_loss") if isinstance(model_output, dict) else None
-    if moe_aux_loss is not None:
-        w_moe = weights.get("w_moe", 0.01) if weights else 0.01
-        # Normalize MoE aux loss by the number of MoE layers to prevent gradient stealing
-        num_moe_layers = model_output.get("num_moe_layers") if isinstance(model_output, dict) else None
-        if num_moe_layers is None:
-            # Estimate: 12 layers total (perception + reasoning + expression)
-            num_moe_layers = 12
-        total_loss = total_loss + w_moe * moe_aux_loss / num_moe_layers
     components = {name: value.detach().float() for name, value in losses.items()}
-    if moe_aux_loss is not None:
-        components["L_moe"] = moe_aux_loss.detach().float()
     return total_loss, components
 
 

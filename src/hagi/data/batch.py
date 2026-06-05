@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -82,12 +81,3 @@ def get_batch_synthetic(vocab_size: int, batch_size: int, seq_len: int) -> tuple
     return x, y
 
 
-class BatchLoader:
-    def __init__(self, get_batch: Callable[[], tuple[Any, Any]]) -> None:
-        self.get_batch = get_batch
-
-    def __iter__(self) -> "BatchLoader":
-        return self
-
-    def __next__(self) -> tuple[Any, Any]:
-        return self.get_batch()

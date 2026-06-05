@@ -9,7 +9,7 @@ import torch
 
 from hagi.train.loop import load_checkpoint, save_checkpoint
 
-__all__ = ["save_checkpoint", "load_checkpoint", "save_sharded_checkpoint", "load_sharded_checkpoint"]
+__all__ = ["save_checkpoint", "load_checkpoint", "save_sharded_checkpoint"]
 
 
 def save_sharded_checkpoint(
@@ -33,18 +33,3 @@ def save_sharded_checkpoint(
     if config is not None:
         meta["config"] = config
     torch.save(meta, path / "meta.pt")
-
-
-def load_sharded_checkpoint(
-    model,
-    optimizer,
-    ema,
-    path: Path,
-) -> int:
-    """Load a sharded checkpoint from model.pt, optimizer.pt, ema.pt, meta.pt."""
-    model.load_state_dict(torch.load(path / "model.pt", weights_only=True))
-    optimizer.load_state_dict(torch.load(path / "optimizer.pt", weights_only=True))
-    if ema is not None and (path / "ema.pt").exists():
-        ema.load_state_dict(torch.load(path / "ema.pt", weights_only=True))
-    meta = torch.load(path / "meta.pt", weights_only=True) if (path / "meta.pt").exists() else {}
-    return int(meta.get("step", 0))

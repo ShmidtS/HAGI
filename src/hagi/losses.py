@@ -188,6 +188,8 @@ def composite_loss(
     invariant_src=None,
     invariant_tgt=None,
     precomputed_loss: torch.Tensor | None = None,
+    moe_aux_loss: torch.Tensor | None = None,
+    num_moe_layers: int | torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
     if (
@@ -203,7 +205,7 @@ def composite_loss(
     if invariant_tgt is None and isinstance(model_output, dict):
         invariant_tgt = model_output.get("invariant_tgt")
 
-    merged_weights = {"w_ce": 1.0, "w_aux": 0.1, "w_iso": 0.01}
+    merged_weights = {"w_ce": 1.0, "w_aux": 0.1, "w_iso": 0.01, "w_moe": 0.0}
     if weights is not None:
         merged_weights.update(weights)
 
@@ -225,5 +227,16 @@ def composite_loss(
         result["L_iso"] = l_iso
     else:
         result["L_iso"] = l_ce.new_zeros(())
+    if merged_weights.get("w_moe", 0.0) != 0.0 and moe_aux_loss is not None:
+        l_moe = moe_aux_loss.to(device=logits.device, dtype=logits.dtype)
+        if num_moe_layers is not None:
+            if isinstance(num_moe_layers, torch.Tensor):
+                num_moe_layers = int(num_moe_layers.item())
+            if num_moe_layers > 0:
+                l_moe = l_moe / num_moe_layers
+        l_total = l_total + merged_weights["w_moe"] * l_moe
+        result["L_moe"] = l_moe
+    else:
+        result["L_moe"] = l_ce.new_zeros(())
     result["L_total"] = l_total
     return result

@@ -1,4 +1,4 @@
-from hagi.data.batch import BatchLoader, get_batch_memmap, get_batch_synthetic, get_memmap_dataloader
+from hagi.data.batch import get_batch_memmap, get_batch_synthetic, get_memmap_dataloader
 from hagi.data.dataloader import MemmapDataset
 from hagi.data.mix import WeightedMemmapDataset, get_mixed_memmap_dataloader
 from hagi.data.packing import best_fit_decreasing_pack
@@ -7,7 +7,6 @@ from hagi.data.sft_dataset import SFTDataset, get_sft_dataloader
 from hagi.data.tokenizer import TokenizerWrapper
 
 __all__ = [
-    "BatchLoader",
     "MemmapDataset",
     "PrefixLMBatch",
     "SFTDataset",

@@ -149,7 +149,7 @@ class HAGI(nn.Module):
             self.nars_msa = NarsMsaReasoner()
 
         loops = cfg.loop_count if cfg.use_loop else 1
-        self.iter_embed = nn.Parameter(torch.zeros(loops, cfg.hidden_size))
+        self.iter_embed = nn.Parameter(torch.randn(loops, cfg.hidden_size) * 0.01)
 
         self.final_norm = RMSNorm(cfg.hidden_size, tcfg.norm_eps)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
