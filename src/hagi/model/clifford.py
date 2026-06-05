@@ -120,10 +120,6 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     assert x.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
     table = _get_prod_table(x.device, x.dtype)
-    if TRITON_AVAILABLE and x.is_cuda:
-        result = GeometricProductTriton.apply(x, y, table)
-        assert isinstance(result, torch.Tensor)
-        return result
     return torch.einsum("cab,...a,...b->...c", table, x, y)
 
 

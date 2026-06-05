@@ -51,16 +51,18 @@ class TransformerConfig:
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.norm = nn.RMSNorm(dim, eps=eps)
+
+    @property
+    def weight(self):
+        return self.norm.weight
+
+    @property
+    def eps(self):
+        return self.norm.eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if TRITON_AVAILABLE and x.is_cuda:
-            result = RMSNormTriton.apply(x, self.weight, self.eps)
-            assert isinstance(result, torch.Tensor)
-            return result
-        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return norm * self.weight
+        return self.norm(x)
 
 
 def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):

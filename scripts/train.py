@@ -953,6 +953,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         accum_components: dict[str, torch.Tensor] = {}
         need_components = log_interval > 0 and step % log_interval == 0
         backward_count = 0
+        t_forward = 0.0
+        t_backward = 0.0
         for _ in range(grad_accum_steps):
             try:
                 batch, targets = next(data_iter)
@@ -964,6 +966,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             targets = targets.to(args.device, non_blocking=pin_memory)
             targets = apply_prefix_mask(targets, batch)
             tokens = batch.tokens if isinstance(batch, PrefixLMBatch) else batch
+            t_fwd_start = time.perf_counter()
             with autocast_ctx(precision, args.device):
                 output = train_model(tokens, targets=targets, training_mode=effective_weights is not None)
                 if not train_cfg.get("use_gdr_aux", False):
@@ -973,15 +976,18 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 loss, components = compute_loss(logits, targets, output, effective_weights)
                 raw_loss = loss.detach().float()
                 loss = loss / grad_accum_steps
+            t_forward += time.perf_counter() - t_fwd_start
             if not torch.isfinite(loss).all():
                 if log_interval > 0 and step % log_interval == 0:
                     print(f"WARNING: non-finite loss at step {step}; skipping accum step")
                 del output, loss, logits
                 continue
+            t_bwd_start = time.perf_counter()
             if use_scaler:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
+            t_backward += time.perf_counter() - t_bwd_start
             backward_count += 1
             accum_loss_tensor = raw_loss if accum_loss_tensor is None else accum_loss_tensor + raw_loss
             if components and need_components:
@@ -1010,8 +1016,10 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 last_log_time = now
             continue
 
+        t_opt_start = time.perf_counter()
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
+        t_unscale = time.perf_counter()
 
         if grad_clip > 0:
             full_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -1025,13 +1033,21 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             full_grad_norm_val = get_grad_norm(model)
             if not math.isfinite(full_grad_norm_val) or full_grad_norm_val > 100.0 or (0.0 < full_grad_norm_val < 1e-6):
                 print(f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}")
+        t_clip = time.perf_counter()
 
         magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
+        t_magic = time.perf_counter()
         if use_scaler:
             scaler.step(optimizer)  # type: ignore[arg-type]
             scaler.update()
         else:
             optimizer.step()  # type: ignore[arg-type]
+        t_opt_end = time.perf_counter()
+        t_opt = t_opt_end - t_opt_start
+        t_opt_step = t_opt_end - t_magic
+        t_unscale = t_unscale - t_opt_start
+        t_clip = t_clip - t_unscale - t_opt_start
+        t_magic = t_magic - t_clip - t_unscale - t_opt_start
         if step >= ema_start_step:
             update_ema(model, model_ema, ema_decay)
 
@@ -1059,7 +1075,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             print(
                 f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
                 f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm_val:.2e} | "
-                f"magic_norm_max_grad {magic_norm_max_grad:.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text}"
+                f"magic_norm_max_grad {magic_norm_max_grad:.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text} | "
+                f"fwd {t_forward*1000:.1f}ms | bwd {t_backward*1000:.1f}ms | opt {t_opt*1000:.1f}ms | "
+                f"unscale {t_unscale*1000:.1f}ms | clip {t_clip*1000:.1f}ms | magic {t_magic*1000:.1f}ms | opt_step {t_opt_step*1000:.1f}ms"
             )
             tokens_since_log = 0
             last_log_time = now
