@@ -88,14 +88,14 @@ def compute_auxiliary_loss(aux_output) -> torch.Tensor:
 
     if not isinstance(features, torch.Tensor):
         return torch.tensor(0.0)
-    flat = features.float().reshape(-1, features.size(-1))
+    flat = features.reshape(-1, features.size(-1))
     if labels is None:
         logger.debug("auxiliary contrastive labels missing; L_aux set to 0")
         return flat.new_zeros(())
     if not isinstance(labels, torch.Tensor):
         labels = torch.as_tensor(labels, device=features.device)
 
-    flat = features.float().reshape(-1, features.size(-1))
+    flat = features.reshape(-1, features.size(-1))
     labels = labels.to(device=features.device).reshape(-1)
     if flat.size(0) != labels.numel() or flat.size(0) < 2:
         logger.debug("auxiliary contrastive labels invalid; L_aux set to 0")
@@ -153,7 +153,7 @@ def compute_isomorphic_loss(
         input_ids = invariant_tgt.to(device)
         first = _as_logits(invariant_src(input_ids))
         second = _as_logits(invariant_src(input_ids))
-        return F.mse_loss(first.float(), second.float())
+        return F.mse_loss(first, second)
 
     if isinstance(invariant_src, dict):
         src = None
@@ -169,11 +169,11 @@ def compute_isomorphic_loss(
                 tgt = value
                 break
         if isinstance(src, torch.Tensor) and isinstance(tgt, torch.Tensor):
-            return F.mse_loss(src.float(), tgt.float())
+            return F.mse_loss(src, tgt)
         return torch.tensor(0.0)
 
     if isinstance(invariant_src, torch.Tensor) and isinstance(invariant_tgt, torch.Tensor):
-        return F.mse_loss(invariant_src.float(), invariant_tgt.float())
+        return F.mse_loss(invariant_src, invariant_tgt)
     if isinstance(invariant_src, torch.Tensor):
         return invariant_src.new_zeros(())
     return torch.tensor(0.0)

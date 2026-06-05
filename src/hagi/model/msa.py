@@ -73,6 +73,10 @@ class SlotRegistry:
         self._routing_keys = None
         self._slot_ids_tensor = None
 
+    def set_routing_keys(self, keys: torch.Tensor) -> None:
+        """Set the precomputed routing-keys tensor, skipping lazy ``torch.stack``."""
+        self._routing_keys = keys
+
     def get(self, slot_id: int) -> MemorySlot:
         """Retrieve a slot by ID."""
         if slot_id not in self._slots:
@@ -606,7 +610,7 @@ class HDIMSlotRouter(nn.Module):
         v_cache: torch.Tensor,
         slot_id_base: int = 0,
         domain_id: int = 0,
-    ) -> List[MemorySlot]:
+    ) -> tuple[List[MemorySlot], torch.Tensor]:
         """Create ``MemorySlot`` objects for all positions in a batch.
 
         Vectorises ``routing_key`` computation over the full batch, then builds
@@ -620,7 +624,7 @@ class HDIMSlotRouter(nn.Module):
             domain_id: domain ID for all slots.
 
         Returns:
-            List of ``MemorySlot`` (length B*T).
+            (slots, routing_keys) where routing_keys is ``[B*T, key_dim]``.
         """
         B, T, _ = hidden_states.shape
         inv = self.routing_key(hidden_states)  # [B, T, key_dim]
@@ -635,10 +639,11 @@ class HDIMSlotRouter(nn.Module):
         k_flat = k_t.reshape(total, k_cache.size(1), k_cache.size(-1)).unsqueeze(2)
         v_flat = v_t.reshape(total, v_cache.size(1), v_cache.size(-1)).unsqueeze(2)
 
-        # Unbind once to avoid per-iteration Python overhead
+        # Unbind once (faster than per-element Python select).
+        # Detach k/v caches so they do not participate in backward graph.
         inv_list = inv_flat.unbind(0)
-        k_list = k_flat.unbind(0)
-        v_list = v_flat.unbind(0)
+        k_list = k_flat.detach().unbind(0)
+        v_list = v_flat.detach().unbind(0)
 
         slots = [
             MemorySlot(
@@ -650,4 +655,4 @@ class HDIMSlotRouter(nn.Module):
             )
             for i in range(total)
         ]
-        return slots
+        return slots, inv_flat

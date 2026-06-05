@@ -389,7 +389,7 @@ class HAGI(nn.Module):
             k = self.msa.k_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
             v = self.msa.v_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
 
-            slots = self.hdim_slot_router.batch_create_slots(
+            slots, routing_keys = self.hdim_slot_router.batch_create_slots(
                 hidden_states=h,
                 k_cache=k,
                 v_cache=v,
@@ -397,6 +397,7 @@ class HAGI(nn.Module):
                 domain_id=0,
             )
             self.msa_registry.batch_register(slots)
+            self.msa_registry.set_routing_keys(routing_keys)
 
             nars_weights = None
             if self.cfg.use_nars and self.nars_msa is not None:
