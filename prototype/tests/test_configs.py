@@ -20,14 +20,16 @@ from prototype.model.hagi import HAGI, HAGIConfig, cross_entropy_loss
 from prototype.model.transformer import TransformerConfig
 from prototype.training.config import config_from_dict, config_to_dict, load_config
 from prototype.training.loop import (
+    LoopConfig,
     latest_checkpoint,
     load_checkpoint,
     resume_into,
     save_checkpoint,
+    train,
 )
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
-SHIPPED = ["baseline.yaml", "gdr.yaml", "colab_t4.yaml"]
+SHIPPED = ["baseline.yaml", "gdr.yaml", "colab_t4.yaml", "local_baseline.yaml"]
 
 
 def _tiny_model() -> HAGI:
@@ -142,6 +144,33 @@ def test_gradient_checkpointing_matches_plain():
     l_ckpt.backward()  # backward through checkpointed blocks must produce finite grads
     grads = [p.grad for p in ckpt_model.parameters() if p.grad is not None]
     assert grads and all(torch.isfinite(g).all() for g in grads)
+
+
+def test_session_steps_stops_and_checkpoints(tmp_path):
+    """--steps gating: each session runs exactly N steps, checkpoints at the
+    session end (labelled = next resume point), and resume continues from there."""
+    torch.manual_seed(0)
+    model = _tiny_model()
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    def get_batch():
+        x = torch.randint(0, 64, (2, 16))
+        return x, x.clone()
+
+    cfg = LoopConfig(max_steps=100, warmup_steps=2, grad_accum_steps=1,
+                     precision="fp32", eval_interval=0, ckpt_interval=0,
+                     log_interval=1000, ckpt_dir=str(tmp_path))
+
+    # Session 1: 3 steps from 0 -> checkpoint labelled 3.
+    train(model, opt, get_batch, cfg, device="cpu", start_step=0, session_steps=3)
+    ck = latest_checkpoint(str(tmp_path))
+    assert ck is not None and ck.name == "step-00000003.pt"
+
+    # Session 2: resume at 3, 2 more steps -> checkpoint labelled 5.
+    resumed = resume_into(model, opt, str(ck))
+    assert resumed == 3
+    train(model, opt, get_batch, cfg, device="cpu", start_step=resumed, session_steps=2)
+    assert latest_checkpoint(str(tmp_path)).name == "step-00000005.pt"
 
 
 def test_resume_restores_model_and_optimizer(tmp_path):

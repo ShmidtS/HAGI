@@ -1,0 +1,65 @@
+# Stage 0 Model A (dense baseline) — full 115M architecture, tuned to TRAIN on a
+# 4GB-VRAM laptop (e.g. RTX A2000 Laptop, Ampere sm86). The MODEL is unchanged
+# from configs/baseline.yaml; only the training shape is reduced to fit + to run
+# as long, monitored, checkpoint-gated sessions.
+#
+# Reduced vs canonical baseline.yaml:
+#   - max_seq_len 512 (not 4096): activations scale with seq; 512 is the main
+#     memory lever. NOTE the model only sees 512-token context when trained here.
+#   - batch_size 1, grad_accum 16 -> effective 8,192 tokens/step.
+#   - paged 8-bit AdamW: optimizer state ~920MB -> ~230MB, and pages to CPU RAM
+#     under pressure (mid-session OOM guard for long runs).
+#   - gradient_checkpointing + ce_chunk_size: cut activation/logit memory.
+#   - compile false: torch.compile/Triton is unreliable on Windows; enable only
+#     if it works on your box.
+#
+# Checkpoint-gated workflow (your control loop):
+#   # first session — run N steps, checkpoint, exit:
+#   python -m prototype.training.train --config configs/local_baseline.yaml \
+#       --data data/fineweb-edu --device cuda --steps 500
+#   # later sessions — continue from the latest checkpoint:
+#   python -m prototype.training.train --config configs/local_baseline.yaml \
+#       --data data/fineweb-edu --device cuda --steps 500 --resume auto
+#
+# train_tokens below is a PLACEHOLDER reduced budget. Set it after measuring real
+# tok/s on your GPU (see docs/CLOUD_TRAINING.md / the smoke command).
+name: local_baseline
+model:
+  vocab_size: 49152
+  hidden_size: 768
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 1
+  use_loop: false
+  use_gdr: false
+  ce_chunk_size: 512
+  gradient_checkpointing: true
+  transformer:
+    num_query_heads: 12
+    num_kv_heads: 4
+    intermediate_size: 2048
+    rope_theta: 10000.0
+    max_seq_len: 4096
+
+training:
+  optimizer: paged_adamw8bit   # falls back instructions in optim.py if bnb missing
+  precision: bf16              # A2000 is Ampere -> bf16 tensor cores + FlashAttention
+  compile: false               # Triton/torch.compile flaky on Windows; try true if it works
+  batch_size: 1
+  grad_accum_steps: 16         # effective batch = 1 * 16 * 512 = 8,192 tokens/step
+  learning_rate: 3.0e-4
+  warmup_steps: 2000
+  weight_decay: 0.1
+  grad_clip: 1.0
+  ckpt_interval: 200           # crash-safety within a session; --steps adds a session-end ckpt
+  seed: 42
+
+data:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"
+  train_tokens: 1_000_000_000  # PLACEHOLDER reduced budget; set after measuring tok/s
+  max_seq_len: 512
+
+eval:
+  every_n_steps: 0             # skip periodic eval locally (no val set; save compute)
+  benchmarks: [arc_challenge, boolq]

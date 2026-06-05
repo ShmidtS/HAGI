@@ -121,6 +121,34 @@ the canonical `5e9` tokens and `262144` tokens/step that is ~19,073 steps. To
 change the budget, edit `train_tokens` (not `max_steps`). The overfit config keeps
 an explicit `max_steps` since it has no token budget.
 
+## Local checkpoint-gated training (small GPU)
+
+For training the full 115M model on a small GPU (e.g. 4GB laptop) under manual
+control, `configs/local_baseline.yaml` reduces only the training shape (seq 512,
+batch 1, paged 8-bit AdamW, gradient checkpointing) — the model is the canonical
+Model A. Each session runs a fixed number of steps, then checkpoints and exits;
+you review and resume when ready:
+
+```bash
+# Session 1 — run 500 steps, checkpoint, exit
+python -m prototype.training.train --config configs/local_baseline.yaml \
+    --data data/fineweb-edu --device cuda --steps 500
+
+# Session N — continue from the latest checkpoint
+python -m prototype.training.train --config configs/local_baseline.yaml \
+    --data data/fineweb-edu --device cuda --steps 500 --resume auto
+```
+
+The log prints `tok/s` each interval — use it to set `data.train_tokens` (which
+derives `max_steps`) against your measured throughput. `--steps` always writes a
+session-end checkpoint labelled with the next resume step, so no work is redone.
+
+Memory levers if it does not fit: lower `data.max_seq_len` (512 → 384/256),
+`optimizer: paged_adamw8bit` (already set — pages optimizer state to CPU RAM on
+pressure), `model.gradient_checkpointing: true` (already set). Honest caveat:
+this fits and runs, but laptop-class throughput makes the full reduced budget a
+long, many-session effort — the run length is set by tokens, not the tooling.
+
 ## Optimizer: AdamW vs Muon
 
 - **Baseline runs use AdamW.** It is the clean control.

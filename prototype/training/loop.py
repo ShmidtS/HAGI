@@ -10,6 +10,7 @@ share the same loop.
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,20 +75,29 @@ def train(
     eval_get_batch: Callable | None = None,
     on_log: Callable[[dict], None] | None = None,
     start_step: int = 0,
+    session_steps: int | None = None,
 ):
     """Run the training loop. Returns the final training loss.
 
     optimizer: torch.optim.Optimizer or CombinedOptimizer (Muon+AdamW).
     on_log: optional callback receiving a metrics dict each log step.
     start_step: resume from this step (LR schedule + intervals are absolute).
+    session_steps: if set, stop after this many steps this run (checkpoint-gated
+        local training). A checkpoint is always written at session end so the next
+        `--resume auto` continues exactly where this one stopped.
     """
     model.to(device)
     model.train()
     use_scaler = cfg.precision == "fp16" and device.startswith("cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
+    end = cfg.max_steps if session_steps is None else min(cfg.max_steps, start_step + session_steps)
     last_loss = float("nan")
-    for step in range(start_step, cfg.max_steps):
+    ran = False
+    t_log = time.time()
+    tokens_since_log = 0
+    for step in range(start_step, end):
+        ran = True
         lr = _lr_at(step, cfg)
         for group in optimizer.param_groups:
             group["lr"] = lr
@@ -96,6 +106,7 @@ def train(
         accum_loss = 0.0
         for _ in range(cfg.grad_accum_steps):
             x, y = get_batch()
+            tokens_since_log += x.numel()
             with _autocast_ctx(cfg.precision, device):
                 _, loss = model(x, targets=y)
                 loss = loss / cfg.grad_accum_steps
@@ -115,11 +126,15 @@ def train(
 
         last_loss = accum_loss
         if step % cfg.log_interval == 0:
-            metrics = {"step": step, "loss": accum_loss, "lr": lr}
+            dt = time.time() - t_log
+            tps = tokens_since_log / dt if dt > 0 else 0.0
+            metrics = {"step": step, "loss": accum_loss, "lr": lr, "tok_per_s": tps}
             if on_log:
                 on_log(metrics)
             else:
-                print(f"step {step:6d} | loss {accum_loss:.4f} | lr {lr:.2e}")
+                print(f"step {step:6d} | loss {accum_loss:.4f} | lr {lr:.2e} | {tps:,.0f} tok/s")
+            t_log = time.time()
+            tokens_since_log = 0
 
         if eval_get_batch is not None and cfg.eval_interval > 0 and step > 0 \
                 and step % cfg.eval_interval == 0:
@@ -129,6 +144,10 @@ def train(
         if cfg.ckpt_interval > 0 and step > 0 and step % cfg.ckpt_interval == 0:
             save_checkpoint(model, optimizer, step, cfg.ckpt_dir)
 
+    # Always checkpoint at session end (labelled `end` = next resume point), so a
+    # gated session boundary is exactly resumable without redoing a step.
+    if ran:
+        save_checkpoint(model, optimizer, end, cfg.ckpt_dir)
     return last_loss
 
 

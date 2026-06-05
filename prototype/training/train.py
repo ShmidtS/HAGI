@@ -52,6 +52,9 @@ def main():
     ap.add_argument("--ckpt-dir", default=None,
                     help="root dir for checkpoints (default: checkpoints/). On cloud, point at "
                          "persistent storage, e.g. /content/drive/MyDrive/hagi or /kaggle/working")
+    ap.add_argument("--steps", type=int, default=None,
+                    help="run at most this many steps this session, then checkpoint and exit "
+                         "(checkpoint-gated local training; re-run with --resume auto to continue)")
     args = ap.parse_args()
 
     # TF32 matmul on Ampere+ — free ~1.3-2x on fp32 paths, harmless on older GPUs.
@@ -103,8 +106,11 @@ def main():
         ckpt_dir=ckpt_dir,
     )
 
+    if args.steps is not None:
+        print(f"session: steps {start_step}..{start_step + args.steps} (then checkpoint + exit)")
+
     train(model, optimizer, get_batch, loop_cfg, device=args.device,
-          eval_get_batch=eval_get_batch, start_step=start_step)
+          eval_get_batch=eval_get_batch, start_step=start_step, session_steps=args.steps)
 
 
 if __name__ == "__main__":

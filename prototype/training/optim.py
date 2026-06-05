@@ -123,9 +123,13 @@ def build_optimizer(model: nn.Module, cfg: dict):
     """Build the optimizer from a training-config dict.
 
     cfg keys:
-        optimizer: "adamw" (default) | "muon"
-        learning_rate, weight_decay, betas, eps  (AdamW)
+        optimizer: "adamw" (default) | "muon" | "adamw8bit" | "paged_adamw8bit"
+        learning_rate, weight_decay, betas, eps  (AdamW / 8-bit AdamW)
         muon_lr, muon_momentum, muon_ns_steps     (Muon, when optimizer=muon)
+
+    The 8-bit variants need bitsandbytes + CUDA; they cut optimizer-state VRAM
+    ~4x for small-GPU training. paged_adamw8bit also spills to CPU RAM on memory
+    pressure (mid-run OOM guard).
     """
     kind = cfg.get("optimizer", "adamw").lower()
     lr = cfg.get("learning_rate", 3e-4)
@@ -145,6 +149,37 @@ def build_optimizer(model: nn.Module, cfg: dict):
             ],
             lr=lr, betas=betas, eps=eps,
         )
+
+    if kind in ("adamw8bit", "paged_adamw8bit"):
+        # 8-bit AdamW (bitsandbytes): optimizer state 32->8 bit (~4x smaller),
+        # freeing VRAM on a small GPU. The paged variant spills state to CPU RAM
+        # only on pressure, preventing mid-run OOM. Embedding/LM-head weights are
+        # kept at 32-bit optimizer precision (bnb best practice — 8-bit moments on
+        # large embeddings can destabilize), via GlobalOptimManager override.
+        try:
+            import bitsandbytes as bnb
+        except ImportError as e:
+            raise SystemExit(
+                "bitsandbytes not installed. `pip install bitsandbytes`. "
+                "On Windows ensure a CUDA build. Or use optimizer: adamw. "
+                f"({e})"
+            ) from e
+
+        decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
+        no_decay = [p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())]
+        cls = bnb.optim.PagedAdamW8bit if kind.startswith("paged") else bnb.optim.AdamW8bit
+        opt = cls(
+            [
+                {"params": decay, "weight_decay": wd},
+                {"params": no_decay, "weight_decay": 0.0},
+            ],
+            lr=lr, betas=betas, eps=eps,
+        )
+        mng = bnb.optim.GlobalOptimManager.get_instance()
+        for module in model.modules():
+            if isinstance(module, nn.Embedding):
+                mng.register_module_override(module, "weight", {"optim_bits": 32})
+        return opt
 
     if kind == "muon":
         muon_params = [p for n, p in named if _is_muon_param(n, p)]
