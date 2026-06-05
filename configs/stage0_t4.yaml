@@ -1,0 +1,57 @@
+# Stage 0 — Model A (dense baseline), the REAL run, sized for a 16GB T4
+# (Colab / Kaggle). Same Model A as baseline.yaml; T4-tuned training shape.
+#
+# Reduced vs canonical baseline.yaml (to fit a 16GB T4):
+#   - precision fp16 (T4 has no bf16 tensor cores)
+#   - max_seq_len 1024 (not 4096): trains a 1024-context model. The full 4096
+#     context needs a 24GB+ Ampere GPU — revisit at Stage 3 / on a bigger GPU.
+#   - batch 4 x grad_accum 8 -> effective 32,768 tokens/step.
+#
+# Target: 1B tokens (~30,518 steps). At ~16,700 tok/s on a T4 that is ~17h of
+# compute — run it in checkpoint-gated sessions with --steps + --resume auto.
+# This is enough to clear the Stage 0 gate (stable, val perplexity < 20). Raise
+# train_tokens to 2.3e9 (Chinchilla) for a stronger baseline once 1B looks good.
+#
+# Cross-session resume: pass --hf-repo <user/repo> so each checkpoint mirrors to
+# HF Hub; a fresh Colab/Kaggle session with --resume auto pulls the latest back.
+name: stage0_t4
+model:
+  vocab_size: 49152
+  hidden_size: 768
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 1
+  use_loop: false
+  use_gdr: false
+  ce_chunk_size: 1024
+  gradient_checkpointing: true
+  transformer:
+    num_query_heads: 12
+    num_kv_heads: 4
+    intermediate_size: 2048
+    rope_theta: 10000.0
+    max_seq_len: 1024
+
+training:
+  optimizer: adamw           # Muon needs bf16/fp32 — keep adamw on a fp16 T4
+  precision: fp16
+  compile: true
+  batch_size: 4
+  grad_accum_steps: 8        # effective batch = 4 * 8 * 1024 = 32,768 tokens/step
+  learning_rate: 3.0e-4
+  warmup_steps: 1000
+  weight_decay: 0.1
+  grad_clip: 1.0
+  ckpt_interval: 1000        # ~every 33 min on a T4; each checkpoint mirrors to HF
+  log_interval: 50
+  seed: 42
+
+data:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"
+  train_tokens: 1_000_000_000   # Stage 0 first target (~17h T4); raise to 2.3e9 later
+  max_seq_len: 1024
+
+eval:
+  every_n_steps: 0           # no periodic eval during training (run evaluate.py after)
+  benchmarks: [arc_challenge, boolq, hellaswag]

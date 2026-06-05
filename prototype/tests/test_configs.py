@@ -29,7 +29,7 @@ from prototype.training.loop import (
 )
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
-SHIPPED = ["baseline.yaml", "gdr.yaml", "colab_t4.yaml", "local_baseline.yaml"]
+SHIPPED = ["baseline.yaml", "gdr.yaml", "colab_t4.yaml", "local_baseline.yaml", "stage0_t4.yaml"]
 
 
 def _tiny_model() -> HAGI:
@@ -171,6 +171,26 @@ def test_session_steps_stops_and_checkpoints(tmp_path):
     assert resumed == 3
     train(model, opt, get_batch, cfg, device="cpu", start_step=resumed, session_steps=2)
     assert latest_checkpoint(str(tmp_path)).name == "step-00000005.pt"
+
+
+def test_on_checkpoint_callback_receives_paths(tmp_path):
+    """on_checkpoint fires for every saved checkpoint (the hook used to mirror to
+    HF Hub). Here it must receive the session-end checkpoint path."""
+    torch.manual_seed(0)
+    model = _tiny_model()
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    def get_batch():
+        x = torch.randint(0, 64, (2, 16))
+        return x, x.clone()
+
+    cfg = LoopConfig(max_steps=100, warmup_steps=1, grad_accum_steps=1, precision="fp32",
+                     eval_interval=0, ckpt_interval=0, log_interval=1000, ckpt_dir=str(tmp_path))
+
+    seen: list[str] = []
+    train(model, opt, get_batch, cfg, device="cpu", start_step=0, session_steps=2,
+          on_checkpoint=seen.append)
+    assert seen and seen[-1].endswith("step-00000002.pt")
 
 
 def test_resume_restores_model_and_optimizer(tmp_path):

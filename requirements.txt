@@ -7,6 +7,7 @@ transformers>=4.40
 datasets>=2.19
 tokenizers>=0.19
 safetensors>=0.4
+huggingface_hub>=0.23    # checkpoint mirroring to the Hub (prototype/training/hf_sync.py)
 einops>=0.8
 pyyaml>=6.0
 tqdm>=4.66

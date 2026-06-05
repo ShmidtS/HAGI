@@ -55,6 +55,10 @@ def main():
     ap.add_argument("--steps", type=int, default=None,
                     help="run at most this many steps this session, then checkpoint and exit "
                          "(checkpoint-gated local training; re-run with --resume auto to continue)")
+    ap.add_argument("--hf-repo", default=None,
+                    help="HF Hub model repo id (e.g. user/hagi-stage0) to mirror checkpoints to. "
+                         "On --resume auto with no local checkpoint, the latest is pulled from here. "
+                         "Needs a write token in HF_TOKEN. Enables cross-session/cross-machine resume.")
     args = ap.parse_args()
 
     # TF32 matmul on Ampere+ — free ~1.3-2x on fp32 paths, harmless on older GPUs.
@@ -73,7 +77,15 @@ def main():
     ckpt_dir = f"{args.ckpt_dir or 'checkpoints'}/{cfg['name']}"
     start_step = 0
     if args.resume:
-        path = latest_checkpoint(ckpt_dir) if args.resume == "auto" else args.resume
+        if args.resume == "auto":
+            path = latest_checkpoint(ckpt_dir)
+            if path is None and args.hf_repo:
+                # No local checkpoint — try to continue from the HF mirror.
+                from prototype.training.hf_sync import pull_latest_checkpoint
+                pull_latest_checkpoint(args.hf_repo, ckpt_dir)
+                path = latest_checkpoint(ckpt_dir)
+        else:
+            path = args.resume
         if path is not None:
             start_step = resume_into(model, optimizer, str(path), device=args.device)
             print(f"resumed from {path} at step {start_step}")
@@ -110,8 +122,14 @@ def main():
     if args.steps is not None:
         print(f"session: steps {start_step}..{start_step + args.steps} (then checkpoint + exit)")
 
+    on_checkpoint = None
+    if args.hf_repo:
+        from prototype.training.hf_sync import push_checkpoint
+        on_checkpoint = lambda p: push_checkpoint(p, args.hf_repo)  # noqa: E731
+
     train(model, optimizer, get_batch, loop_cfg, device=args.device,
-          eval_get_batch=eval_get_batch, start_step=start_step, session_steps=args.steps)
+          eval_get_batch=eval_get_batch, start_step=start_step, session_steps=args.steps,
+          on_checkpoint=on_checkpoint)
 
 
 if __name__ == "__main__":

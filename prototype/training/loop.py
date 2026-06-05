@@ -76,6 +76,7 @@ def train(
     on_log: Callable[[dict], None] | None = None,
     start_step: int = 0,
     session_steps: int | None = None,
+    on_checkpoint: Callable[[str], None] | None = None,
 ):
     """Run the training loop. Returns the final training loss.
 
@@ -85,6 +86,8 @@ def train(
     session_steps: if set, stop after this many steps this run (checkpoint-gated
         local training). A checkpoint is always written at session end so the next
         `--resume auto` continues exactly where this one stopped.
+    on_checkpoint: optional callback receiving each saved checkpoint path (used to
+        mirror checkpoints to HF Hub for cross-session/cross-machine resume).
     """
     model.to(device)
     model.train()
@@ -142,12 +145,16 @@ def train(
             print(f"step {step:6d} | val_loss {val:.4f}")
 
         if cfg.ckpt_interval > 0 and step > 0 and step % cfg.ckpt_interval == 0:
-            save_checkpoint(model, optimizer, step, cfg.ckpt_dir)
+            p = save_checkpoint(model, optimizer, step, cfg.ckpt_dir)
+            if on_checkpoint:
+                on_checkpoint(p)
 
     # Always checkpoint at session end (labelled `end` = next resume point), so a
     # gated session boundary is exactly resumable without redoing a step.
     if ran:
-        save_checkpoint(model, optimizer, end, cfg.ckpt_dir)
+        p = save_checkpoint(model, optimizer, end, cfg.ckpt_dir)
+        if on_checkpoint:
+            on_checkpoint(p)
     return last_loss
 
 
@@ -161,10 +168,11 @@ def _unwrap(model):
     return getattr(model, "_orig_mod", model)
 
 
-def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str):
+def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str) -> str:
     """Write a checkpoint. Config is stored as a plain dict (not a pickled
     dataclass) so the file loads under torch's default weights_only=True.
-    Optimizer state is included when provided, enabling exact resume."""
+    Optimizer state is included when provided, enabling exact resume. Returns the
+    checkpoint path."""
     from prototype.training.config import config_to_dict
 
     base = _unwrap(model)
@@ -176,6 +184,7 @@ def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str):
         payload["optimizer"] = optimizer.state_dict()
     torch.save(payload, path)
     print(f"checkpoint -> {path}")
+    return str(path)
 
 
 def load_checkpoint(path: str, device: str = "cpu") -> tuple[HAGI, int]:
