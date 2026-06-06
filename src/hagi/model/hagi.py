@@ -208,6 +208,7 @@ class HAGI(nn.Module):
         past_key_values=None,
         use_cache: bool = False,
         training_mode: bool = False,
+        weights: dict[str, float] | None = None,
     ):
         """Returns logits, or (logits, loss) when targets are provided.
 
@@ -231,6 +232,9 @@ class HAGI(nn.Module):
         if self.training:
             self._step += 1
         moe_aux_losses: list[torch.Tensor] = []
+        collect_moe_aux = training_mode and (weights is None or weights.get("w_moe", 0.0) != 0.0)
+        need_iso = training_mode and (weights is None or weights.get("w_iso", 0.0) != 0.0)
+        need_quality = training_mode and (weights is None or weights.get("w_quality", 0.0) != 0.0)
 
         def run_block(block, hidden, past=None) -> Any:
             if use_gradient_checkpointing:
@@ -247,7 +251,7 @@ class HAGI(nn.Module):
                 result = block(hidden, cos, sin, gradient_checkpointing=self.cfg.gradient_checkpointing)
             if not use_cache and isinstance(result, tuple) and len(result) == 2:
                 h_out, aux_loss = result
-                if isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0 and training_mode:
+                if isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0 and collect_moe_aux:
                     moe_aux_losses.append(aux_loss)
                 return h_out
             return result
@@ -289,7 +293,7 @@ class HAGI(nn.Module):
                     num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                     tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
                     gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
-                    pre_gdr_h = h.clone()
+                    pre_gdr_h = h.clone() if need_iso else None
                     h = gdr_state["fused"]
                     h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
                 else:
@@ -322,7 +326,7 @@ class HAGI(nn.Module):
                                 return_state=True,
                                 delay_step=current_step,
                             )
-                            pre_gdr_h = h.clone()
+                            pre_gdr_h = h.clone() if need_iso else None
                             h = gdr_state["fused"]
                             gdr_output = h
                             past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
@@ -337,7 +341,7 @@ class HAGI(nn.Module):
                         num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                         tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
                         gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
-                        pre_gdr_h = h.clone()
+                        pre_gdr_h = h.clone() if need_iso else None
                         h = gdr_state["fused"]
                         gdr_output = h
                         for block in self.reasoning:
@@ -431,7 +435,7 @@ class HAGI(nn.Module):
                 h = run_block(block, h)  # type: ignore[assignment]
             layer_idx += 1
 
-        pre_logits_hidden = h.clone() if training_mode and self.quality_head is not None else None
+        pre_logits_hidden = h.clone() if need_quality and self.quality_head is not None else None
         h = self.final_norm(h)
         logits = self.lm_head(h)
 
@@ -451,7 +455,7 @@ class HAGI(nn.Module):
             if moe_aux_losses:
                 result["moe_aux_loss"] = sum(moe_aux_losses)
                 result["num_moe_layers"] = len(moe_aux_losses)
-            if gdr_state is not None and isinstance(gdr_state, dict):
+            if (weights is None or weights.get("w_aux", 0.0) != 0.0) and gdr_state is not None and isinstance(gdr_state, dict):
                 if "fused" in gdr_state or "features" in gdr_state:
                     # inject batch-index labels for contrastive auxiliary loss
                     if "labels" not in gdr_state:
@@ -461,8 +465,7 @@ class HAGI(nn.Module):
                         result["auxiliary_output"] = gdr_state
                     else:
                         result["auxiliary_output"] = {"features": gdr_state["fused"], "labels": gdr_state["labels"]}
-            if gdr_state is not None:
-                assert pre_gdr_h is not None
+            if pre_gdr_h is not None and gdr_state is not None:
                 # Use hidden states before/after HDIM for meaningful L_iso
                 result["invariant_src"] = pre_gdr_h
                 if "fused" in gdr_state and gdr_state["fused"] is not None:
@@ -472,7 +475,7 @@ class HAGI(nn.Module):
             if msa_slot_ids is not None:
                 result["msa_slot_ids"] = msa_slot_ids
                 result["msa_scores"] = msa_scores
-            if self.quality_head is not None:
+            if pre_logits_hidden is not None and self.quality_head is not None:
                 result["quality_score"] = self.quality_head(pre_logits_hidden).squeeze(-1)
             return result
 

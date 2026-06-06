@@ -969,7 +969,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             tokens = batch.tokens if isinstance(batch, PrefixLMBatch) else batch
             t_fwd_start = time.perf_counter()
             with autocast_ctx(precision, args.device):
-                output = train_model(tokens, targets=targets, training_mode=effective_weights is not None)
+                output = train_model(tokens, targets=targets, training_mode=effective_weights is not None, weights=effective_weights)
                 if not train_cfg.get("use_gdr_aux", False):
                     if isinstance(output, dict):
                         output.pop("auxiliary_output", None)
