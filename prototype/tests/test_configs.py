@@ -29,7 +29,8 @@ from prototype.training.loop import (
 )
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
-SHIPPED = ["baseline.yaml", "gdr.yaml", "colab_t4.yaml", "local_baseline.yaml", "stage0_t4.yaml"]
+SHIPPED = ["baseline.yaml", "gdr.yaml", "colab_t4.yaml", "local_baseline.yaml",
+           "stage0_t4.yaml", "stage0_a100.yaml"]
 
 
 def _tiny_model() -> HAGI:

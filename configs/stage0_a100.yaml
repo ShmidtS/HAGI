@@ -1,0 +1,54 @@
+# Stage 0 — Model A (dense baseline), the REAL run at full quality, for an A100
+# (Colab paid). Same Model A; canonical 4096 context + bf16 — no T4 compromises.
+#
+# vs stage0_t4.yaml: bf16 (A100 has bf16 tensor cores + FlashAttention-2),
+# seq 4096 (full context, not 1024), batch 16 x accum 4 = 262,144 tokens/step.
+#
+# Budget: 1B tokens (~3,815 steps). On an A100 at ~100k tok/s that's ~3h ≈ ~34
+# Colab compute units. Raise train_tokens to 2.3e9 (Chinchilla, ~77 units) if you
+# want a stronger baseline and have the units. Reuses the SAME Drive shards as the
+# T4 run — the loader windows any seq length, so no re-tokenize needed.
+#
+# Memory (A100 40GB): fits comfortably at batch 16, seq 4096. If you somehow OOM,
+# set gradient_checkpointing: true or lower batch_size.
+name: stage0_a100
+model:
+  vocab_size: 49152
+  hidden_size: 768
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 1
+  use_loop: false
+  use_gdr: false
+  ce_chunk_size: 4096
+  gradient_checkpointing: false   # A100 has room; faster without recompute
+  transformer:
+    num_query_heads: 12
+    num_kv_heads: 4
+    intermediate_size: 2048
+    rope_theta: 10000.0
+    max_seq_len: 4096
+
+training:
+  optimizer: adamw
+  precision: bf16               # A100 bf16 tensor cores + FlashAttention-2
+  compile: true
+  batch_size: 16
+  grad_accum_steps: 4          # effective batch = 16 * 4 * 4096 = 262,144 tokens/step
+  learning_rate: 3.0e-4
+  warmup_steps: 400
+  weight_decay: 0.1
+  grad_clip: 1.0
+  ckpt_interval: 500           # A100 is fast — ~every 10 min; mirrors to HF
+  log_interval: 25
+  seed: 42
+
+data:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"
+  train_tokens: 1_000_000_000   # ~3,815 steps, ~3h, ~34 units; raise to 2.3e9 for Chinchilla
+  max_seq_len: 4096
+
+eval:
+  every_n_steps: 0
+  benchmarks: [arc_challenge, boolq, hellaswag]
