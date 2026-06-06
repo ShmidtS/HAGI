@@ -62,8 +62,11 @@ def total_loss(
     return total
 
 
-def compute_auxiliary_loss(aux_output) -> torch.Tensor:
-    """Compute supervised contrastive auxiliary loss when pair labels are available."""
+def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
+    """Compute supervised contrastive auxiliary loss when pair labels are available.
+
+    Subsamples to ``max_samples`` tokens to keep the O(N^2) similarity matrix bounded.
+    """
     if aux_output is None:
         return torch.tensor(0.0)
 
@@ -97,9 +100,16 @@ def compute_auxiliary_loss(aux_output) -> torch.Tensor:
 
     flat = features.reshape(-1, features.size(-1))
     labels = labels.to(device=features.device).reshape(-1)
-    if flat.size(0) != labels.numel() or flat.size(0) < 2:
+    n = flat.size(0)
+    if n != labels.numel() or n < 2:
         logger.debug("auxiliary contrastive labels invalid; L_aux set to 0")
         return flat.new_zeros(())
+
+    # Subsample if too many tokens
+    if n > max_samples:
+        idx = torch.randperm(n, device=flat.device)[:max_samples]
+        flat = flat[idx]
+        labels = labels[idx]
 
     flat_norm = F.normalize(flat, dim=-1)
     logits = torch.mm(flat_norm, flat_norm.t()) / 0.07
