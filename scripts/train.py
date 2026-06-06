@@ -225,8 +225,8 @@ def scheduled_weight(step: int, start: float, final: float, warmup_steps: int, m
 def autocast_ctx(precision: str, device: str):
     if precision == "fp32" or not device.startswith("cuda"):
         return torch.autocast(device_type="cpu", enabled=False)
-    if precision == "manual_fp16":
-        # Manual FP16: model is already in float16, no autocast needed
+    if precision in ("manual_fp16", "manual_bf16"):
+        # Manual: model is already in target dtype, no autocast needed
         return torch.autocast(device_type="cpu", enabled=False)
     dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     return torch.autocast(device_type="cuda", dtype=dtype)
@@ -553,13 +553,13 @@ def update_ema(model: torch.nn.Module, model_ema: torch.nn.Module, decay: float)
             ema_buffer.copy_(buffer)
 
 
-def magic_norm_clip(model: torch.nn.Module, max_norm: float, blade_count: int = 8) -> float:
+def magic_norm_clip(model: torch.nn.Module, max_norm: float, blade_count: int = 8) -> torch.Tensor:
     gdr = getattr(model, "gdr", None)
     if gdr is None or max_norm <= 0:
-        return 0.0
+        return torch.tensor(0.0, device=next(model.parameters()).device, dtype=torch.float32)
     first_param = next((p for p in gdr.parameters() if p.grad is not None), None)
     if first_param is None:
-        return 0.0
+        return torch.tensor(0.0, device=next(model.parameters()).device, dtype=torch.float32)
     max_norm_t = first_param.new_full((), max_norm, dtype=torch.float32)
     max_seen_t = first_param.new_zeros((), dtype=torch.float32)
     for param in gdr.parameters():
@@ -572,7 +572,7 @@ def magic_norm_clip(model: torch.nn.Module, max_norm: float, blade_count: int = 
         max_seen_t = torch.maximum(max_seen_t, local_max)
         if local_max > max_norm:
             view.mul_((max_norm_t / norms).clamp(max=1.0).to(dtype=view.dtype))
-    return float(max_seen_t.item())
+    return max_seen_t
 
 
 def save_training_checkpoint(
@@ -728,6 +728,9 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     if precision == "manual_fp16" and args.device.startswith("cuda"):
         model = model.half()
         print("Using manual FP16: model converted to float16, no autocast")
+    if precision == "manual_bf16" and args.device.startswith("cuda"):
+        model = model.to(torch.bfloat16)
+        print("Using manual BF16: model converted to bfloat16, no autocast")
 
     for group in optimizer.param_groups:
         group["initial_lr"] = group["lr"]
@@ -877,6 +880,10 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         model = model.half()
         model_ema = model_ema.half()
         print("Using manual FP16: model converted to float16, no autocast")
+    if precision == "manual_bf16" and args.device.startswith("cuda"):
+        model = model.to(torch.bfloat16)
+        model_ema = model_ema.to(torch.bfloat16)
+        print("Using manual BF16: model converted to bfloat16, no autocast")
 
     print_model_summary(model, model_cfg, args.device, use_prefix_lm, composite_weights is not None)
     if args.dry_run:
@@ -1076,7 +1083,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             print(
                 f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
                 f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm_val:.2e} | "
-                f"magic_norm_max_grad {magic_norm_max_grad:.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text} | "
+                f"magic_norm_max_grad {magic_norm_max_grad.item():.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text} | "
                 f"fwd {t_forward*1000:.1f}ms | bwd {t_backward*1000:.1f}ms | opt {t_opt*1000:.1f}ms | "
                 f"unscale {t_unscale*1000:.1f}ms | clip {t_clip*1000:.1f}ms | magic {t_magic*1000:.1f}ms | opt_step {t_opt_step*1000:.1f}ms"
             )

@@ -44,3 +44,5 @@ checkpoints/
 *.pth
 *.ckpt
 *.log
+torch-compile.bat
+profile_*

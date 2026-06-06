@@ -67,16 +67,31 @@ class MoESwiGLU(nn.Module):
         for k_idx in range(self.top_k):
             expert_idx = top_k_indices[:, k_idx]  # [B*T]
             probs = top_k_probs[:, k_idx]  # [B*T]
-            for e_idx, expert in enumerate(self.experts):
-                mask = expert_idx == e_idx
-                # Avoid boolean indexing (flat[mask]) — it causes IndexBackward0 ->
-                # _index_put_impl_ sync (~18ms per call). Use torch.where + index_select.
-                indices = torch.where(mask)[0]
-                if indices.numel() > 0:
-                    tokens = flat.index_select(0, indices)
-                    expert_out = expert(tokens)
-                    idx = indices.unsqueeze(-1).expand(-1, expert_out.size(-1))
-                    output.scatter_add_(0, idx, expert_out * probs.index_select(0, indices).unsqueeze(-1))
+            if self.top_k == 1:
+                sorted_expert_idx, sort_indices = torch.sort(expert_idx)
+                inv_perm = torch.argsort(sort_indices)
+                sorted_flat = flat.index_select(0, sort_indices)
+                sorted_probs = probs.index_select(0, sort_indices)
+                counts = torch.bincount(sorted_expert_idx, minlength=self.num_experts)
+                boundaries = torch.cat([torch.zeros(1, device=flat.device, dtype=torch.long), counts.cumsum(0)]).cpu()
+                sorted_output = torch.zeros_like(sorted_flat)
+                for e_idx, expert in enumerate(self.experts):
+                    start = int(boundaries[e_idx])
+                    end = int(boundaries[e_idx + 1])
+                    if start == end:
+                        continue
+                    expert_out = expert(sorted_flat[start:end])
+                    sorted_output[start:end] = expert_out * sorted_probs[start:end].unsqueeze(-1)
+                output.add_(sorted_output.index_select(0, inv_perm))
+            else:
+                for e_idx, expert in enumerate(self.experts):
+                    mask = expert_idx == e_idx
+                    indices = torch.where(mask)[0]
+                    if indices.numel() > 0:
+                        tokens = flat.index_select(0, indices)
+                        expert_out = expert(tokens)
+                        idx = indices.unsqueeze(-1).expand(-1, expert_out.size(-1))
+                        output.scatter_add_(0, idx, expert_out * probs.index_select(0, indices).unsqueeze(-1))
 
         output = output.view(B, T, D)
 

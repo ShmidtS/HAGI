@@ -14,7 +14,6 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .binary_factorized import BinaryFactorizedLinear
-from .triton_kernels import TRITON_AVAILABLE, rmsnorm_triton
 
 
 @dataclass
@@ -50,15 +49,15 @@ class TransformerConfig:
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6, dtype: torch.dtype = torch.float32):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.weight = nn.Parameter(torch.ones(dim, dtype=dtype))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if TRITON_AVAILABLE and x.is_cuda:
-            return rmsnorm_triton(x, self.weight, self.eps)
-        w = self.weight.to(x.dtype)
+        w = self.weight
+        if w.dtype != x.dtype:
+            w = w.to(x.dtype)
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * w
 
 

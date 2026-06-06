@@ -132,7 +132,7 @@ training:
   muon_ns_steps: 1
   optimizer: muon_adamw
   pin_memory: true
-  precision: fp16
+  precision: manual_bf16
   schedule: cosine
   seed: 42
   use_prefix_lm: false
