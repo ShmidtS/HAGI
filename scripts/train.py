@@ -373,6 +373,7 @@ def build_full_dataloader(
             pin_memory=pin_memory,
             dtype=dtype,
             seed=int(train_cfg.get("seed", 0)),
+            preload=True,
         )
         eval_path = resolve_eval_path(data_cfg, data_dir)
         eval_loader = (

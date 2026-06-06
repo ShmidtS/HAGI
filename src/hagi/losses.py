@@ -62,12 +62,10 @@ def total_loss(
     return total
 
 
-def compute_auxiliary_loss(aux_output, max_samples: int = 256, grad_scale: float = 0.1) -> torch.Tensor:
+def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
     """Compute supervised contrastive auxiliary loss when pair labels are available.
 
     Subsamples to ``max_samples`` tokens to keep the O(N^2) similarity matrix bounded.
-    ``grad_scale`` scales the returned loss so its gradients do not dominate the
-    cross-entropy gradient.
     """
     if aux_output is None:
         return torch.tensor(0.0)
@@ -118,16 +116,14 @@ def compute_auxiliary_loss(aux_output, max_samples: int = 256, grad_scale: float
     logits = logits - logits.max(dim=1, keepdim=True).values.detach()
     self_mask = torch.eye(logits.size(0), dtype=torch.bool, device=logits.device)
     positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & ~self_mask
-    if not positive_mask.any():
-        logger.debug("auxiliary contrastive positive pairs missing; L_aux set to 0")
-        return flat.new_zeros(())
 
     exp_logits = torch.exp(logits).masked_fill(self_mask, 0.0)
     log_prob = logits - exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12).log()
     positive_count = positive_mask.sum(dim=1)
     valid = positive_count > 0
-    loss = -(log_prob * positive_mask).sum(dim=1)[valid].div(positive_count[valid]).mean()
-    return loss * grad_scale
+    loss = -(log_prob * positive_mask).sum(dim=1)
+    loss = (loss / positive_count.clamp_min(1)) * valid.float()
+    return loss.sum() / valid.sum().clamp_min(1)
 
 
 def _as_logits(output: torch.Tensor | tuple[Any, ...] | dict[str, Any]) -> torch.Tensor:
@@ -203,7 +199,6 @@ def composite_loss(
     precomputed_loss: torch.Tensor | None = None,
     moe_aux_loss: torch.Tensor | None = None,
     num_moe_layers: int | torch.Tensor | None = None,
-    grad_scale: float = 0.1,
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
     if (
@@ -218,6 +213,15 @@ def composite_loss(
         invariant_src = model_output.get("invariant_src")
     if invariant_tgt is None and isinstance(model_output, dict):
         invariant_tgt = model_output.get("invariant_tgt")
+    # Fallback: if model_output is None but auxiliary_output is a dict with these keys
+    if invariant_src is None and isinstance(auxiliary_output, dict):
+        invariant_src = auxiliary_output.get("invariant_src")
+    if invariant_tgt is None and isinstance(auxiliary_output, dict):
+        invariant_tgt = auxiliary_output.get("invariant_tgt")
+    if moe_aux_loss is None and isinstance(auxiliary_output, dict):
+        moe_aux_loss = auxiliary_output.get("moe_aux_loss")
+    if num_moe_layers is None and isinstance(auxiliary_output, dict):
+        num_moe_layers = auxiliary_output.get("num_moe_layers")
 
     merged_weights = {"w_ce": 1.0, "w_aux": 0.1, "w_iso": 0.01, "w_moe": 0.0}
     if weights is not None:
@@ -230,7 +234,11 @@ def composite_loss(
     l_total = merged_weights["w_ce"] * l_ce
     result = {"L_CE": l_ce}
     if merged_weights.get("w_aux", 0.0) != 0.0 and auxiliary_output is not None:
-        l_aux = compute_auxiliary_loss(auxiliary_output, grad_scale=grad_scale).to(device=logits.device, dtype=logits.dtype)
+        # If auxiliary_output is a dict containing nested "auxiliary_output", unwrap it
+        aux_payload = auxiliary_output
+        if isinstance(auxiliary_output, dict) and "auxiliary_output" in auxiliary_output:
+            aux_payload = auxiliary_output["auxiliary_output"]
+        l_aux = compute_auxiliary_loss(aux_payload).to(device=logits.device, dtype=logits.dtype)
         l_total = l_total + merged_weights["w_aux"] * l_aux
         result["L_aux"] = l_aux
     else:

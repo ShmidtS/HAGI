@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Any, Sequence, cast
 
@@ -28,6 +29,7 @@ class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
         seq_len: int,
         dtype: str | np.dtype[Any] = "uint16",
         seed: int = 0,
+        preload: bool = True,
     ) -> None:
         if not mix:
             raise ValueError("mix must not be empty")
@@ -36,16 +38,19 @@ class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
             raise ValueError("seq_len must be positive")
         self.dtype = dtype
         self.seed = int(seed)
+        self.preload = bool(preload)
         self.paths: list[Path] = []
         self._lengths: list[int] = []
         weights: list[float] = []
-        arrays: list[np.memmap[Any, Any] | None] = []
+        arrays: list[np.ndarray[Any, Any] | None] = []
         for path, weight in mix:
             weight = float(weight)
             if not np.isfinite(weight) or weight <= 0.0:
                 raise ValueError("weight must be positive and finite")
             path = Path(path)
             array = np.memmap(path, dtype=self.dtype, mode="r")
+            if self.preload:
+                array = np.asarray(array)
             length = len(array)
             if length <= self.seq_len:
                 raise ValueError("source length must be greater than seq_len")
@@ -58,10 +63,12 @@ class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
         self._total_length = sum(length - self.seq_len for length in self._lengths)
         self._arrays = arrays
 
-    def _array(self, source_index: int) -> np.memmap[Any, Any]:
+    def _array(self, source_index: int) -> np.ndarray[Any, Any]:
         array = self._arrays[source_index]
         if array is None:
             array = np.memmap(self.paths[source_index], dtype=self.dtype, mode="r")
+            if self.preload:
+                array = np.asarray(array)
             self._arrays[source_index] = array
         return array
 
@@ -71,19 +78,20 @@ class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
     def __getitem__(self, index: int) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        rng = np.random.default_rng(self.seed + int(index))
-        source_index = int(rng.choice(len(self.paths), p=self.weights))
+        rng = random.Random(self.seed + int(index))
+        source_index = rng.choices(range(len(self.paths)), weights=self.weights.tolist(), k=1)[0]
         array = self._array(source_index)
         max_start = len(array) - self.seq_len
         if max_start <= 0:
             raise ValueError("memmap dataset is too small")
-        start = int(rng.integers(0, max_start))
+        start = rng.randrange(0, max_start)
         chunk = np.asarray(array[start : start + self.seq_len + 1], dtype=np.int64)
         return chunk[:-1], chunk[1:]
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
-        state["_arrays"] = [None for _ in self.paths]
+        if not self.preload:
+            state["_arrays"] = [None for _ in self.paths]
         return state
 
 
@@ -101,10 +109,11 @@ def get_mixed_memmap_dataloader(
     pin_memory: bool = True,
     dtype: str | np.dtype[Any] = "uint16",
     seed: int = 0,
+    preload: bool = True,
 ) -> Any:
     if torch is None or DataLoader is None:
         raise ImportError("torch is required for get_mixed_memmap_dataloader")
-    dataset = WeightedMemmapDataset(mix, seq_len=seq_len, dtype=dtype, seed=seed)
+    dataset = WeightedMemmapDataset(mix, seq_len=seq_len, dtype=dtype, seed=seed, preload=preload)
     kwargs: dict[str, Any] = {
         "batch_size": batch_size,
         "shuffle": False,

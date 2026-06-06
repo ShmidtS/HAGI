@@ -460,14 +460,13 @@ class HAGI(nn.Module):
                     if any(k in gdr_state for k in ("features", "embeddings", "output")):
                         result["auxiliary_output"] = gdr_state
                     else:
-                        # detach features so L_aux only trains HDIM, not transformer layers
-                        result["auxiliary_output"] = {"features": gdr_state["fused"].detach(), "labels": gdr_state["labels"]}
+                        result["auxiliary_output"] = {"features": gdr_state["fused"], "labels": gdr_state["labels"]}
             if gdr_state is not None:
                 assert pre_gdr_h is not None
-                if "invariant" in gdr_state and gdr_state["invariant"] is not None:
-                    result["invariant_src"] = gdr_state["invariant"]
-                    if "target_invariant" in gdr_state and gdr_state["target_invariant"] is not None:
-                        result["invariant_tgt"] = gdr_state["target_invariant"]
+                # Use hidden states before/after HDIM for meaningful L_iso
+                result["invariant_src"] = pre_gdr_h
+                if "fused" in gdr_state and gdr_state["fused"] is not None:
+                    result["invariant_tgt"] = gdr_state["fused"]
             if pre_logits_hidden is not None:
                 result["model_output"] = pre_logits_hidden
             if msa_slot_ids is not None:

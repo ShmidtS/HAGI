@@ -69,11 +69,14 @@ class MoESwiGLU(nn.Module):
             probs = top_k_probs[:, k_idx]  # [B*T]
             for e_idx, expert in enumerate(self.experts):
                 mask = expert_idx == e_idx
-                if mask.any():
-                    tokens = flat[mask]
+                # Avoid boolean indexing (flat[mask]) — it causes IndexBackward0 ->
+                # _index_put_impl_ sync (~18ms per call). Use torch.where + index_select.
+                indices = torch.where(mask)[0]
+                if indices.numel() > 0:
+                    tokens = flat.index_select(0, indices)
                     expert_out = expert(tokens)
-                    idx = mask.nonzero(as_tuple=True)[0].unsqueeze(-1).expand(-1, expert_out.size(-1))
-                    output.scatter_add_(0, idx, expert_out * probs[mask].unsqueeze(-1))
+                    idx = indices.unsqueeze(-1).expand(-1, expert_out.size(-1))
+                    output.scatter_add_(0, idx, expert_out * probs.index_select(0, indices).unsqueeze(-1))
 
         output = output.view(B, T, D)
 

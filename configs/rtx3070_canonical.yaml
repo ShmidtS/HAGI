@@ -43,7 +43,7 @@ data:
   - name: openwebtext
     path: openwebtext.bin
     weight: 0.02
-  num_workers: 0
+  num_workers: 4
   packing: bfd
   pin_memory: true
   tokenizer: HuggingFaceTB/SmolLM2-135M
@@ -105,12 +105,12 @@ model:
 name: rtx3070_canonical
 training:
   learning_rate: 0.0002
-  batch_size: 2
+  batch_size: 8
   ckpt_interval: 1000
   composite_loss:
-    w_aux: 0.05
+    w_aux: 0.01
     w_ce: 1.0
-    w_iso: 0.005
+    w_iso: 0.05
     w_moe: 0.005
   use_gdr_aux: true
   cooldown_frac: 0.05
@@ -119,7 +119,7 @@ training:
     start_step: 800
   eval_interval: 0
   eval_samples: 500
-  grad_accum_steps: 8
+  grad_accum_steps: 2
   grad_clip: 1.0
   gradient_checkpointing: false
   log_interval: 25
@@ -136,6 +136,6 @@ training:
   schedule: cosine
   seed: 42
   use_prefix_lm: false
-  warmup_steps: 400
+  warmup_steps: 200
   weight_decay: 0.1
-  num_workers: 0
+  num_workers: 4
