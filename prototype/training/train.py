@@ -13,6 +13,11 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
+
+# Reduce CUDA allocator fragmentation (helps large transient buffers like the
+# [B*T, vocab] logits). Must be set before torch initializes the CUDA context.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 

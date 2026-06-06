@@ -22,7 +22,7 @@ model:
   use_loop: false
   use_gdr: false
   ce_chunk_size: 4096
-  gradient_checkpointing: false   # A100 has room; faster without recompute
+  gradient_checkpointing: true    # frees activation memory; the seq-4096 logits are large
   transformer:
     num_query_heads: 12
     num_kv_heads: 4
@@ -34,8 +34,8 @@ training:
   optimizer: adamw
   precision: bf16               # A100 bf16 tensor cores + FlashAttention-2
   compile: true
-  batch_size: 16
-  grad_accum_steps: 4          # effective batch = 16 * 4 * 4096 = 262,144 tokens/step
+  batch_size: 8                # seq-4096 logits [B*T, 49152] are the memory limit on 40GB
+  grad_accum_steps: 8          # effective batch = 8 * 8 * 4096 = 262,144 tokens/step (unchanged)
   learning_rate: 3.0e-4
   warmup_steps: 400
   weight_decay: 0.1
