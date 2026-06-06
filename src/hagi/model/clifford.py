@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 
 from hagi.utils import _reordering_sign
-from .triton_kernels import TRITON_AVAILABLE, GeometricProductTriton
+from .triton_kernels import TRITON_AVAILABLE, geometric_product_triton
 
 BLADE_COUNT = 8
 DIM = 3

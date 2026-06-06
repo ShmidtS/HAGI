@@ -67,6 +67,7 @@ class HAGIConfig:
     num_experts: int = 8
     moe_top_k: int = 2
     moe_intermediate_size: int | None = None
+    moe_alpha: float = 0.01
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
 
@@ -78,6 +79,7 @@ class HAGIConfig:
         self.transformer.num_experts = self.num_experts
         self.transformer.moe_top_k = self.moe_top_k
         self.transformer.moe_intermediate_size = self.moe_intermediate_size
+        self.transformer.moe_alpha = self.moe_alpha
         if self.use_moe and self.transformer.moe_intermediate_size is None:
             self.transformer.moe_intermediate_size = self.transformer.intermediate_size // self.num_experts
         if self.use_gdr and not self.hdim_full and not self.hrm:
@@ -451,20 +453,20 @@ class HAGI(nn.Module):
                 result["num_moe_layers"] = len(moe_aux_losses)
             if gdr_state is not None and isinstance(gdr_state, dict):
                 if "fused" in gdr_state or "features" in gdr_state:
+                    # inject batch-index labels for contrastive auxiliary loss
+                    if "labels" not in gdr_state:
+                        b, t, _ = logits.shape
+                        gdr_state["labels"] = torch.arange(b, device=logits.device).unsqueeze(1).expand(b, t).reshape(-1)
                     if any(k in gdr_state for k in ("features", "embeddings", "output")):
                         result["auxiliary_output"] = gdr_state
                     else:
-                        result["auxiliary_output"] = {"features": gdr_state["fused"]}
+                        result["auxiliary_output"] = {"features": gdr_state["fused"], "labels": gdr_state["labels"]}
             if gdr_state is not None:
                 assert pre_gdr_h is not None
                 if "invariant" in gdr_state and gdr_state["invariant"] is not None:
                     result["invariant_src"] = gdr_state["invariant"]
-                else:
-                    result["invariant_src"] = pre_gdr_h
-                if "target_invariant" in gdr_state and gdr_state["target_invariant"] is not None:
-                    result["invariant_tgt"] = gdr_state["target_invariant"]
-                else:
-                    result["invariant_tgt"] = gdr_state["fused"]
+                    if "target_invariant" in gdr_state and gdr_state["target_invariant"] is not None:
+                        result["invariant_tgt"] = gdr_state["target_invariant"]
             if pre_logits_hidden is not None:
                 result["model_output"] = pre_logits_hidden
             if msa_slot_ids is not None:

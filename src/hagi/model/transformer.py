@@ -14,7 +14,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .binary_factorized import BinaryFactorizedLinear
-from .triton_kernels import TRITON_AVAILABLE, RMSNormTriton
+from .triton_kernels import TRITON_AVAILABLE
 
 
 @dataclass
@@ -34,6 +34,7 @@ class TransformerConfig:
     num_experts: int = 8
     moe_top_k: int = 2
     moe_intermediate_size: int | None = None
+    moe_alpha: float = 0.01
 
     def __post_init__(self):
         assert self.hidden_size % self.num_query_heads == 0, (
@@ -51,18 +52,12 @@ class TransformerConfig:
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.norm = nn.RMSNorm(dim, eps=eps)
-
-    @property
-    def weight(self):
-        return self.norm.weight
-
-    @property
-    def eps(self):
-        return self.norm.eps
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm(x)
+        w = self.weight.to(x.dtype)
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * w
 
 
 def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):

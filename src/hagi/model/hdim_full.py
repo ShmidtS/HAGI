@@ -177,7 +177,7 @@ class HDIMFull(nn.Module):
         multivector = self.project(hidden_states)
         invariant = self.extract(multivector, self.rotors, src_rotor_idx)
         target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
-        target_invariant = self.extract(target, self.rotors, tgt_rotor_idx)
+        target_invariant = self.extract(multivector, self.rotors, tgt_rotor_idx)
         fused, gate = self.fuse(target, hidden_states, return_gate=True)
         if return_state:
             return {
@@ -257,7 +257,7 @@ class DelayedHDIM(HDIMFull):
 
             invariant = self.extract(agg_mv, self.rotors, src_rotor_idx)
             target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
-            target_invariant = self.extract(target, self.rotors, tgt_rotor_idx)
+            target_invariant = self.extract(agg_mv, self.rotors, tgt_rotor_idx)
             fused, gate = self.fuse(target, hidden_states, return_gate=True)
 
             if return_state:

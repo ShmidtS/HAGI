@@ -37,6 +37,7 @@ class MoESwiGLU(nn.Module):
         self.hidden_size = cfg.hidden_size
         self.intermediate_size = cfg.moe_intermediate_size or (cfg.intermediate_size // cfg.num_experts)
         self.router_temperature = getattr(cfg, "moe_router_temperature", 1.0)
+        self.alpha = getattr(cfg, "moe_alpha", 0.01)
 
         self.router = nn.Linear(cfg.hidden_size, cfg.num_experts, bias=False)
         nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
@@ -74,7 +75,7 @@ class MoESwiGLU(nn.Module):
             top_k_mask = torch.zeros(B * T, self.num_experts, device=x.device, dtype=router_probs.dtype)
             top_k_mask.scatter_(1, top_k_indices, 1.0)
             fraction_per_expert = top_k_mask.mean(dim=0)
-            aux_loss = self.num_experts * (fraction_per_expert * router_prob_per_expert).sum()
+            aux_loss = self.alpha * self.num_experts * (fraction_per_expert * router_prob_per_expert).sum()
             aux_loss = aux_loss.clamp_max(10.0)
             return output, aux_loss
 

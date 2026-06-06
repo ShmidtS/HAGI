@@ -77,8 +77,9 @@ model:
   hrm_l_cycles: 2
   l_dim: 256
   loop_count: 1
+  moe_alpha: 0.01
   moe_intermediate_size: 1024
-  moe_top_k: 2
+  moe_top_k: 1
   msa_slot_count: 100
   msa_top_k: 5
   num_experts: 4
@@ -103,6 +104,7 @@ model:
   vocab_size: 49152
 name: rtx3070_canonical
 training:
+  learning_rate: 0.0002
   batch_size: 2
   ckpt_interval: 1000
   composite_loss:
@@ -110,6 +112,7 @@ training:
     w_ce: 1.0
     w_iso: 0.005
     w_moe: 0.005
+  use_gdr_aux: true
   cooldown_frac: 0.05
   ema:
     decay: 0.9995
@@ -119,22 +122,20 @@ training:
   grad_accum_steps: 8
   grad_clip: 1.0
   gradient_checkpointing: false
-  learning_rate: 0.0005
   log_interval: 25
   loss_warmup_mode: linear
   magic_norm_max: 1.0
   max_steps: 8000
   min_lr_ratio: 0.1
-  muon_lr: 0.01
+  muon_lr: 0.005
   muon_momentum: 0.95
-  muon_ns_steps: 1
-  num_workers: 0
+  muon_ns_steps: 3
   optimizer: muon_adamw
   pin_memory: true
   precision: fp16
   schedule: cosine
   seed: 42
-  use_gdr_aux: true
   use_prefix_lm: false
   warmup_steps: 400
   weight_decay: 0.1
+  num_workers: 0
