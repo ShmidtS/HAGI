@@ -62,10 +62,12 @@ def total_loss(
     return total
 
 
-def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
+def compute_auxiliary_loss(aux_output, max_samples: int = 256, grad_scale: float = 0.1) -> torch.Tensor:
     """Compute supervised contrastive auxiliary loss when pair labels are available.
 
     Subsamples to ``max_samples`` tokens to keep the O(N^2) similarity matrix bounded.
+    ``grad_scale`` scales the returned loss so its gradients do not dominate the
+    cross-entropy gradient.
     """
     if aux_output is None:
         return torch.tensor(0.0)
@@ -124,7 +126,8 @@ def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
     log_prob = logits - exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12).log()
     positive_count = positive_mask.sum(dim=1)
     valid = positive_count > 0
-    return -(log_prob * positive_mask).sum(dim=1)[valid].div(positive_count[valid]).mean()
+    loss = -(log_prob * positive_mask).sum(dim=1)[valid].div(positive_count[valid]).mean()
+    return loss * grad_scale
 
 
 def _as_logits(output: torch.Tensor | tuple[Any, ...] | dict[str, Any]) -> torch.Tensor:
@@ -200,6 +203,7 @@ def composite_loss(
     precomputed_loss: torch.Tensor | None = None,
     moe_aux_loss: torch.Tensor | None = None,
     num_moe_layers: int | torch.Tensor | None = None,
+    grad_scale: float = 0.1,
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
     if (
@@ -226,7 +230,7 @@ def composite_loss(
     l_total = merged_weights["w_ce"] * l_ce
     result = {"L_CE": l_ce}
     if merged_weights.get("w_aux", 0.0) != 0.0 and auxiliary_output is not None:
-        l_aux = compute_auxiliary_loss(auxiliary_output).to(device=logits.device, dtype=logits.dtype)
+        l_aux = compute_auxiliary_loss(auxiliary_output, grad_scale=grad_scale).to(device=logits.device, dtype=logits.dtype)
         l_total = l_total + merged_weights["w_aux"] * l_aux
         result["L_aux"] = l_aux
     else:

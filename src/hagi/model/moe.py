@@ -62,11 +62,18 @@ class MoESwiGLU(nn.Module):
         weight_matrix = torch.zeros(B * T, self.num_experts, device=x.device, dtype=top_k_probs.dtype)
         weight_matrix.scatter_(1, top_k_indices, top_k_probs)
 
+        # Sparse dispatch: only compute tokens that actually route to each expert
         output = torch.zeros_like(flat)
-        for i, expert in enumerate(self.experts):
-            w = weight_matrix[:, i]  # [B*T]
-            expert_out = expert(flat)
-            output += expert_out * w.unsqueeze(-1)
+        for k_idx in range(self.top_k):
+            expert_idx = top_k_indices[:, k_idx]  # [B*T]
+            probs = top_k_probs[:, k_idx]  # [B*T]
+            for e_idx, expert in enumerate(self.experts):
+                mask = expert_idx == e_idx
+                if mask.any():
+                    tokens = flat[mask]
+                    expert_out = expert(tokens)
+                    idx = mask.nonzero(as_tuple=True)[0].unsqueeze(-1).expand(-1, expert_out.size(-1))
+                    output.scatter_add_(0, idx, expert_out * probs[mask].unsqueeze(-1))
 
         output = output.view(B, T, D)
 

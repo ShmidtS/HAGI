@@ -23,6 +23,8 @@ spec (`formalization/HAGI/HDIM.lean`).
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 
 from hagi.utils import _reordering_sign
@@ -38,29 +40,27 @@ GRADE = [bin(i).count("1") for i in range(BLADE_COUNT)]  # [0,1,1,2,1,2,2,3]
 _REVERSE_SIGNS = torch.tensor([(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)], dtype=torch.float32)
 _GRADE_MASKS = {g: torch.tensor([1.0 if GRADE[i] == g else 0.0 for i in range(BLADE_COUNT)], dtype=torch.float32) for g in range(DIM + 1)}
 
-# Lazily cached copies keyed by (device_str, dtype) to avoid repeated host-device transfers
-_reverse_signs_cache: dict[tuple[str, torch.dtype], torch.Tensor] = {}
-_grade_masks_cache: dict[tuple[int, str, torch.dtype], torch.Tensor] = {}
+
+@lru_cache(maxsize=16)
+def _get_reverse_signs_cached(device_type: str, device_index: int | None, dtype_name: str) -> torch.Tensor:
+    device = torch.device(device_type, device_index) if device_index is not None else torch.device(device_type)
+    dtype = getattr(torch, dtype_name)
+    return _REVERSE_SIGNS.to(device=device, dtype=dtype)
 
 
 def _get_reverse_signs(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    global _reverse_signs_cache
-    key = (str(device), dtype)
-    cached = _reverse_signs_cache.get(key)
-    if cached is None:
-        cached = _REVERSE_SIGNS.to(device=device, dtype=dtype)
-        _reverse_signs_cache[key] = cached
-    return cached
+    return _get_reverse_signs_cached(device.type, device.index, str(dtype).replace("torch.", ""))
+
+
+@lru_cache(maxsize=16)
+def _get_grade_mask_cached(grade: int, device_type: str, device_index: int | None, dtype_name: str) -> torch.Tensor:
+    device = torch.device(device_type, device_index) if device_index is not None else torch.device(device_type)
+    dtype = getattr(torch, dtype_name)
+    return _GRADE_MASKS[grade].to(device=device, dtype=dtype)
 
 
 def _get_grade_mask(grade: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    global _grade_masks_cache
-    key = (grade, str(device), dtype)
-    cached = _grade_masks_cache.get(key)
-    if cached is None:
-        cached = _GRADE_MASKS[grade].to(device=device, dtype=dtype)
-        _grade_masks_cache[key] = cached
-    return cached
+    return _get_grade_mask_cached(grade, device.type, device.index, str(dtype).replace("torch.", ""))
 
 
 def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
@@ -90,18 +90,16 @@ for _a in range(BLADE_COUNT):
         _c = int(_OUT_INDEX[_a, _b])
         _PROD_TABLE[_c, _a, _b] = _SIGN[_a, _b]
 
-# Lazily cached copies for product table keyed by (device_str, dtype)
-_prod_table_cache: dict[tuple[str, torch.dtype], torch.Tensor] = {}
+
+@lru_cache(maxsize=16)
+def _get_prod_table_cached(device_type: str, device_index: int | None, dtype_name: str) -> torch.Tensor:
+    device = torch.device(device_type, device_index) if device_index is not None else torch.device(device_type)
+    dtype = getattr(torch, dtype_name)
+    return _PROD_TABLE.to(device=device, dtype=dtype)
 
 
 def _get_prod_table(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    global _prod_table_cache
-    key = (str(device), dtype)
-    cached = _prod_table_cache.get(key)
-    if cached is None:
-        cached = _PROD_TABLE.to(device=device, dtype=dtype)
-        _prod_table_cache[key] = cached
-    return cached
+    return _get_prod_table_cached(device.type, device.index, str(dtype).replace("torch.", ""))
 
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
