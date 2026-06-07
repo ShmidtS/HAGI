@@ -63,6 +63,19 @@ def detect_mode(cfg: dict[str, Any]) -> str:
     return "basic"
 
 
+def _resolve_max_steps(tcfg: dict, data_cfg: dict, batch_size: int, block_size: int) -> int:
+    """Derive max_steps from train_tokens if set, else fall back to max_steps."""
+    grad_accum = tcfg.get("grad_accum_steps", 1)
+    tokens_per_step = batch_size * grad_accum * block_size
+    train_tokens = data_cfg.get("train_tokens")
+    if train_tokens:
+        steps = math.ceil(train_tokens / tokens_per_step)
+        print(f"max_steps={steps} derived from train_tokens={train_tokens:,} "
+              f"({tokens_per_step:,} tokens/step)")
+        return steps
+    return tcfg.get("max_steps", 50000)
+
+
 def resolve_train_path(cfg: dict[str, Any], train_path_override: Path | None, data_dir: Path | None = None) -> Path:
     if data_dir is None:
         data_dir = train_path_override
@@ -682,7 +695,12 @@ def run_basic(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     args.ckpt_dir.mkdir(parents=True, exist_ok=True)
     optimizer = build_optimizer(model, cfg.get("training", {}))
     get_batch = build_basic_batcher(cfg, args.device, args.train_path, args.data_dir, args.seq_len)
-    loop_cfg = build_loop_config(cfg, args.ckpt_dir, args.max_steps)
+    train_cfg = cfg.get("training", {})
+    data_cfg = cfg.get("data", {})
+    batch_size = int(train_cfg.get("batch_size", 1))
+    seq_len = int(args.seq_len if args.seq_len is not None else data_cfg.get("max_seq_len", model_cfg.get("transformer", {}).get("max_seq_len", 2048)))
+    max_steps = int(args.max_steps) if args.max_steps is not None else _resolve_max_steps(train_cfg, data_cfg, batch_size, seq_len)
+    loop_cfg = build_loop_config(cfg, args.ckpt_dir, max_steps)
     final_loss = train(model, optimizer, get_batch, loop_cfg, device=args.device, start_step=start_step)
     save_checkpoint(model, optimizer, loop_cfg.max_steps, str(args.ckpt_dir))
     print(f"final_loss {final_loss:.4f}")
@@ -720,7 +738,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     )
     data_iter = iter(dataloader)
 
-    max_steps = int(args.max_steps if args.max_steps is not None else train_cfg.get("max_steps", 20000))
+    max_steps = int(args.max_steps) if args.max_steps is not None else _resolve_max_steps(train_cfg, data_cfg, batch_size, seq_len)
     grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
     if grad_accum_steps <= 0:
         raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
@@ -869,7 +887,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     )
     data_iter = iter(dataloader)
 
-    max_steps = int(args.max_steps if args.max_steps is not None else train_cfg.get("max_steps", 50000))
+    max_steps = int(args.max_steps) if args.max_steps is not None else _resolve_max_steps(train_cfg, data_cfg, batch_size, seq_len)
     grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
     if grad_accum_steps <= 0:
         raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")

@@ -357,6 +357,20 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
             block_size=cfg.get("adam_mini_block_size", 128),
         )
 
+    if kind in ("adamw8bit", "paged_adamw8bit"):
+        try:
+            import bitsandbytes as bnb
+        except ImportError:
+            raise ImportError("bitsandbytes not installed. `pip install bitsandbytes`.")
+        decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
+        no_decay = [p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())]
+        cls = bnb.optim.PagedAdamW8bit if kind.startswith("paged") else bnb.optim.AdamW8bit
+        return cls(
+            [{"params": decay, "weight_decay": wd},
+             {"params": no_decay, "weight_decay": 0.0}],
+            lr=lr, betas=betas_cfg, eps=eps,
+        )
+
     raise ValueError(
-        f"unknown optimizer: {kind!r} (expected 'adamw', 'muon_adamw', 'schedule-free-adamw' or 'adam-mini')"
+        f"unknown optimizer: {kind!r} (expected 'adamw', 'muon_adamw', 'schedule-free-adamw', 'adam-mini', 'adamw8bit' or 'paged_adamw8bit')"
     )

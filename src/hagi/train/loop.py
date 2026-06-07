@@ -78,6 +78,8 @@ def train(
     eval_get_batch: Callable[..., Any] | None = None,
     on_log: Callable[[dict[str, Any]], None] | None = None,
     start_step: int = 0,
+    session_steps: int | None = None,
+    on_checkpoint: Callable[[str], None] | None = None,
 ):
     """Run the training loop. Returns the final training loss."""
     if device.startswith("cuda"):
@@ -96,7 +98,8 @@ def train(
         nars_hrm = model.nars_hrm
 
     last_loss = float("nan")
-    for step in range(start_step, cfg.max_steps):
+    end = cfg.max_steps if session_steps is None else min(cfg.max_steps, start_step + session_steps)
+    for step in range(start_step, end):
         lr = _lr_at(step, cfg)
         base_lr = max(cfg.learning_rate, 1e-12)
         for group in optimizer.param_groups:
@@ -156,12 +159,15 @@ def train(
             print(f"step {step:6d} | val_loss {val:.4f}")
 
         if cfg.ckpt_interval > 0 and step > 0 and step % cfg.ckpt_interval == 0:
-            save_checkpoint(model, optimizer, step, cfg.ckpt_dir)
+            save_checkpoint(model, optimizer, step, cfg.ckpt_dir, on_checkpoint=on_checkpoint)
+
+    if session_steps is not None and on_checkpoint is not None:
+        save_checkpoint(model, optimizer, end, cfg.ckpt_dir, on_checkpoint=on_checkpoint)
 
     return last_loss
 
 
-def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str, ema_state: dict[str, Any] | None = None):
+def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str, ema_state: dict[str, Any] | None = None, on_checkpoint: Callable[[str], None] | None = None):
     """Write a checkpoint with config, optimizer, and optional EMA state."""
     out = Path(ckpt_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -186,6 +192,8 @@ def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str, ema_state:
         payload["nars_msa"] = model.nars_msa.state_dict()
     torch.save(payload, path)
     print(f"checkpoint -> {path}")
+    if on_checkpoint is not None:
+        on_checkpoint(str(path))
 
 
 def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bool = False) -> tuple[HAGI, int, dict[str, Any] | None]:
