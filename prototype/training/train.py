@@ -63,6 +63,9 @@ def main():
     ap.add_argument("--train-tokens", type=int, default=None,
                     help="override data.train_tokens (budget knob). max_steps AND the cosine LR "
                          "schedule derive from it, so lowering this gives a correct shorter run.")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="override the training seed (weight init + data order). For seed-stability "
+                         "runs: same config, different --seed, separate --ckpt-dir.")
     ap.add_argument("--hf-repo", default=None,
                     help="HF Hub model repo id (e.g. user/hagi-stage0) to mirror checkpoints to. "
                          "On --resume auto with no local checkpoint, the latest is pulled from here. "
@@ -77,7 +80,8 @@ def main():
     if args.train_tokens is not None:
         cfg["data"]["train_tokens"] = args.train_tokens
         print(f"train_tokens overridden -> {args.train_tokens:,}")
-    torch.manual_seed(tcfg.get("seed", 42))
+    seed = args.seed if args.seed is not None else tcfg.get("seed", 42)
+    torch.manual_seed(seed)
 
     model = HAGI(cfg["model"]).to(args.device)
     print(f"[{cfg['name']}] parameters: {model.num_parameters() / 1e6:.1f}M")
@@ -111,7 +115,7 @@ def main():
     block_size = cfg["data"].get("max_seq_len", 4096)
     batch_size = tcfg.get("batch_size", 16)
     get_batch = make_batch_fn(args.data, batch_size, block_size, device=args.device,
-                              seed=tcfg.get("seed", 42))
+                              seed=seed)
     eval_get_batch = (
         make_batch_fn(args.val_data, batch_size, block_size, device=args.device, seed=123)
         if args.val_data else None

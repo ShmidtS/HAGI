@@ -34,6 +34,7 @@ def main():
     ap.add_argument("--seq", type=int, default=1024)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=1234, help="fixes the eval batch set for all models")
+    ap.add_argument("--json", action="store_true", help="also emit a machine-readable JSON line")
     args = ap.parse_args()
 
     # Build the eval batches ONCE so every checkpoint sees identical data.
@@ -59,21 +60,35 @@ def main():
                 total += loss.item()
         avg = total / len(batches)
         ppl = math.exp(avg)
-        rows.append((os.path.basename(os.path.dirname(path)) or path, avg, ppl))
+        name = os.path.basename(os.path.dirname(path)) or path
+        rows.append((name, step, avg, ppl))
         print(f"{path:<52} {step:>7} {avg:>8.4f} {ppl:>9.2f}")
         del model
         if args.device.startswith("cuda"):
             torch.cuda.empty_cache()
 
     # Decisive read: B vs D (grade decomposition isolated), C vs D (integrated vs bolted-on).
-    by = {name: (loss, ppl) for name, loss, ppl in rows}
-    if "ablation_b" in by and "ablation_d" in by:
-        db = by["ablation_d"][0] - by["ablation_b"][0]
+    by = {name: (loss, ppl) for name, _, loss, ppl in rows}
+
+    def _find(suffix):  # tolerate names like ablation_b or ablation_b_s3
+        for k in by:
+            if k == f"ablation_{suffix}" or k.startswith(f"ablation_{suffix}_"):
+                return by[k]
+        return None
+
+    b, c, d = _find("b"), _find("c"), _find("d")
+    if b and d:
+        db = d[0] - b[0]
         verdict = "D better" if db < 0 else "B better" if db > 0 else "tie"
         print(f"\nB vs D: loss D-B = {db:+.4f}  ({verdict}; negative = grade decomposition helps)")
-    if "ablation_c" in by and "ablation_d" in by:
-        dc = by["ablation_d"][0] - by["ablation_c"][0]
-        print(f"C vs D: loss D-C = {dc:+.4f}  (negative = integrated GDR beats bolted-on Clifford)")
+    if c and d:
+        print(f"C vs D: loss D-C = {d[0] - c[0]:+.4f}  (negative = integrated GDR beats bolted-on)")
+
+    if args.json:
+        import json
+        out = {name: {"step": step, "loss": round(loss, 6), "ppl": round(ppl, 4)}
+               for name, step, loss, ppl in rows}
+        print("JSON " + json.dumps(out))
 
 
 if __name__ == "__main__":

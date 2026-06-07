@@ -13,6 +13,7 @@ links its three siblings. Re-runnable (overwrites the README each time).
 
 from __future__ import annotations
 
+# ruff: noqa: E501 — card text + sample generations are intentionally long string literals
 import argparse
 import io
 
@@ -29,6 +30,40 @@ MODELS = {
 }
 ORDER = ["a", "b", "c", "d"]
 
+# Measured results - first pass: one run per model (training seed 42), scored on a
+# shared fixed batch set (identical batches for all four). Update after seed runs.
+RESULTS = {
+    "a": dict(loss=3.4880, ppl=32.72, sample="The sun is a star that rises in the sky, then rises in the sky, eventually the sun. The two stars, the sun and the moon, are equally the same but the earth is smaller in size and has more diameter"),
+    "b": dict(loss=3.4852, ppl=32.63, sample="The sun is a star that rises in the sky, then rises again in the sky as the sun approaches the Sun. The sun itself does not fall in the sky because of its position above the horizon. Some of the planets"),
+    "c": dict(loss=3.4771, ppl=32.37, sample="The sun is a star that is the main star in the picture. It is an extremely hot star that can be seen through the sun. This is also the brightest star in the picture. The sun is another star that can"),
+    "d": dict(loss=3.4702, ppl=32.14, sample="The sun is a star that has a half-life of 8.6 hours. The Sun is 11.86 million miles tall and is the tallest red dwarf in the world. It is a binary star"),
+}
+TRAIN_SEED = 42
+EVAL_TOKENS = "819,200"
+
+# Seed-stability summary, filled after the multi-seed B-vs-D runs on held-out val.
+# Example: dict(seeds=[1,2,3,4,5], d_below_b=5, mean_d_minus_b=-0.014, val="shard 6")
+SEED_STABILITY = None
+
+
+def _results_table(this: str) -> str:
+    rows = []
+    for k in ORDER:
+        r = RESULTS[k]
+        label = f"**{k.upper()} (this)**" if k == this else k.upper()
+        rows.append(f"| {label} | {MODELS[k]['params']} | {r['loss']:.4f} | {r['ppl']:.2f} |")
+    return "\n".join(rows)
+
+
+def _seed_block() -> str:
+    if not SEED_STABILITY:
+        return ("**Seed stability:** the B-vs-D check across multiple seeds on a held-out "
+                "shard is in progress; this card will be updated with the per-seed verdict.")
+    s = SEED_STABILITY
+    n = len(s["seeds"])
+    return (f"**Seed stability:** across {n} seeds on held-out validation ({s.get('val', 'a held-out shard')}), "
+            f"**D beat B in {s['d_below_b']}/{n}** runs (mean loss D-B = {s['mean_d_minus_b']:+.4f}).")
+
 
 def _ablation_table(this: str) -> str:
     rows = []
@@ -44,6 +79,9 @@ def card(m: str, user: str) -> str:
     f = MODELS[m]
     loop_txt = "loop x3" if f["loop"] else "none"
     gdr_txt = "grades (scalar/vector/bivector/trivector + geometric product)" if f["gdr"] else "none"
+    r = RESULTS[m]
+    db = RESULTS["d"]["loss"] - RESULTS["b"]["loss"]
+    dc = RESULTS["d"]["loss"] - RESULTS["c"]["loss"]
     return f"""---
 license: apache-2.0
 language:
@@ -82,6 +120,7 @@ mechanism with no confounds.
 | Parameters | {f['params']} |
 | Checkpoint | `step-00007630.pt` (model + optimizer state + config dict) |
 | Tokens seen | 500M (sequence length 1024) |
+| Eval loss / perplexity | **{r['loss']:.4f} / {r['ppl']:.2f}** (shared {EVAL_TOKENS}-token set, seed {TRAIN_SEED}) |
 
 ## What is HAGI / GDR?
 
@@ -169,11 +208,29 @@ print(tok.decode(x[0].tolist()))
 - **C** - Clifford, bolted-on: `{user}/hagi-ablation-c`
 - **D** - full GDR: `{user}/hagi-ablation-d`
 
-## Reading the result
+## Results
 
-Score the four on a shared fixed batch set with `scripts/eval_loss.py`; lower loss
-is better. **D below B** => grade decomposition helps (scaling is then justified).
-**D == B** => neutral. **D above B** => harmful. See `docs/ABLATION.md` for the gates.
+All four scored on the **same** {EVAL_TOKENS}-token fixed batch set (identical
+batches; lower loss is better). One run per model, training seed {TRAIN_SEED}.
+
+| Model | Params | Loss | Perplexity |
+|-------|--------|------|------------|
+{_results_table(m)}
+
+- **B vs D: loss D-B = {db:+.4f}** (negative = grade decomposition helps).
+- **C vs D: loss D-C = {dc:+.4f}** (negative = integrated GDR beats bolted-on Clifford).
+- Ordering **A < B < C < D** matches the hypothesis: the grade decomposition carries
+  the signal; recurrence helps mainly in its presence (loop-alone B barely moves A).
+
+Margins are small (~1.5% perplexity) and this is a single run per config, so the
+result is a **positive preliminary signal, not proof** - see the seed-stability note
+below and the gates in `docs/ABLATION.md`.
+
+**This model's sample** (prompt *"The sun is a star that"*, temperature 0.8, seed {TRAIN_SEED}):
+
+> {r['sample']}
+
+{_seed_block()}
 
 ## Links
 
