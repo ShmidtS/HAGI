@@ -14,6 +14,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .binary_factorized import BinaryFactorizedLinear
+from .triton_kernels import rmsnorm_triton
 
 
 @dataclass
@@ -55,8 +56,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return norm * self.weight
+        return rmsnorm_triton(x, self.weight, self.eps)
 
 
 def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):

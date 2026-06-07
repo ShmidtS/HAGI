@@ -73,6 +73,9 @@ for _a in range(BLADE_COUNT):
     for _b in range(BLADE_COUNT):
         _STRUCT[_a, _b, int(_OUT_INDEX[_a, _b])] = _SIGN[_a, _b]
 
+# Triton kernel expects [c, a, b] layout (cab einsum).
+_STRUCT_TRITON = _STRUCT.permute(2, 0, 1).contiguous()
+
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
@@ -84,16 +87,14 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     Returns:
         [..., 8] product coefficients.
 
-    Single fused einsum over the precomputed structure constants — vectorized,
-    fp32-accumulated, and `torch.compile`-friendly (no Python blade loop and no
-    `int(tensor)` host sync, which forced a graph break in the looped GDR core).
+    Triton kernel when CUDA is available; fused einsum fallback otherwise.
     """
     assert x.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
 
-    c = _STRUCT.to(x.device)  # [8,8,8] constant; dynamo constant-folds the device move
-    out = torch.einsum("...a,abc,...b->...c", x, c, y)
-    return out.to(x.dtype)
+    from .triton_kernels import geometric_product_triton
+    c = _STRUCT_TRITON.to(x.device, dtype=x.dtype)
+    return geometric_product_triton(x, y, c)
 
 
 def grade_projection(mv: torch.Tensor, grade: int) -> torch.Tensor:
