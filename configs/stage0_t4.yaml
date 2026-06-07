@@ -1,14 +1,14 @@
-# Stage 0 — Model A (dense baseline), the REAL run, sized for a 16GB T4
+# Stage 0 - Model A (dense baseline), the REAL run, sized for a 16GB T4
 # (Colab / Kaggle). Same Model A as baseline.yaml; T4-tuned training shape.
 #
 # Reduced vs canonical baseline.yaml (to fit a 16GB T4):
 #   - precision fp16 (T4 has no bf16 tensor cores)
 #   - max_seq_len 1024 (not 4096): trains a 1024-context model. The full 4096
-#     context needs a 24GB+ Ampere GPU — revisit at Stage 3 / on a bigger GPU.
+#     context needs a 24GB+ Ampere GPU - revisit at Stage 3 / on a bigger GPU.
 #   - batch 4 x grad_accum 8 -> effective 32,768 tokens/step.
 #
 # Target: 1B tokens (~30,518 steps). At ~16,700 tok/s on a T4 that is ~17h of
-# compute — run it in checkpoint-gated sessions with --steps + --resume auto.
+# compute - run it in checkpoint-gated sessions with --steps + --resume auto.
 # This is enough to clear the Stage 0 gate (stable, val perplexity < 20). Raise
 # train_tokens to 2.3e9 (Chinchilla) for a stronger baseline once 1B looks good.
 #
@@ -34,7 +34,7 @@ model:
     max_seq_len: 1024
 
 training:
-  optimizer: adamw           # Muon needs bf16/fp32 — keep adamw on a fp16 T4
+  optimizer: adamw           # Muon needs bf16/fp32 - keep adamw on a fp16 T4
   precision: fp16
   compile: true
   batch_size: 4

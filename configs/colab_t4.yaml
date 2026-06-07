@@ -1,4 +1,4 @@
-# Free-tier proof-of-life — Model A architecture sized for a 16GB T4 (Colab/Kaggle).
+# Free-tier proof-of-life - Model A architecture sized for a 16GB T4 (Colab/Kaggle).
 #
 # This is NOT the Stage 0 science run. It validates the end-to-end pipeline and
 # produces a real loss curve on free hardware, then you rent an Ampere GPU for the
@@ -6,11 +6,11 @@
 #
 # Why these choices on a T4 (sm75, 16GB, no bf16 tensor cores):
 #   - precision fp16   : T4 has no bf16 tensor cores; fp16 is the fast path here.
-#                        (Muon needs bf16/fp32 — keep optimizer=adamw on T4.)
+#                        (Muon needs bf16/fp32 - keep optimizer=adamw on T4.)
 #   - max_seq_len 1024 : full 4096 + 49K-vocab logits won't fit 16GB.
 #   - batch 4 x accum 8: effective 32768 tokens/step within 16GB.
-#   - gradient_checkpointing + ce_chunk_size: cut activation/​logit memory.
-#   - ckpt_interval 500: 12h sessions die — resume with `--resume auto`.
+#   - gradient_checkpointing + ce_chunk_size: cut activation/logit memory.
+#   - ckpt_interval 500: 12h sessions die - resume with `--resume auto`.
 #   - SDPA dispatches to the mem-efficient kernel on T4 (FlashAttention-2 needs sm80+).
 name: colab_t4
 model:
@@ -32,7 +32,7 @@ model:
     max_seq_len: 1024
 
 training:
-  optimizer: adamw           # Muon needs bf16/fp32 — not on a fp16 T4 run
+  optimizer: adamw           # Muon needs bf16/fp32 - not on a fp16 T4 run
   precision: fp16
   compile: true
   batch_size: 4
@@ -46,7 +46,7 @@ training:
 
 data:
   tokenizer: "HuggingFaceTB/SmolLM2-135M"
-  train_tokens: 500_000_000  # proof-of-life: max_steps ≈ 15259; full run is on cloud
+  train_tokens: 500_000_000  # proof-of-life: max_steps ~= 15259; full run is on cloud
   max_seq_len: 1024
 
 eval:

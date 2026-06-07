@@ -1,4 +1,4 @@
-# Stage 0 Model A (dense baseline) — full 115M architecture, tuned to TRAIN on a
+# Stage 0 Model A (dense baseline) - full 115M architecture, tuned to TRAIN on a
 # 4GB-VRAM laptop (e.g. RTX A2000 Laptop, Ampere sm86). The MODEL is unchanged
 # from configs/baseline.yaml; only the training shape is reduced to fit + to run
 # as long, monitored, checkpoint-gated sessions.
@@ -14,10 +14,10 @@
 #     if it works on your box.
 #
 # Checkpoint-gated workflow (your control loop):
-#   # first session — run N steps, checkpoint, exit:
+#   # first session - run N steps, checkpoint, exit:
 #   python -m prototype.training.train --config configs/local_baseline.yaml \
 #       --data data/fineweb-edu --device cuda --steps 500
-#   # later sessions — continue from the latest checkpoint:
+#   # later sessions - continue from the latest checkpoint:
 #   python -m prototype.training.train --config configs/local_baseline.yaml \
 #       --data data/fineweb-edu --device cuda --steps 500 --resume auto
 #

@@ -1,7 +1,7 @@
-# Ablation d — full GDR (loop + grades)
+# Ablation d - full GDR (loop + grades)
 # One of four same-size (~115M) models for the GDR ablation. All four share data,
 # schedule, tokenizer, and budget; they differ ONLY in use_loop / use_gdr. Sized to
-# fit a modest unit budget (seq 1024, 500M tokens) — the B-vs-D comparison is
+# fit a modest unit budget (seq 1024, 500M tokens) - the B-vs-D comparison is
 # relative, so absolute scale matters less than keeping the four identical.
 #
 # Effective batch = 16 * 4 * 1024 = 65,536 tokens/step. 500M tokens -> ~7,629 steps.

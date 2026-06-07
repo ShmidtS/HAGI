@@ -18,7 +18,10 @@ from prototype.model.transformer import TransformerConfig
 
 
 def load_config(path: str | Path) -> dict:
-    with open(path) as f:
+    # Explicit utf-8 (not the platform default) so a config behaves identically on
+    # Windows (cp1252) and Linux/Colab (utf-8) — a stray non-utf-8 byte must fail
+    # the same everywhere, not silently pass locally then crash on the cloud GPU.
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     m = raw["model"]
