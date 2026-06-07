@@ -256,7 +256,7 @@ def gpu_util(device: str) -> str:
         return "n/a"
 
 
-def maybe_compile(model: HAGI, device: str) -> torch.nn.Module:
+def maybe_compile(model: HAGI, device: str) -> Any:
     if hasattr(model.cfg, "compile") and model.cfg.compile and device.startswith("cuda"):
         print("torch.compile enabled (mode=reduce-overhead)")
         return torch.compile(model, mode="reduce-overhead")
@@ -698,7 +698,9 @@ def run_basic(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     train_cfg = cfg.get("training", {})
     data_cfg = cfg.get("data", {})
     batch_size = int(train_cfg.get("batch_size", 1))
-    seq_len = int(args.seq_len if args.seq_len is not None else data_cfg.get("max_seq_len", model_cfg.get("transformer", {}).get("max_seq_len", 2048)))
+    _t = getattr(model_cfg, "transformer", None)
+    _default_seq_len = getattr(_t, "max_seq_len", 2048) if _t is not None else 2048
+    seq_len = int(args.seq_len if args.seq_len is not None else data_cfg.get("max_seq_len", _default_seq_len))
     max_steps = int(args.max_steps) if args.max_steps is not None else _resolve_max_steps(train_cfg, data_cfg, batch_size, seq_len)
     loop_cfg = build_loop_config(cfg, args.ckpt_dir, max_steps)
     final_loss = train(model, optimizer, get_batch, loop_cfg, device=args.device, start_step=start_step)
