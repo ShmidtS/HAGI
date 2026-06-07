@@ -34,7 +34,6 @@ run_basic = _train_mod.run_basic
 
 def profile_full(args, cfg):
     """Run full mode with PyTorch profiler for a few steps."""
-    import copy
     from hagi.model import HAGI
     from hagi.train.config import config_from_dict
     from hagi.train.optim import build_optimizer
@@ -68,13 +67,8 @@ def profile_full(args, cfg):
         torch.set_float32_matmul_precision('high')
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
 
     model = HAGI(model_cfg).to(device)
-    model_ema = copy.deepcopy(model).to(device)
-    model_ema.eval()
-    for param in model_ema.parameters():
-        param.requires_grad_(False)
     train_model = maybe_compile(model, device)
     train_model.train()
 
@@ -122,11 +116,10 @@ def profile_full(args, cfg):
     prof = torch.profiler.profile(
         activities=activities,
         schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir)),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-        with_flops=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+        with_flops=False,
     )
 
     if device.startswith("cuda"):
@@ -179,9 +172,11 @@ def profile_full(args, cfg):
             print(f"step {step} | profile active")
 
     prof.stop()
-
-    # trace already saved by tensorboard_trace_handler
-    print(f"trace saved -> {profile_dir}")
+    prof.export_chrome_trace(str(trace_path))
+    del prof
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
+    print(f"trace saved -> {trace_path}")
 
     if device.startswith("cuda"):
         peak_mem = torch.cuda.max_memory_allocated(device) / 1024**3

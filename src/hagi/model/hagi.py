@@ -68,6 +68,8 @@ class HAGIConfig:
     moe_top_k: int = 2
     moe_intermediate_size: int | None = None
     moe_alpha: float = 0.01
+    ce_chunk_size: int = 0
+    compile: bool = False
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
 
@@ -238,17 +240,11 @@ class HAGI(nn.Module):
 
         def run_block(block, hidden, past=None) -> Any:
             if use_gradient_checkpointing:
-                result = checkpoint(
-                    lambda h, c, s: block(h, c, s, gradient_checkpointing=True),
-                    hidden,
-                    cos,
-                    sin,
-                    use_reentrant=False,
-                )
+                result = checkpoint(block, hidden, cos, sin, use_reentrant=False)
             elif use_cache:
                 result = block(hidden, cos, sin, past, use_cache=True)
             else:
-                result = block(hidden, cos, sin, gradient_checkpointing=self.cfg.gradient_checkpointing)
+                result = block(hidden, cos, sin)
             if not use_cache and isinstance(result, tuple) and len(result) == 2:
                 h_out, aux_loss = result
                 if isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0 and collect_moe_aux:
@@ -293,7 +289,7 @@ class HAGI(nn.Module):
                     num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                     tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
                     gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
-                    pre_gdr_h = h.clone() if need_iso else None
+                    pre_gdr_h = h if need_iso else None
                     h = gdr_state["fused"]
                     h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
                 else:
@@ -326,7 +322,7 @@ class HAGI(nn.Module):
                                 return_state=True,
                                 delay_step=current_step,
                             )
-                            pre_gdr_h = h.clone() if need_iso else None
+                            pre_gdr_h = h if need_iso else None
                             h = gdr_state["fused"]
                             gdr_output = h
                             past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
@@ -341,7 +337,7 @@ class HAGI(nn.Module):
                         num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                         tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
                         gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
-                        pre_gdr_h = h.clone() if need_iso else None
+                        pre_gdr_h = h if need_iso else None
                         h = gdr_state["fused"]
                         gdr_output = h
                         for block in self.reasoning:
@@ -435,7 +431,7 @@ class HAGI(nn.Module):
                 h = run_block(block, h)  # type: ignore[assignment]
             layer_idx += 1
 
-        pre_logits_hidden = h.clone() if need_quality and self.quality_head is not None else None
+        pre_logits_hidden = h if need_quality and self.quality_head is not None else None
         h = self.final_norm(h)
         logits = self.lm_head(h)
 

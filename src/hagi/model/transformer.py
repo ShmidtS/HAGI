@@ -49,16 +49,14 @@ class TransformerConfig:
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6, dtype: torch.dtype = torch.float32):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim, dtype=dtype))
         self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w = self.weight
-        if w.dtype != x.dtype:
-            w = w.to(x.dtype)
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * w
+        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return norm * self.weight
 
 
 def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):

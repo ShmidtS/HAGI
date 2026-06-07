@@ -216,6 +216,7 @@ class DelayedHDIM(HDIMFull):
         self.delay_steps = delay_steps
         self._buffer: list[torch.Tensor] = []
         self._total_steps: int | None = None
+        self.reset_buffer()
 
     def reset_buffer(self, total_steps: int | None = None) -> None:
         """Clear the circular buffer and optional step budget."""

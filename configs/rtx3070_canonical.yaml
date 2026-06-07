@@ -57,6 +57,8 @@ eval:
   - winogrande
   every_n_steps: 2000
 model:
+  ce_chunk_size: 4096
+  compile: false
   expression_layers: 4
   grades:
     bivector: 192
@@ -104,6 +106,7 @@ model:
   vocab_size: 49152
 name: rtx3070_canonical
 training:
+  compile: false
   learning_rate: 0.0002
   batch_size: 8
   ckpt_interval: 1000

@@ -809,7 +809,6 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         torch.set_float32_matmul_precision('high')
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
 
     start_step = 0
     if args.resume is not None and args.resume.exists():
@@ -1000,7 +999,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             accum_loss_tensor = raw_loss if accum_loss_tensor is None else accum_loss_tensor + raw_loss
             if components and need_components:
                 for name, value in components.items():
-                    accum_components[name] = accum_components.get(name, torch.tensor(0.0, device=value.device, dtype=value.dtype)) + value
+                    prev = accum_components.get(name)
+                    if prev is None:
+                        accum_components[name] = value
+                    else:
+                        accum_components[name] = prev + value
             tokens_since_log += tokens.numel()
             del output, loss, logits
 

@@ -178,7 +178,7 @@ class HRMCore(nn.Module):
                         and hasattr(gdr, "delay_steps")
                         and gdr.delay_steps > 1
                     ):
-                        pre_gdr_h = h.clone()
+                        pre_gdr_h = h
                         gdr_state = gdr(
                             h,
                             src_rotor_idx=0,

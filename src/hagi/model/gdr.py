@@ -74,9 +74,7 @@ class GradeDecomposedRecurrence(nn.Module):
         self.geo_to_scalar = nn.Linear(cfg.vector, cfg.scalar, bias=False)
         self.geo_to_bivector = nn.Linear(cfg.vector, cfg.bivector, bias=False)
         self.gate_scalar = nn.Parameter(torch.zeros(1))
-        self.gate_vector = nn.Parameter(torch.zeros(1))
         self.gate_bivector = nn.Parameter(torch.zeros(1))
-        self.gate_trivector = nn.Parameter(torch.zeros(1))
 
     def split(self, h: torch.Tensor):
         b = self.cfg.bounds
@@ -92,15 +90,12 @@ class GradeDecomposedRecurrence(nn.Module):
         """Self geometric product of the vector grade, projected to scalar+bivector."""
         *lead, _ = vector.shape
         mv = vector.reshape(*lead, self.n_mv, BLADE_COUNT)
-        mv = F.normalize(mv, dim=-1)
         prod = geometric_product(mv, mv)  # [..., n_mv, 8]
         # Keep grade-0 and grade-2 parts, flatten back to [..., vector_dim].
         g0 = grade_projection(prod, 0).reshape(*lead, self.cfg.vector)
         g2 = grade_projection(prod, 2).reshape(*lead, self.cfg.vector)
-        g_scalar = torch.sigmoid(self.gate_scalar)
-        g_bivector = torch.sigmoid(self.gate_bivector)
-        scalar_signal = g_scalar * self.geo_to_scalar(g0)
-        bivector_signal = g_bivector * self.geo_to_bivector(g2)
+        scalar_signal = torch.sigmoid(self.gate_scalar) * self.geo_to_scalar(g0)
+        bivector_signal = torch.sigmoid(self.gate_bivector) * self.geo_to_bivector(g2)
         return scalar_signal, bivector_signal
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
@@ -114,13 +109,7 @@ class GradeDecomposedRecurrence(nn.Module):
         trivector_new = self.mlp_trivector(ctx)
 
         geo_scalar, geo_bivector = self.geometric_interaction(vector_new)
-        g_scalar = torch.sigmoid(self.gate_scalar)
-        g_vector = torch.sigmoid(self.gate_vector)
-        g_bivector = torch.sigmoid(self.gate_bivector)
-        g_trivector = torch.sigmoid(self.gate_trivector)
-        scalar_new = g_scalar * (scalar_new + geo_scalar)
-        vector_new = g_vector * vector_new
-        bivector_new = g_bivector * (bivector_new + geo_bivector)
-        trivector_new = g_trivector * trivector_new
+        scalar_new = scalar_new + geo_scalar
+        bivector_new = bivector_new + geo_bivector
 
         return torch.cat([scalar_new, vector_new, bivector_new, trivector_new, residual], dim=-1)

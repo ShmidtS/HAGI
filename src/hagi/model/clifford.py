@@ -23,12 +23,7 @@ spec (`formalization/HAGI/HDIM.lean`).
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import torch
-
-from hagi.utils import _reordering_sign
-from .triton_kernels import TRITON_AVAILABLE, geometric_product_triton
 
 BLADE_COUNT = 8
 DIM = 3
@@ -36,31 +31,19 @@ DIM = 3
 # Grade (popcount) of each blade index.
 GRADE = [bin(i).count("1") for i in range(BLADE_COUNT)]  # [0,1,1,2,1,2,2,3]
 
-# Precomputed constant tensors for frequent Clifford ops
-_REVERSE_SIGNS = torch.tensor([(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)], dtype=torch.float32)
-_GRADE_MASKS = {g: torch.tensor([1.0 if GRADE[i] == g else 0.0 for i in range(BLADE_COUNT)], dtype=torch.float32) for g in range(DIM + 1)}
 
+def _reordering_sign(a: int, b: int) -> int:
+    """Sign from reordering the product of two basis blades into canonical order.
 
-@lru_cache(maxsize=16)
-def _get_reverse_signs_cached(device_type: str, device_index: int | None, dtype_name: str) -> torch.Tensor:
-    device = torch.device(device_type, device_index) if device_index is not None else torch.device(device_type)
-    dtype = getattr(torch, dtype_name)
-    return _REVERSE_SIGNS.to(device=device, dtype=dtype)
-
-
-def _get_reverse_signs(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    return _get_reverse_signs_cached(device.type, device.index, str(dtype).replace("torch.", ""))
-
-
-@lru_cache(maxsize=16)
-def _get_grade_mask_cached(grade: int, device_type: str, device_index: int | None, dtype_name: str) -> torch.Tensor:
-    device = torch.device(device_type, device_index) if device_index is not None else torch.device(device_type)
-    dtype = getattr(torch, dtype_name)
-    return _GRADE_MASKS[grade].to(device=device, dtype=dtype)
-
-
-def _get_grade_mask(grade: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    return _get_grade_mask_cached(grade, device.type, device.index, str(dtype).replace("torch.", ""))
+    Counts transpositions needed to sort the concatenated basis vectors.
+    Metric is Euclidean (+1) so shared indices contribute no extra sign.
+    """
+    a >>= 1
+    swaps = 0
+    while a:
+        swaps += bin(a & b).count("1")
+        a >>= 1
+    return -1 if (swaps & 1) else 1
 
 
 def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
@@ -82,31 +65,17 @@ def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
 # Precomputed tables (module-level constants).
 _OUT_INDEX, _SIGN = build_product_table()
 
-# [8, 8, 8] tensor: PROD_TABLE[c, a, b] = sign[a, b] if a^b == c else 0.
-# Lets us vectorise the geometric product as one einsum.
-_PROD_TABLE = torch.zeros(BLADE_COUNT, BLADE_COUNT, BLADE_COUNT, dtype=torch.float32)
+
+# [8, 8, 8] tensor: STRUCT[a, b, c] = sign[a, b] if a^b == c else 0.
+# Then the geometric product is one contraction: out[..., c] = sum_{a,b} x[..., a] * C[a, b, c] * y[..., b].
+_STRUCT = torch.zeros(BLADE_COUNT, BLADE_COUNT, BLADE_COUNT, dtype=torch.float32)
 for _a in range(BLADE_COUNT):
     for _b in range(BLADE_COUNT):
-        _c = int(_OUT_INDEX[_a, _b])
-        _PROD_TABLE[_c, _a, _b] = _SIGN[_a, _b]
-
-
-@lru_cache(maxsize=16)
-def _get_prod_table_cached(device_type: str, device_index: int | None, dtype_name: str) -> torch.Tensor:
-    device = torch.device(device_type, device_index) if device_index is not None else torch.device(device_type)
-    dtype = getattr(torch, dtype_name)
-    return _PROD_TABLE.to(device=device, dtype=dtype)
-
-
-def _get_prod_table(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    return _get_prod_table_cached(device.type, device.index, str(dtype).replace("torch.", ""))
+        _STRUCT[_a, _b, int(_OUT_INDEX[_a, _b])] = _SIGN[_a, _b]
 
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
-
-    Vectorised: single einsum over the precomputed product table.
-    Triton path is disabled because the Triton kernel does not support autograd.
 
     Args:
         x: [..., 8] multivector coefficients.
@@ -114,22 +83,36 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
     Returns:
         [..., 8] product coefficients.
+
+    Single fused einsum over the precomputed structure constants — vectorized,
+    fp32-accumulated, and `torch.compile`-friendly (no Python blade loop and no
+    `int(tensor)` host sync, which forced a graph break in the looped GDR core).
     """
     assert x.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
-    table = _get_prod_table(x.device, x.dtype)
-    return torch.einsum("cab,...a,...b->...c", table, x, y)
+
+    c = _STRUCT.to(x.device)  # [8,8,8] constant; dynamo constant-folds the device move
+    out = torch.einsum("...a,abc,...b->...c", x, c, y)
+    return out.to(x.dtype)
 
 
 def grade_projection(mv: torch.Tensor, grade: int) -> torch.Tensor:
     """Zero out all blades not of the given grade. Returns [..., 8]."""
-    mask = _get_grade_mask(grade, mv.device, mv.dtype)
+    mask = torch.tensor(
+        [1.0 if GRADE[i] == grade else 0.0 for i in range(BLADE_COUNT)],
+        dtype=mv.dtype,
+        device=mv.device,
+    )
     return mv * mask
 
 
 def reverse(mv: torch.Tensor) -> torch.Tensor:
     """Clifford reverse: sign (-1)^(k(k-1)/2) per grade k. Returns [..., 8]."""
-    signs = _get_reverse_signs(mv.device, mv.dtype)
+    signs = torch.tensor(
+        [(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)],
+        dtype=mv.dtype,
+        device=mv.device,
+    )
     return mv * signs
 
 
