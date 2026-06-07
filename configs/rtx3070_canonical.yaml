@@ -66,7 +66,7 @@ model:
     trivector: 64
     vector: 192
     vector_momentum: 0.5
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   h_dim: 256
   hdim_delay_steps: 1
   hdim_full: true
@@ -121,7 +121,7 @@ training:
   eval_samples: 500
   grad_accum_steps: 2
   grad_clip: 1.0
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   log_interval: 25
   loss_warmup_mode: linear
   magic_norm_max: 1.0
