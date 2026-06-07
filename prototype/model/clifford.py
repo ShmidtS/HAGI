@@ -66,6 +66,23 @@ def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
 _OUT_INDEX, _SIGN = build_product_table()
 
 
+def build_structure_constants() -> torch.Tensor:
+    """Dense [8, 8, 8] structure-constant tensor C[a, b, c] for the Cayley table.
+
+    C[a, b, c] = sign(a, b) if (a XOR b) == c else 0. Then the geometric product
+    is one contraction: out[..., c] = sum_{a,b} x[..., a] * C[a, b, c] * y[..., b].
+    """
+    out_index, sign = build_product_table()
+    c = torch.zeros(BLADE_COUNT, BLADE_COUNT, BLADE_COUNT, dtype=torch.float32)
+    for a in range(BLADE_COUNT):
+        for b in range(BLADE_COUNT):
+            c[a, b, int(out_index[a, b])] = sign[a, b]
+    return c
+
+
+_STRUCT = build_structure_constants()
+
+
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
 
@@ -75,18 +92,17 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
     Returns:
         [..., 8] product coefficients.
+
+    Single fused einsum over the precomputed structure constants — vectorized,
+    fp32-accumulated, and `torch.compile`-friendly (no Python blade loop and no
+    `int(tensor)` host sync, which forced a graph break in the looped GDR core).
     """
     assert x.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
 
-    out = torch.zeros_like(x)
-    # Accumulate every (a, b) blade pair contribution.
-    for a in range(BLADE_COUNT):
-        for b in range(BLADE_COUNT):
-            c = int(_OUT_INDEX[a, b])
-            s = _SIGN[a, b]
-            out[..., c] = out[..., c] + s * x[..., a] * y[..., b]
-    return out
+    c = _STRUCT.to(x.device)  # [8,8,8] constant; dynamo constant-folds the device move
+    out = torch.einsum("...a,abc,...b->...c", x.float(), c, y.float())
+    return out.to(x.dtype)
 
 
 def grade_projection(mv: torch.Tensor, grade: int) -> torch.Tensor:

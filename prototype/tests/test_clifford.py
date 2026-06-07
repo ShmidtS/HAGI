@@ -79,3 +79,21 @@ def test_grade_projection():
 def test_reverse_involution():
     mv = torch.randn(BLADE_COUNT)
     assert torch.allclose(reverse(reverse(mv)), mv, atol=1e-6)
+
+
+def test_vectorized_matches_reference_loop():
+    """The einsum geometric product must equal the explicit blade-pair loop exactly
+    — guards the vectorization that removed the torch.compile graph break."""
+    from prototype.model.clifford import _OUT_INDEX, _SIGN
+
+    torch.manual_seed(0)
+    x = torch.randn(3, 5, BLADE_COUNT, dtype=torch.float64)
+    y = torch.randn(3, 5, BLADE_COUNT, dtype=torch.float64)
+
+    ref = torch.zeros_like(x)
+    for a in range(BLADE_COUNT):
+        for b in range(BLADE_COUNT):
+            c = int(_OUT_INDEX[a, b])
+            ref[..., c] = ref[..., c] + float(_SIGN[a, b]) * x[..., a] * y[..., b]
+
+    assert torch.allclose(geometric_product(x, y), ref, atol=1e-12)
