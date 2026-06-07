@@ -244,6 +244,9 @@ def gpu_util(device: str) -> str:
 
 
 def maybe_compile(model: HAGI, device: str) -> torch.nn.Module:
+    if hasattr(model.cfg, "compile") and model.cfg.compile and device.startswith("cuda"):
+        print("torch.compile enabled (mode=reduce-overhead)")
+        return torch.compile(model, mode="reduce-overhead")
     return model
 
 
@@ -680,7 +683,7 @@ def run_basic(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     optimizer = build_optimizer(model, cfg.get("training", {}))
     get_batch = build_basic_batcher(cfg, args.device, args.train_path, args.data_dir, args.seq_len)
     loop_cfg = build_loop_config(cfg, args.ckpt_dir, args.max_steps)
-    final_loss = train(model, optimizer, get_batch, loop_cfg, device=args.device)
+    final_loss = train(model, optimizer, get_batch, loop_cfg, device=args.device, start_step=start_step)
     save_checkpoint(model, optimizer, loop_cfg.max_steps, str(args.ckpt_dir))
     print(f"final_loss {final_loss:.4f}")
 

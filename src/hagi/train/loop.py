@@ -77,6 +77,7 @@ def train(
     device: str = "cpu",
     eval_get_batch: Callable[..., Any] | None = None,
     on_log: Callable[[dict[str, Any]], None] | None = None,
+    start_step: int = 0,
 ):
     """Run the training loop. Returns the final training loss."""
     if device.startswith("cuda"):
@@ -95,7 +96,7 @@ def train(
         nars_hrm = model.nars_hrm
 
     last_loss = float("nan")
-    for step in range(cfg.max_steps):
+    for step in range(start_step, cfg.max_steps):
         lr = _lr_at(step, cfg)
         base_lr = max(cfg.learning_rate, 1e-12)
         for group in optimizer.param_groups:

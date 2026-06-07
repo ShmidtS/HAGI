@@ -131,7 +131,7 @@ def run(
 
     if start_step:
         print(f"resumed from step {start_step}")
-    loss = train(model, optimizer, get_batch, loop_cfg, device=device)
+    loss = train(model, optimizer, get_batch, loop_cfg, device=device, start_step=start_step)
     print(f"final_loss {loss:.4f}")
 
 
