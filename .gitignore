@@ -19,7 +19,7 @@ AGENTS.md
 .omc/
 meta.json
 .env
-data/
+/data/
 
 # cargo install artifacts
 .crates.toml
