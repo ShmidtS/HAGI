@@ -419,6 +419,7 @@ def compute_loss(
     targets: torch.Tensor,
     model_output: Any = None,
     weights: dict[str, float] | None = None,
+    chunk_size: int = 0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if weights is None:
         loss = F.cross_entropy(
@@ -446,6 +447,7 @@ def compute_loss(
             precomputed_loss=precomputed_loss,
             moe_aux_loss=moe_aux_loss,
             num_moe_layers=num_moe_layers,
+            chunk_size=chunk_size,
         )
     else:
         losses = composite_loss(
@@ -458,6 +460,7 @@ def compute_loss(
             invariant_tgt=model_output.get("invariant_tgt") if isinstance(model_output, dict) else None,
             moe_aux_loss=moe_aux_loss,
             num_moe_layers=num_moe_layers,
+            chunk_size=chunk_size,
         )
     total_loss = losses["L_total"]
     components = {name: value.detach().float() for name, value in losses.items()}
@@ -516,7 +519,8 @@ def run_eval(
             preds = logits.argmax(dim=-1)
             total_correct += ((preds == targets) & valid).sum().item()
             if composite_weights is not None:
-                _, components = compute_loss(logits, targets, output, composite_weights)
+                chunk_size = getattr(model.cfg, 'ce_chunk_size', 0)
+                _, components = compute_loss(logits, targets, output, composite_weights, chunk_size=chunk_size)
                 total_aux += components.get("L_aux", torch.tensor(0.0)).item()
                 total_iso += components.get("L_iso", torch.tensor(0.0)).item()
         num_batches += 1
@@ -980,7 +984,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     if isinstance(output, dict):
                         output.pop("auxiliary_output", None)
                 logits = unwrap_logits(output)
-                loss, components = compute_loss(logits, targets, output, effective_weights)
+                chunk_size = getattr(model_cfg, 'ce_chunk_size', 0)
+                loss, components = compute_loss(logits, targets, output, effective_weights, chunk_size=chunk_size)
                 raw_loss = loss.detach().float()
                 loss = loss / grad_accum_steps
             t_forward += time.perf_counter() - t_fwd_start

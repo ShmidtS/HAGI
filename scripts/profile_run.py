@@ -149,7 +149,8 @@ def profile_full(args, cfg):
             with autocast_ctx(precision, device):
                 output = train_model(tokens, targets=targets, training_mode=composite_weights is not None)
                 logits = unwrap_logits(output)
-                loss, _ = compute_loss(logits, targets, output, composite_weights)
+                chunk_size = getattr(model_cfg, 'ce_chunk_size', 0)
+                loss, _ = compute_loss(logits, targets, output, composite_weights, chunk_size=chunk_size)
                 loss = loss / grad_accum_steps
             if use_scaler:
                 scaler.scale(loss).backward()

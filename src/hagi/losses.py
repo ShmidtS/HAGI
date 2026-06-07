@@ -17,13 +17,25 @@ def cross_entropy_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
     ignore_index: int = -100,
+    chunk_size: int = 0,
 ) -> torch.Tensor:
-    """Compute token cross-entropy with class logits in the final dimension."""
-    return F.cross_entropy(
-        logits.reshape(-1, logits.size(-1)),
-        targets.reshape(-1),
-        ignore_index=ignore_index,
-    )
+    """Compute token cross-entropy with class logits in the final dimension.
+
+    logits: [N, V] (already flattened). The fp32 upcast of the full [N, V] tensor
+    is the dominant activation-memory spike at large N·V (e.g. 8·1024·49152·4B ≈
+    1.6 GB). When chunk_size > 0, the upcast happens per row-chunk so the fp32
+    copy never fully materializes. Numerically identical to the unchunked path
+    (sum over chunks / valid-token count == mean).
+    """
+    if chunk_size <= 0 or logits.size(0) <= chunk_size:
+        return F.cross_entropy(logits, targets, ignore_index=ignore_index)
+    valid = (targets != ignore_index).sum().clamp(min=1)
+    total = torch.zeros((), dtype=torch.float32, device=logits.device)
+    for i in range(0, logits.size(0), chunk_size):
+        lg = logits[i : i + chunk_size].float()
+        tg = targets[i : i + chunk_size]
+        total = total + F.cross_entropy(lg, tg, ignore_index=ignore_index, reduction="sum")
+    return total / valid
 
 
 def auxiliary_gdr_loss(
@@ -199,6 +211,7 @@ def composite_loss(
     precomputed_loss: torch.Tensor | None = None,
     moe_aux_loss: torch.Tensor | None = None,
     num_moe_layers: int | torch.Tensor | None = None,
+    chunk_size: int = 0,
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
     if (
@@ -230,7 +243,7 @@ def composite_loss(
     if precomputed_loss is not None:
         l_ce = precomputed_loss
     else:
-        l_ce = cross_entropy_loss(logits, targets)
+        l_ce = cross_entropy_loss(logits, targets, chunk_size=chunk_size)
     l_total = merged_weights["w_ce"] * l_ce
     result = {"L_CE": l_ce}
     if merged_weights.get("w_aux", 0.0) != 0.0 and auxiliary_output is not None:

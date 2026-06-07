@@ -436,10 +436,12 @@ class HAGI(nn.Module):
         logits = self.lm_head(h)
 
         if targets is not None:
-            loss = F.cross_entropy(
+            from ..losses import cross_entropy_loss
+            loss = cross_entropy_loss(
                 logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
                 ignore_index=ignore_index,
+                chunk_size=self.cfg.ce_chunk_size,
             )
         else:
             loss = None
