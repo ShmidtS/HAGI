@@ -60,6 +60,9 @@ def main():
     ap.add_argument("--steps", type=int, default=None,
                     help="run at most this many steps this session, then checkpoint and exit "
                          "(checkpoint-gated local training; re-run with --resume auto to continue)")
+    ap.add_argument("--train-tokens", type=int, default=None,
+                    help="override data.train_tokens (budget knob). max_steps AND the cosine LR "
+                         "schedule derive from it, so lowering this gives a correct shorter run.")
     ap.add_argument("--hf-repo", default=None,
                     help="HF Hub model repo id (e.g. user/hagi-stage0) to mirror checkpoints to. "
                          "On --resume auto with no local checkpoint, the latest is pulled from here. "
@@ -71,6 +74,9 @@ def main():
 
     cfg = load_config(args.config)
     tcfg = cfg["training"]
+    if args.train_tokens is not None:
+        cfg["data"]["train_tokens"] = args.train_tokens
+        print(f"train_tokens overridden -> {args.train_tokens:,}")
     torch.manual_seed(tcfg.get("seed", 42))
 
     model = HAGI(cfg["model"]).to(args.device)
