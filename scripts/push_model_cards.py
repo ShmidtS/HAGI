@@ -41,9 +41,9 @@ RESULTS = {
 TRAIN_SEED = 42
 EVAL_TOKENS = "819,200"
 
-# Seed-stability summary, filled after the multi-seed B-vs-D runs on held-out val.
-# Example: dict(seeds=[1,2,3,4,5], d_below_b=5, mean_d_minus_b=-0.014, val="shard 6")
-SEED_STABILITY = None
+# Seed-stability: B vs D across 5 seeds at 120M tokens on a held-out shard.
+# Result: D beat B in 0/5 — grade decomposition consistently HURTS held-out loss.
+SEED_STABILITY = dict(seeds=[1, 2, 3, 4, 5], d_below_b=0, mean_d_minus_b=0.0175, val="shard_00006.bin")
 
 
 def _results_table(this: str) -> str:
@@ -222,9 +222,12 @@ batches; lower loss is better). One run per model, training seed {TRAIN_SEED}.
 - Ordering **A < B < C < D** matches the hypothesis: the grade decomposition carries
   the signal; recurrence helps mainly in its presence (loop-alone B barely moves A).
 
-Margins are small (~1.5% perplexity) and this is a single run per config, so the
-result is a **positive preliminary signal, not proof** - see the seed-stability note
-below and the gates in `docs/ABLATION.md`.
+**These are train-set numbers (one run per model).** They did NOT hold up: on
+**held-out** validation across 5 seeds (note below), the ranking **reverses** - B
+beats D every time (mean D-B = +0.0175). The small train-set D-advantage does not
+generalize, consistent with mild overfitting by D's extra parameters. **Conclusion:
+grade decomposition does not improve held-out loss at this scale.** A negative
+result - see `docs/ABLATION.md` for the gates.
 
 **This model's sample** (prompt *"The sun is a star that"*, temperature 0.8, seed {TRAIN_SEED}):
 
