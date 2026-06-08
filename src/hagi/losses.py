@@ -21,12 +21,16 @@ def cross_entropy_loss(
 ) -> torch.Tensor:
     """Compute token cross-entropy with class logits in the final dimension.
 
-    logits: [N, V] (already flattened). The fp32 upcast of the full [N, V] tensor
-    is the dominant activation-memory spike at large N·V (e.g. 8·1024·49152·4B ≈
-    1.6 GB). When chunk_size > 0, the upcast happens per row-chunk so the fp32
-    copy never fully materializes. Numerically identical to the unchunked path
-    (sum over chunks / valid-token count == mean).
+    logits: [..., V] (any shape; last dim is vocab). Internally flattened to [N, V].
+    The fp32 upcast of the full [N, V] tensor is the dominant activation-memory
+    spike at large N·V (e.g. 8·1024·49152·4B ≈ 1.6 GB). When chunk_size > 0, the
+    upcast happens per row-chunk so the fp32 copy never fully materializes.
+    Numerically identical to the unchunked path (sum over chunks / valid-token
+    count == mean).
     """
+    if logits.ndim > 2:
+        logits = logits.reshape(-1, logits.size(-1))
+        targets = targets.reshape(-1)
     if chunk_size <= 0 or logits.size(0) <= chunk_size:
         return F.cross_entropy(logits, targets, ignore_index=ignore_index)
     valid = (targets != ignore_index).sum().clamp(min=1)

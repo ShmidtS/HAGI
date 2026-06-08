@@ -49,7 +49,7 @@ def load_tokenizer(name: str):
 
 
 @register_model("hagi")
-class HAGILMEval(LM):
+class HAGILMEval(LM):  # type: ignore[misc]
     def __init__(self, ckpt: str, tokenizer: str = DEFAULT_TOKENIZER,
                  device: str = "cuda", max_length: int = 4096, **kwargs):
         super().__init__()
