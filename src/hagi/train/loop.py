@@ -118,8 +118,9 @@ def train(
 
         if use_scaler:
             scaler.unscale_(optimizer)
+        grad_norm: float | None = None
         if cfg.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip).item()
 
         if use_scaler:
             scaler.step(optimizer)
@@ -131,7 +132,8 @@ def train(
 
         # NARS HRM control: observe and adapt
         if nars_hrm is not None:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf")).item()
+            if grad_norm is None:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf")).item()
             nars_hrm.observe_train_step(last_loss, grad_norm)
             policy = nars_hrm.resolve_policy()
             if hasattr(model, "hrm") and model.hrm is not None:
