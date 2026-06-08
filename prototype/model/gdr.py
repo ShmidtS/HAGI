@@ -34,6 +34,7 @@ class GradeConfig:
     residual: int = 256
     scalar_momentum: float = 0.9
     vector_momentum: float = 0.5
+    geo_interaction: bool = True  # if False, skip the geometric-product cross-grade signal
 
     @property
     def hidden_size(self) -> int:
@@ -107,8 +108,12 @@ class GradeDecomposedRecurrence(nn.Module):
         bivector_new = self.mlp_bivector(ctx)
         trivector_new = self.mlp_trivector(ctx)
 
-        geo_scalar, geo_bivector = self.geometric_interaction(vector_new)
-        scalar_new = scalar_new + geo_scalar
-        bivector_new = bivector_new + geo_bivector
+        # The geometric-product cross-grade signal — the part the held-out ablation
+        # implicates. `geo_interaction=False` keeps grades + momentum but drops it,
+        # isolating whether the geometric product specifically is what hurts.
+        if self.cfg.geo_interaction:
+            geo_scalar, geo_bivector = self.geometric_interaction(vector_new)
+            scalar_new = scalar_new + geo_scalar
+            bivector_new = bivector_new + geo_bivector
 
         return torch.cat([scalar_new, vector_new, bivector_new, trivector_new, residual], dim=-1)
