@@ -11,10 +11,8 @@ from __future__ import annotations
 from typing import Any, cast
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-from .binary_factorized import BinaryFactorizedLinear
 from .transformer import GroupedQueryAttention, RMSNorm, SwiGLU, TransformerBlock, build_rope_cache
 
 

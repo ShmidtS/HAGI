@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 

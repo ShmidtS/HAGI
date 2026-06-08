@@ -16,8 +16,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .binary_factorized import BinaryFactorizedLinear
-from .clifford import BLADE_COUNT, geometric_product, inner_product
-from .triton_kernels import TRITON_AVAILABLE, sparse_attention_triton
+from .clifford import BLADE_COUNT
 
 
 @dataclass(slots=True)

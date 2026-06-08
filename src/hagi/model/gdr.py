@@ -20,7 +20,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from .clifford import BLADE_COUNT, geometric_product, grade_projection

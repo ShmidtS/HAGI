@@ -94,7 +94,6 @@ def train(
     # NARS HRM controller setup
     nars_hrm = None
     if hasattr(model, "nars_hrm") and model.nars_hrm is not None:
-        from hagi.nars.adapters import HrmControlPolicy
         nars_hrm = model.nars_hrm
 
     last_loss = float("nan")
