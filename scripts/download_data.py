@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import array
+import concurrent.futures
 import hashlib
 import os
 from pathlib import Path
 from typing import Any
 
+import json as _json
 import numpy as np
 
 from hagi.data.tokenizer import SMOLLM2_TOKENIZER, TokenizerWrapper
@@ -19,6 +22,38 @@ if _env_path.exists():
             if line.startswith("HF_TOKEN="):
                 os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip().strip("\"'")
                 break
+
+
+def _tokenize_chunk(
+    lines: list[str],
+    tokenizer: Any,
+    min_length: int,
+    eos_token_id: int | None,
+    _fast_json: Any = _json,
+) -> np.ndarray:
+    texts: list[str] = []
+    for line in lines:
+        try:
+            obj = _fast_json.loads(line)
+        except Exception:
+            continue
+        text = obj.get("text", "")
+        if not text:
+            continue
+        texts.append(text)
+    if not texts:
+        return np.asarray([], dtype=np.uint16)
+    # Direct Rust tokenizer — no BatchEncoding / attention_mask overhead
+    ids_list = tokenizer.fast_batch_encode(texts)
+    tokens = array.array("H")
+    for ids in ids_list:
+        if len(ids) < min_length:
+            continue
+        if eos_token_id is not None:
+            ids.append(eos_token_id)
+        tokens.extend(ids)
+    return np.frombuffer(tokens, dtype=np.uint16).copy()
+
 
 DATASET_NAME = "HuggingFaceFW/fineweb-edu"
 
@@ -189,6 +224,7 @@ def write_mix_manifest(
 ) -> Path:
     """Write data/mix.json manifest (no actual download, code path only)."""
     import json
+
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "mix.json"
     payload = {
@@ -199,7 +235,9 @@ def write_mix_manifest(
         "token_count": token_count,
         "presets": {name: DATASET_PRESETS.get(name, {}) for name in mix},
     }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     return path
 
 
@@ -227,7 +265,9 @@ def flush_shard(tokens: list[int], output_dir: Path, shard_idx: int) -> Path:
     return path
 
 
-def materialize_token_bins(output_dir: Path, tokens_by_source: dict[str, list[int]]) -> dict[str, Path]:
+def materialize_token_bins(
+    output_dir: Path, tokens_by_source: dict[str, list[int]]
+) -> dict[str, Path]:
     import json
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -240,7 +280,11 @@ def materialize_token_bins(output_dir: Path, tokens_by_source: dict[str, list[in
         memmap[:] = array[:]
         memmap.flush()
         paths[name] = path
-        manifest["sources"][name] = {"path": path.name, "tokens": int(array.size), "dtype": "uint16"}
+        manifest["sources"][name] = {
+            "path": path.name,
+            "tokens": int(array.size),
+            "dtype": "uint16",
+        }
     (output_dir / "download_manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -251,9 +295,17 @@ def materialize_token_bins(output_dir: Path, tokens_by_source: dict[str, list[in
 def _row_text(source: str, row: dict[str, Any]) -> str:
     if source == "smoltalk":
         messages = row.get("messages", [])
-        return "\n".join(str(message.get("content", "")) for message in messages if isinstance(message, dict))
+        return "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if isinstance(message, dict)
+        )
     if source == "python_instruct":
-        parts = [row.get("instruction", ""), row.get("input", ""), row.get("output", "")]
+        parts = [
+            row.get("instruction", ""),
+            row.get("input", ""),
+            row.get("output", ""),
+        ]
         return "\n".join(str(part) for part in parts if part)
     if source == "tinycodes":
         for key in ("text", "code", "content"):
@@ -272,69 +324,196 @@ def _dataset_spec_for_source(source: str) -> tuple[str, str | list[str] | None, 
     return str(preset["dataset"]), preset.get("name"), str(preset.get("split", "train"))  # type: ignore
 
 
+def download_raw_texts(
+    source: str,
+    dataset_name: str,
+    dataset_config: str | list[str] | None,
+    split: str,
+    raw_dir: Path,
+    target_chars: int,
+    min_text_chars: int = 100,
+) -> Path:
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise ImportError("install datasets: pip install datasets") from exc
+
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = raw_dir / f"{source}.jsonl"
+    if raw_path.exists() and raw_path.stat().st_size > 0:
+        print(f"source={source} raw_exists={raw_path.stat().st_size}B skip_download")
+        return raw_path
+
+    load_kwargs: dict[str, Any] = {"split": split, "streaming": True}
+    if dataset_config and not isinstance(dataset_config, list):
+        load_kwargs["name"] = dataset_config
+
+    try:
+        dataset = load_dataset(dataset_name, **load_kwargs)
+    except Exception as exc:
+        print(f"source={source} dataset={dataset_name} load_failed={exc!r}")
+        raise
+
+    total_chars = 0
+    rows_written = 0
+    with raw_path.open("w", encoding="utf-8") as f:
+        for row in dataset:
+            text = _row_text(source, row if isinstance(row, dict) else {})
+            if not text or len(text) < min_text_chars:
+                continue
+            f.write(_json.dumps({"text": text}, ensure_ascii=False) + "\n")
+            total_chars += len(text)
+            rows_written += 1
+            if total_chars >= target_chars:
+                break
+
+    print(f"source={source} rows_written={rows_written} chars={total_chars}")
+    return raw_path
+
+
+def tokenize_source_parallel(
+    source: str,
+    raw_path: Path,
+    output_dir: Path,
+    tokenizer_name: str,
+    target_tokens: int,
+    min_length: int,
+    num_workers: int = 8,
+    chunk_lines: int = 2000,
+    skip_existing: bool = False,
+) -> Path:
+    path = output_dir / f"{source}.bin"
+    if skip_existing and path.exists():
+        size = path.stat().st_size
+        if size > 0 and size % 2 == 0:
+            existing = np.memmap(path, dtype=np.uint16, mode="r")
+            existing_count = int(existing.shape[0])
+            del existing
+            if existing_count > 0:
+                print(f"source={source} skip_existing tokens={existing_count}")
+                return path
+
+    tokenizer = TokenizerWrapper.smollm2(tokenizer_name, use_fast=True)
+    eos_token_id = (
+        int(tokenizer.eos_token_id) if tokenizer.eos_token_id is not None else None
+    )
+
+    written = 0
+    chunk: list[str] = []
+
+    print(f"source={source} chunk_lines={chunk_lines}")
+
+    try:
+        import orjson as _fast_json
+    except ImportError:
+        _fast_json = _json
+
+    with path.open("wb") as f, raw_path.open("r", encoding="utf-8") as r:
+        while written < target_tokens:
+            chunk = []
+            for line in r:
+                chunk.append(line[:-1] if line.endswith("\n") else line)
+                if len(chunk) >= chunk_lines:
+                    break
+            if not chunk:
+                break
+            arr = _tokenize_chunk(
+                chunk, tokenizer, min_length, eos_token_id, _fast_json
+            )
+            if arr.size > 0:
+                remaining = target_tokens - written
+                if arr.size > remaining:
+                    arr = arr[:remaining]
+                arr.tofile(f)
+                written += arr.size
+
+    print(f"source={source} tokens={written}")
+    return path
+
+
 def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:
     try:
         from datasets import load_dataset
     except ImportError as exc:
-        raise ImportError("install datasets to download mixed data: pip install datasets") from exc
+        raise ImportError(
+            "install datasets to download mixed data: pip install datasets"
+        ) from exc
 
-    tokenizer = TokenizerWrapper.smollm2(SMOLLM2_TOKENIZER, use_fast=True)
     target_tokens = parse_token_count(args.subset)
-    tokens_by_source: dict[str, list[int]] = {}
     paths: dict[str, Path] = {}
     skip_existing = bool(getattr(args, "skip_existing", False))
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
-    for source, ratio in args.mix_ratios.items():
-        target_path = output_dir / f"{source}.bin"
-        if skip_existing and target_path.exists():
-            size = target_path.stat().st_size
-            if size > 0 and size % 2 == 0:
-                existing = np.memmap(target_path, dtype=np.uint16, mode="r")
-                existing_count = int(existing.shape[0])
-                del existing
-                if existing_count > 0:
-                    paths[source] = target_path
-                    print(f"source={source} skip_existing tokens={existing_count}")
-                else:
-                    print(f"source={source} existing bin is empty (tokens=0); will re-download")
-            else:
-                print(f"source={source} existing bin size={size}B (invalid); will re-download")
-            continue
-        source_target = max(args.min_source_tokens, int(target_tokens * ratio))
-        dataset_name, dataset_config, split = _dataset_spec_for_source(source)
-        load_kwargs: dict[str, Any] = {"split": split, "streaming": True}
-        if dataset_config:
-            load_kwargs["name"] = dataset_config
+    raw_dir = getattr(args, "raw_dir", None)
+    if raw_dir is None:
+        raw_dir = output_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    download_workers = int(
+        getattr(args, "download_workers", min(len(args.mix_ratios), 4))
+    )
+
+    # Stage 1: parallel download all raw texts
+    raw_tasks: list[tuple[str, Path, int]] = []
+    download_futures: dict[concurrent.futures.Future[Any], str] = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=download_workers
+    ) as executor:
+        for source, ratio in args.mix_ratios.items():
+            target_path = output_dir / f"{source}.bin"
+            if skip_existing and target_path.exists():
+                size = target_path.stat().st_size
+                if size > 0 and size % 2 == 0:
+                    existing = np.memmap(target_path, dtype=np.uint16, mode="r")
+                    existing_count = int(existing.shape[0])
+                    del existing
+                    if existing_count > 0:
+                        paths[source] = target_path
+                        print(f"source={source} skip_existing tokens={existing_count}")
+                        continue
+            source_target = max(args.min_source_tokens, int(target_tokens * ratio))
+            dataset_name, dataset_config, split = _dataset_spec_for_source(source)
+            target_chars = max(1, source_target * 5)
+            future = executor.submit(
+                download_raw_texts,
+                source,
+                dataset_name,
+                dataset_config,
+                split,
+                raw_dir,
+                target_chars,
+                min_text_chars=100,
+            )
+            download_futures[future] = source
+
+        for future in concurrent.futures.as_completed(download_futures):
+            source = download_futures[future]
+            try:
+                raw_path = future.result()
+                source_target = max(
+                    args.min_source_tokens, int(target_tokens * args.mix_ratios[source])
+                )
+                raw_tasks.append((source, raw_path, source_target))
+            except Exception as exc:
+                print(f"source={source} download_failed={exc!r}")
+
+    # Stage 2: sequential tokenize (one source at a time)
+    for source, raw_path, source_target in raw_tasks:
         try:
-            dataset = load_dataset(dataset_name, **load_kwargs)
-            tokens: list[int] = []
-            skipped = 0
-            for row in dataset:
-                text = _row_text(source, row if isinstance(row, dict) else {})
-                if not text:
-                    continue
-                ids = tokenizer.encode(text, add_special_tokens=False, truncation=True, max_length=8192)
-                if len(ids) < args.min_length:
-                    skipped += 1
-                    continue
-                if tokenizer.eos_token_id is not None:
-                    ids.append(int(tokenizer.eos_token_id))
-                remaining = source_target - len(tokens)
-                tokens.extend(ids[:remaining])
-                if len(tokens) >= source_target:
-                    break
-        except Exception as exc:  # HF streaming is fragile on long iterations; skip & continue.
-            print(f"source={source} dataset={dataset_name} FAILED error={exc!r}")
-            continue
-        if not tokens:
-            print(f"source={source} dataset={dataset_name} empty (no rows yielded)")
-            continue
-        tokens_by_source[source] = tokens
-        # Flush after each source so a crash later does not lose progress.
-        materialize_token_bins(output_dir, {source: tokens})
-        paths[source] = output_dir / f"{source}.bin"
-        print(f"source={source} dataset={dataset_name} tokens={len(tokens)} skipped={skipped}")
+            tokenize_source_parallel(
+                source,
+                raw_path,
+                output_dir,
+                SMOLLM2_TOKENIZER,
+                source_target,
+                args.min_length,
+                num_workers=15,
+                chunk_lines=2000,
+                skip_existing=skip_existing,
+            )
+            paths[source] = output_dir / f"{source}.bin"
+        except Exception as exc:
+            print(f"source={source} tokenize_failed={exc!r}")
+
     return paths
 
 
@@ -353,11 +532,15 @@ def download_sft_dataset(args: argparse.Namespace) -> None:
     try:
         from datasets import load_dataset
     except ImportError as exc:
-        raise ImportError("install datasets to download SFT data: pip install datasets") from exc
+        raise ImportError(
+            "install datasets to download SFT data: pip install datasets"
+        ) from exc
 
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
-    dataset = load_dataset(args.dataset, name=args.dataset_config, split=args.split, streaming=False)
+    dataset = load_dataset(
+        args.dataset, name=args.dataset_config, split=args.split, streaming=False
+    )
 
     rows: list[dict[str, Any]] = []
     for row in dataset:
@@ -378,13 +561,17 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
     try:
         from datasets import load_dataset
     except ImportError as exc:
-        raise ImportError("install datasets to download FineWeb-Edu: pip install datasets") from exc
+        raise ImportError(
+            "install datasets to download FineWeb-Edu: pip install datasets"
+        ) from exc
 
     target_tokens = parse_token_count(args.subset)
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = TokenizerWrapper.smollm2(SMOLLM2_TOKENIZER, use_fast=True)
-    dataset = load_dataset(DATASET_NAME, name=args.name, split=args.split, streaming=True)
+    dataset = load_dataset(
+        DATASET_NAME, name=args.name, split=args.split, streaming=True
+    )
 
     shard_tokens: list[int] = []
     total_tokens = 0
@@ -396,14 +583,18 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
         text = row.get("text", "") if isinstance(row, dict) else ""
         if not text:
             continue
-        ids = tokenizer.encode(text, add_special_tokens=False, truncation=True, max_length=8192)
+        ids = tokenizer.encode(
+            text, add_special_tokens=False, truncation=True, max_length=8192
+        )
         if len(ids) < args.min_length:
             skipped += 1
             continue
         if len(set(ids)) / max(1, len(ids)) < args.dedup_ratio:
             skipped += 1
             continue
-        token_hash = hashlib.sha256(np.asarray(ids, dtype=np.uint16).tobytes()).hexdigest()
+        token_hash = hashlib.sha256(
+            np.asarray(ids, dtype=np.uint16).tobytes()
+        ).hexdigest()
         if token_hash in seen_hashes:
             skipped += 1
             continue
@@ -417,7 +608,9 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
         shard_tokens.extend(ids)
         total_tokens += len(ids)
         while len(shard_tokens) >= args.shard_tokens:
-            written.append(flush_shard(shard_tokens[: args.shard_tokens], output_dir, shard_idx))
+            written.append(
+                flush_shard(shard_tokens[: args.shard_tokens], output_dir, shard_idx)
+            )
             shard_tokens = shard_tokens[args.shard_tokens :]
             shard_idx += 1
         if total_tokens >= target_tokens:
@@ -448,20 +641,71 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download and tokenize a FineWeb-Edu subset for HAGI.")
-    parser.add_argument("--subset", default="10M", help="target token count, e.g. 10M or 100M")
-    parser.add_argument("--output", "--output-dir", type=Path, dest="output", default=Path("E:/HAGI/data/fineweb_edu_smollm2"))
+    parser = argparse.ArgumentParser(
+        description="Download and tokenize a FineWeb-Edu subset for HAGI."
+    )
+    parser.add_argument(
+        "--subset", default="10M", help="target token count, e.g. 10M or 100M"
+    )
+    parser.add_argument(
+        "--output",
+        "--output-dir",
+        type=Path,
+        dest="output",
+        default=Path("E:/HAGI/data/fineweb_edu_smollm2"),
+    )
     parser.add_argument("--name", default="sample-10BT")
     parser.add_argument("--split", default="train")
     parser.add_argument("--shard-tokens", type=int, default=10_000_000)
-    parser.add_argument("--min-length", type=int, default=50, help="minimum token count per sample")
-    parser.add_argument("--dedup-ratio", type=float, default=0.9, help="minimum ratio of unique tokens (diversity filter)")
-    parser.add_argument("--dataset", default=None, help="HuggingFace SFT dataset name (e.g. HuggingFaceTB/smoltalk)")
-    parser.add_argument("--dataset-config", default="all", help="dataset config/subset name (e.g. 'all' for smoltalk)")
-    parser.add_argument("--sft", action="store_true", help="download SFT conversational dataset instead of raw tokens")
-    parser.add_argument("--materialize-mix", action="store_true", help="download each mix source into source-named .bin files")
-    parser.add_argument("--skip-existing", action="store_true", help="skip sources whose <source>.bin already exists in --output")
-    parser.add_argument("--min-source-tokens", type=int, default=1024, help="minimum tokens per materialized mix source")
+    parser.add_argument(
+        "--min-length", type=int, default=50, help="minimum token count per sample"
+    )
+    parser.add_argument(
+        "--dedup-ratio",
+        type=float,
+        default=0.9,
+        help="minimum ratio of unique tokens (diversity filter)",
+    )
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help="HuggingFace SFT dataset name (e.g. HuggingFaceTB/smoltalk)",
+    )
+    parser.add_argument(
+        "--dataset-config",
+        default="all",
+        help="dataset config/subset name (e.g. 'all' for smoltalk)",
+    )
+    parser.add_argument(
+        "--sft",
+        action="store_true",
+        help="download SFT conversational dataset instead of raw tokens",
+    )
+    parser.add_argument(
+        "--materialize-mix",
+        action="store_true",
+        help="download each mix source into source-named .bin files",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="skip sources whose <source>.bin already exists in --output",
+    )
+    parser.add_argument(
+        "--min-source-tokens",
+        type=int,
+        default=1024,
+        help="minimum tokens per materialized mix source",
+    )
+    parser.add_argument(
+        "--raw-dir", type=Path, default=None, help="directory for raw text cache"
+    )
+    parser.add_argument(
+        "--tokenize-workers",
+        type=int,
+        default=4,
+        help="parallel workers for tokenization",
+    )
     parser.add_argument(
         "--mix",
         default="edu70_cosmo15_chat10_code5",
