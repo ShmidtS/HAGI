@@ -226,7 +226,6 @@ class HAGI(nn.Module):
         cos, sin = self._rope_cache(T, h.device, h.dtype, cache_pos)
         next_key_values = [] if use_cache else None
         layer_idx = 0
-        gdr_output = None
         gdr_state = None
         pre_gdr_h = None
         use_gradient_checkpointing = self.cfg.gradient_checkpointing and self.training and not use_cache
@@ -261,18 +260,23 @@ class HAGI(nn.Module):
                 h = run_block(block, h)  # type: ignore[assignment]
             layer_idx += 1
 
+        # Precompute rotor index and gdr dispatch type once
+        tgt_idx = None
+        gdr_type = "none"
+        if self.gdr is not None:
+            if training_mode and hasattr(self.gdr, "rotors"):
+                num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
+                tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
+            if training_mode and isinstance(self.gdr, DelayedHDIM) and self.gdr.delay_steps > 1:
+                gdr_type = "delayed"
+            elif training_mode and isinstance(self.gdr, HDIMFull):
+                gdr_type = "hdim"
+            else:
+                gdr_type = "default"
+
         if self.hrm is not None:
             if self.gdr is not None:
-                assert self.gdr is not None
-                if (
-                    training_mode
-                    and hasattr(self.gdr, "delay_steps")
-                    and isinstance(self.gdr, (HDIMFull, DelayedHDIM))
-                    and isinstance(self.gdr.delay_steps, int)
-                    and self.gdr.delay_steps > 1
-                ):
-                    num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                    tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
+                if gdr_type == "delayed":
                     h, _, _, gdr_state, pre_gdr_h = self.hrm(
                         h,
                         self.reasoning,
@@ -284,9 +288,7 @@ class HAGI(nn.Module):
                         moe_aux_losses=moe_aux_losses,
                         nars_controller=self.nars_hrm,
                     )
-                elif training_mode and isinstance(self.gdr, HDIMFull):
-                    num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                    tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
+                elif gdr_type == "hdim":
                     gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                     pre_gdr_h = h if need_iso else None
                     h = gdr_state["fused"]
@@ -294,7 +296,6 @@ class HAGI(nn.Module):
                 else:
                     h = self.gdr(h)
                     h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
-                gdr_output = h
             else:
                 h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
             layer_idx += len(self.reasoning)
@@ -302,16 +303,7 @@ class HAGI(nn.Module):
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
             for i in range(loops):
                 if self.gdr is not None:
-                    assert self.gdr is not None
-                    if (
-                        training_mode
-                        and hasattr(self.gdr, "delay_steps")
-                        and isinstance(self.gdr, (HDIMFull, DelayedHDIM))
-                        and isinstance(self.gdr.delay_steps, int)
-                        and self.gdr.delay_steps > 1
-                    ):
-                        num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                        tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
+                    if gdr_type == "delayed":
                         for j, block in enumerate(self.reasoning):
                             current_step = i * len(self.reasoning) + j
                             gdr_state = self.gdr(
@@ -323,7 +315,6 @@ class HAGI(nn.Module):
                             )
                             pre_gdr_h = h if need_iso else None
                             h = gdr_state["fused"]
-                            gdr_output = h
                             past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
                             if use_cache:
                                 h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
@@ -332,13 +323,10 @@ class HAGI(nn.Module):
                             else:
                                 h = run_block(block, h)  # type: ignore[assignment]
                             layer_idx += 1
-                    elif training_mode and isinstance(self.gdr, HDIMFull):
-                        num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                        tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
+                    elif gdr_type == "hdim":
                         gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                         pre_gdr_h = h if need_iso else None
                         h = gdr_state["fused"]
-                        gdr_output = h
                         for block in self.reasoning:
                             past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
                             if use_cache:
@@ -350,7 +338,6 @@ class HAGI(nn.Module):
                             layer_idx += 1
                     else:
                         h = self.gdr(h)
-                        gdr_output = h
                         for block in self.reasoning:
                             past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
                             if use_cache:
@@ -390,21 +377,19 @@ class HAGI(nn.Module):
             k = self.msa.k_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
             v = self.msa.v_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
 
-            slots, routing_keys = self.hdim_slot_router.batch_create_slots(
+            slot_ids, routing_keys, k_caches, v_caches = self.hdim_slot_router.batch_create_slots(
                 hidden_states=h,
                 k_cache=k,
                 v_cache=v,
                 slot_id_base=0,
                 domain_id=0,
             )
-            self.msa_registry.batch_register(slots)
-            self.msa_registry.set_routing_keys(routing_keys)
+            self.msa_registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)
 
             nars_weights = None
             if self.cfg.use_nars and self.nars_msa is not None:
                 with torch.no_grad():
-                    inv = self.hdim_slot_router.routing_key(h)
-                    query_nars = inv.mean(dim=(0, 1))  # [key_dim]
+                    query_nars = routing_keys.mean(dim=0)  # [key_dim]
                     top_k_ids, top_values = self.nars_msa.route_top_k_with_nars(
                         self.msa_registry, query_nars, self.cfg.msa_top_k
                     )

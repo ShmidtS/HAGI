@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-import importlib.util
 import math
-import os
-import platform
 import time
 import warnings
 from functools import partial
@@ -16,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Subset
 
 # Note: expandable_segments not supported on Windows; skip
 
@@ -135,8 +132,8 @@ def memmap_batcher(path: Path, batch_size: int, seq_len: int, device: str, dtype
     def get_batch() -> tuple[torch.Tensor, torch.Tensor]:
         indices = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
         xs, ys = zip(*(dataset[index] for index in indices), strict=True)
-        x = torch.tensor(np.array(xs), dtype=torch.long, device=device)
-        y = torch.tensor(np.array(ys), dtype=torch.long, device=device)
+        x = torch.from_numpy(np.stack(xs)).to(device=device, dtype=torch.long, non_blocking=device.startswith("cuda"))
+        y = torch.from_numpy(np.stack(ys)).to(device=device, dtype=torch.long, non_blocking=device.startswith("cuda"))
         return x, y
 
     return get_batch
@@ -484,17 +481,13 @@ def compute_loss(
 
 
 def get_grad_norm(model: torch.nn.Module) -> float:
-    total = 0.0
-    device = None
+    total = torch.tensor(0.0, device=next(model.parameters()).device)
     for p in model.parameters():
         if p.grad is not None:
-            grad = p.grad
-            if device is None:
-                device = grad.device
-            total += grad.pow(2).sum().item()
+            total += p.grad.pow(2).sum()
     if total == 0.0:
         return 0.0
-    return float(total ** 0.5)
+    return float(total.sqrt().item())
 
 
 @torch.no_grad()
@@ -509,11 +502,11 @@ def run_eval(
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
-    total_ce = 0.0
-    total_tokens = 0
-    total_correct = 0
-    total_aux = 0.0
-    total_iso = 0.0
+    total_ce = torch.tensor(0.0, device=device)
+    total_tokens = torch.tensor(0, device=device)
+    total_correct = torch.tensor(0, device=device)
+    total_aux = torch.tensor(0.0, device=device)
+    total_iso = torch.tensor(0.0, device=device)
     num_batches = 0
     for batch, targets in eval_loader:
         batch = to_device(batch, device, pin_memory)
@@ -529,26 +522,27 @@ def run_eval(
                 ignore_index=-100,
                 reduction="sum",
             )
-            total_ce += ce.item()
+            total_ce += ce
             valid = targets != -100
-            total_tokens += valid.sum().item()
+            total_tokens += valid.sum()
             preds = logits.argmax(dim=-1)
-            total_correct += ((preds == targets) & valid).sum().item()
+            total_correct += ((preds == targets) & valid).sum()
             if composite_weights is not None:
                 chunk_size = getattr(model.cfg, 'ce_chunk_size', 0)
                 _, components = compute_loss(logits, targets, output, composite_weights, chunk_size=chunk_size)
-                total_aux += components.get("L_aux", torch.tensor(0.0)).item()
-                total_iso += components.get("L_iso", torch.tensor(0.0)).item()
+                total_aux += components.get("L_aux", torch.tensor(0.0, device=device))
+                total_iso += components.get("L_iso", torch.tensor(0.0, device=device))
         num_batches += 1
     if was_training:
         model.train()
     if num_batches == 0:
         return {"ppl": float("nan"), "acc": float("nan"), "L_aux": float("nan"), "L_iso": float("nan")}
+    total_tokens = int(total_tokens.item())
     return {
-        "ppl": math.exp(total_ce / max(1, total_tokens)),
-        "acc": 100.0 * total_correct / max(1, total_tokens),
-        "L_aux": total_aux / max(1, num_batches),
-        "L_iso": total_iso / max(1, num_batches),
+        "ppl": math.exp(float(total_ce.item()) / max(1, total_tokens)),
+        "acc": 100.0 * float(total_correct.item()) / max(1, total_tokens),
+        "L_aux": float(total_aux.item()) / max(1, num_batches),
+        "L_iso": float(total_iso.item()) / max(1, num_batches),
     }
 
 
@@ -1058,7 +1052,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         t_opt_start = time.perf_counter()
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
-        t_unscale = time.perf_counter()
+        t_unscale_end = time.perf_counter()
 
         if grad_clip > 0:
             full_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -1072,10 +1066,10 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             full_grad_norm_val = get_grad_norm(model)
             if not math.isfinite(full_grad_norm_val) or full_grad_norm_val > 100.0 or (0.0 < full_grad_norm_val < 1e-6):
                 print(f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}")
-        t_clip = time.perf_counter()
+        t_clip_end = time.perf_counter()
 
         magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
-        t_magic = time.perf_counter()
+        t_magic_end = time.perf_counter()
         if use_scaler:
             scaler.step(optimizer)  # type: ignore[arg-type]
             scaler.update()
@@ -1083,10 +1077,10 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             optimizer.step()  # type: ignore[arg-type]
         t_opt_end = time.perf_counter()
         t_opt = t_opt_end - t_opt_start
-        t_opt_step = t_opt_end - t_magic
-        t_unscale = t_unscale - t_opt_start
-        t_clip = t_clip - t_unscale - t_opt_start
-        t_magic = t_magic - t_clip - t_unscale - t_opt_start
+        t_opt_step = t_opt_end - t_magic_end
+        t_unscale = t_unscale_end - t_opt_start
+        t_clip = t_clip_end - t_unscale_end
+        t_magic = t_magic_end - t_clip_end
         if step >= ema_start_step:
             update_ema(model, model_ema, ema_decay)
 

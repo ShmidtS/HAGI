@@ -99,7 +99,7 @@ class GradeDecomposedRecurrence(nn.Module):
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         scalar, vector, bivector, trivector, residual = self.split(h)
-        ctx = torch.cat([scalar, vector, bivector, trivector], dim=-1)
+        ctx = h[..., :self.cfg.bounds[4]]
 
         sm, vm = self.cfg.scalar_momentum, self.cfg.vector_momentum
         scalar_new = sm * scalar + (1 - sm) * self.mlp_scalar(ctx)

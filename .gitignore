@@ -46,3 +46,4 @@ checkpoints/
 *.log
 torch-compile.bat
 profile_*
+profiler_logs/

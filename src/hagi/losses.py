@@ -34,9 +34,9 @@ def cross_entropy_loss(
     if chunk_size <= 0 or logits.size(0) <= chunk_size:
         return F.cross_entropy(logits, targets, ignore_index=ignore_index)
     valid = (targets != ignore_index).sum().clamp(min=1)
-    total = torch.zeros((), dtype=torch.float32, device=logits.device)
+    total = torch.zeros((), dtype=logits.dtype, device=logits.device)
     for i in range(0, logits.size(0), chunk_size):
-        lg = logits[i : i + chunk_size].float()
+        lg = logits[i : i + chunk_size]
         tg = targets[i : i + chunk_size]
         total = total + F.cross_entropy(lg, tg, ignore_index=ignore_index, reduction="sum")
     return total / valid

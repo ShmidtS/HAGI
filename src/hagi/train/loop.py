@@ -106,7 +106,7 @@ def train(
             group["lr"] = init_lr * (lr / base_lr)
 
         optimizer.zero_grad(set_to_none=True)
-        accum_loss = 0.0
+        accum_loss_tensor = None
         for _ in range(cfg.grad_accum_steps):
             x, y = get_batch()
             with _autocast_ctx(cfg.precision, device):
@@ -114,7 +114,8 @@ def train(
                 loss = result["loss"] if isinstance(result, dict) else result[1]
                 loss = loss / cfg.grad_accum_steps
             scaler.scale(loss).backward() if use_scaler else loss.backward()
-            accum_loss += loss.item()
+            accum_loss_tensor = loss.detach() if accum_loss_tensor is None else accum_loss_tensor + loss.detach()
+        accum_loss = accum_loss_tensor.item() if accum_loss_tensor is not None else float("nan")
 
         if use_scaler:
             scaler.unscale_(optimizer)

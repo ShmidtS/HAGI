@@ -33,85 +33,125 @@ class MemorySlot:
 class SlotRegistry:
     """Registers memory slots and indexes their routing keys.
 
+    Stores slots as batched tensors to avoid per-slot Python object overhead.
     Contract **RouteWithinSlots**: every slot ID returned by the router must exist
     in the registry.  Missing IDs raise ``KeyError``.
     """
 
     def __init__(self, max_slots: int = 10000) -> None:
-        self._slots: Dict[int, MemorySlot] = {}
-        self._routing_keys: torch.Tensor | None = None
         self._slot_ids: List[int] = []
+        self._id_to_idx: Dict[int, int] = {}
+        self._routing_keys: torch.Tensor | None = None
+        self._k_caches: torch.Tensor | None = None
+        self._v_caches: torch.Tensor | None = None
         self._slot_ids_tensor: torch.Tensor | None = None
         self._max_slots = max_slots
+        self._slots_compat: Dict[int, MemorySlot] = {}
 
-    def _evict_if_full(self) -> None:
-        """LRU eviction: remove oldest slot when at capacity."""
-        if len(self._slots) >= self._max_slots and self._slot_ids:
-            oldest = self._slot_ids[0]
-            self._slots.pop(oldest, None)
-            self._slot_ids.pop(0)
-
-    def register(self, slot: MemorySlot) -> None:
-        """Register a slot and invalidate the key tensor cache."""
-        self._evict_if_full()
-        self._slots[slot.slot_id] = slot
-        self._routing_keys = None
-        self._slot_ids_tensor = None
-        if slot.slot_id in self._slot_ids:
-            self._slot_ids.remove(slot.slot_id)
-        self._slot_ids.append(slot.slot_id)
-
-    def batch_register(self, slots: List[MemorySlot]) -> None:
-        """Register multiple slots at once, invalidating caches only once."""
-        ids_to_remove = {s.slot_id for s in slots}
-        self._slot_ids = [sid for sid in self._slot_ids if sid not in ids_to_remove]
-        for slot in slots:
-            self._evict_if_full()
-            self._slots[slot.slot_id] = slot
-        self._slot_ids.extend(s.slot_id for s in slots)
-        self._routing_keys = None
+    def _evict_oldest(self, n: int) -> None:
+        """Remove oldest n slots to make room."""
+        while n > 0 and self._slot_ids:
+            oldest = self._slot_ids.pop(0)
+            self._id_to_idx.pop(oldest, None)
+            n -= 1
+        if self._routing_keys is not None and self._routing_keys.size(0) > 0:
+            self._routing_keys = self._routing_keys[len(self._slot_ids):] if len(self._slot_ids) < self._routing_keys.size(0) else None
+        if self._k_caches is not None and self._k_caches.size(0) > 0:
+            self._k_caches = self._k_caches[len(self._slot_ids):] if len(self._slot_ids) < self._k_caches.size(0) else None
+        if self._v_caches is not None and self._v_caches.size(0) > 0:
+            self._v_caches = self._v_caches[len(self._slot_ids):] if len(self._slot_ids) < self._v_caches.size(0) else None
+        self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
         self._slot_ids_tensor = None
 
-    def set_routing_keys(self, keys: torch.Tensor) -> None:
-        """Set the precomputed routing-keys tensor, skipping lazy ``torch.stack``."""
-        self._routing_keys = keys
-
-    def get(self, slot_id: int) -> MemorySlot:
-        """Retrieve a slot by ID."""
-        if slot_id not in self._slots:
-            raise KeyError(f"Slot {slot_id} not found in registry")
-        return self._slots[slot_id]
-
-    def batch_get(self, slot_ids: torch.Tensor) -> List[MemorySlot]:
-        """Fetch multiple slots by ID.
+    def batch_register(
+        self,
+        slot_ids: torch.Tensor,
+        routing_keys: torch.Tensor,
+        k_caches: torch.Tensor,
+        v_caches: torch.Tensor,
+    ) -> None:
+        """Register a batch of slots from tensors.
 
         Args:
-            slot_ids: 1-D tensor of slot IDs.
-
-        Returns:
-            List of ``MemorySlot`` matching the IDs.
+            slot_ids: [N] tensor of slot IDs.
+            routing_keys: [N, key_dim] tensor of routing keys.
+            k_caches: [N, nkv, T_slot, head_dim] tensor of K caches.
+            v_caches: [N, nkv, T_slot, head_dim] tensor of V caches.
         """
+        n = slot_ids.size(0)
         ids_list = slot_ids.tolist()
-        return [self._slots[sid] for sid in ids_list]
+
+        # Remove duplicates
+        existing = set(ids_list) & set(self._slot_ids)
+        if existing:
+            keep = [i for i, sid in enumerate(self._slot_ids) if sid not in existing]
+            self._slot_ids = [self._slot_ids[i] for i in keep]
+            self._routing_keys = self._routing_keys[keep] if self._routing_keys is not None else None
+            self._k_caches = self._k_caches[keep] if self._k_caches is not None else None
+            self._v_caches = self._v_caches[keep] if self._v_caches is not None else None
+            self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
+
+        # Evict if needed
+        excess = len(self._slot_ids) + n - self._max_slots
+        if excess > 0:
+            self._evict_oldest(excess)
+
+        # Append
+        start = len(self._slot_ids)
+        self._slot_ids.extend(ids_list)
+        for i, sid in enumerate(ids_list):
+            self._id_to_idx[sid] = start + i
+
+        self._routing_keys = routing_keys if self._routing_keys is None else torch.cat([self._routing_keys, routing_keys], dim=0)
+        self._k_caches = k_caches if self._k_caches is None else torch.cat([self._k_caches, k_caches], dim=0)
+        self._v_caches = v_caches if self._v_caches is None else torch.cat([self._v_caches, v_caches], dim=0)
+        self._slot_ids_tensor = None
+
+    def register(self, slot: MemorySlot) -> None:
+        """Register a single slot (backward compatibility)."""
+        self._slots_compat[slot.slot_id] = slot
+        self.batch_register(
+            torch.tensor([slot.slot_id], dtype=torch.long),
+            slot.routing_key.unsqueeze(0),
+            slot.k_cache.unsqueeze(0),
+            slot.v_cache.unsqueeze(0),
+        )
+
+    def get(self, slot_id: int) -> MemorySlot:
+        """Retrieve a slot by ID (backward compatibility)."""
+        if slot_id in self._slots_compat:
+            return self._slots_compat[slot_id]
+        idx = self._id_to_idx.get(slot_id)
+        if idx is None:
+            raise KeyError(f"Slot {slot_id} not found in registry")
+        return MemorySlot(
+            slot_id=slot_id,
+            domain_id=0,
+            routing_key=self._routing_keys[idx] if self._routing_keys is not None else torch.tensor([]),
+            k_cache=self._k_caches[idx] if self._k_caches is not None else torch.tensor([]),
+            v_cache=self._v_caches[idx] if self._v_caches is not None else torch.tensor([]),
+        )
+
+    def set_routing_keys(self, keys: torch.Tensor) -> None:
+        """Set the precomputed routing-keys tensor."""
+        self._routing_keys = keys
+
+    def get_indices(self, slot_ids: torch.Tensor) -> torch.Tensor:
+        """Return indices [N] into batched tensors for the given slot IDs."""
+        indices = torch.empty(slot_ids.size(0), dtype=torch.long, device=slot_ids.device)
+        for i, sid in enumerate(slot_ids.tolist()):
+            idx = self._id_to_idx.get(int(sid))
+            if idx is None:
+                raise KeyError(f"Slot {sid} not found in registry")
+            indices[i] = idx
+        return indices
 
     def keys_tensor(self, device: str | None = None) -> torch.Tensor:
-        """Return a stacked tensor of all routing keys [N, key_dim].
-
-        Lazily rebuilds when new slots are registered.
-        """
+        """Return a stacked tensor of all routing keys [N, key_dim]."""
         if self._routing_keys is None:
-            if not self._slots:
-                raise RuntimeError("No slots registered")
-            keys = [self._slots[sid].routing_key for sid in self._slot_ids]
-            stacked = torch.stack(keys, dim=0)
-            self._routing_keys = stacked.to(device) if device is not None else stacked
-        elif device is not None and self._routing_keys.device.type != device.split(':')[0]:
-            # Rebuild if device changed to avoid mixed-device cat
-            keys = [self._slots[sid].routing_key for sid in self._slot_ids]
-            stacked = torch.stack(keys, dim=0)
-            self._routing_keys = stacked.to(device)
-        elif device is not None:
-            self._routing_keys = self._routing_keys.to(device)
+            raise RuntimeError("No slots registered")
+        if device is not None:
+            return self._routing_keys.to(device)
         return self._routing_keys
 
     def slot_ids(self) -> List[int]:
@@ -128,44 +168,58 @@ class SlotRegistry:
 
     def clear(self) -> None:
         """Remove all slots and invalidate caches."""
-        self._slots.clear()
         self._slot_ids.clear()
+        self._id_to_idx.clear()
         self._routing_keys = None
+        self._k_caches = None
+        self._v_caches = None
         self._slot_ids_tensor = None
 
     def __len__(self) -> int:
-        return len(self._slots)
+        return len(self._slot_ids)
+
+    def get_kv(self, indices: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return K and V caches for the given indices.
+
+        Args:
+            indices: [N] tensor of indices into the batched caches.
+
+        Returns:
+            (k, v) where k and v are [N, nkv, T_slot, head_dim].
+        """
+        if self._k_caches is None or self._v_caches is None:
+            raise RuntimeError("No K/V caches in registry")
+        return self._k_caches[indices], self._v_caches[indices]
+
+    def get_offsets(self, indices: torch.Tensor) -> torch.Tensor:
+        """Return sequence lengths for the given indices."""
+        if self._k_caches is None:
+            raise RuntimeError("No K caches in registry")
+        return torch.tensor(
+            [self._k_caches[i].size(-2) for i in indices.tolist()],
+            dtype=torch.long, device=indices.device,
+        )
 
     def state_dict(self) -> dict[str, Any]:
         """Return serializable state."""
         return {
             "slot_ids": self._slot_ids,
-            "slots": {
-                sid: {
-                    "slot_id": slot.slot_id,
-                    "domain_id": slot.domain_id,
-                    "routing_key": slot.routing_key.cpu().tolist(),
-                    "k_cache": slot.k_cache.cpu().tolist(),
-                    "v_cache": slot.v_cache.cpu().tolist(),
-                }
-                for sid, slot in self._slots.items()
-            },
+            "routing_keys": self._routing_keys.cpu().tolist() if self._routing_keys is not None else [],
+            "k_caches": self._k_caches.cpu().tolist() if self._k_caches is not None else [],
+            "v_caches": self._v_caches.cpu().tolist() if self._v_caches is not None else [],
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Restore from serializable state."""
         self._slot_ids = state.get("slot_ids", [])
-        self._slots = {}
-        for sid, slot_data in state.get("slots", {}).items():
-            sid = int(sid)
-            self._slots[sid] = MemorySlot(
-                slot_id=sid,
-                domain_id=slot_data["domain_id"],
-                routing_key=torch.tensor(slot_data["routing_key"]),
-                k_cache=torch.tensor(slot_data["k_cache"]),
-                v_cache=torch.tensor(slot_data["v_cache"]),
-            )
-        self._routing_keys = None
+        rk = state.get("routing_keys", [])
+        self._routing_keys = torch.tensor(rk) if rk else None
+        kc = state.get("k_caches", [])
+        self._k_caches = torch.tensor(kc) if kc else None
+        vc = state.get("v_caches", [])
+        self._v_caches = torch.tensor(vc) if vc else None
+        self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
+        self._slot_ids_tensor = None
 
 
 class SparseRouter(nn.Module):
@@ -304,21 +358,26 @@ class HostKvCache:
     overwritten in-place.  Pre-allocates a buffer to avoid O(n²) memory copies.
     """
 
-    def __init__(self, slot: MemorySlot, max_len: int = 4096) -> None:
-        self.slot = slot
+    def __init__(self, k_cache: torch.Tensor | MemorySlot, v_cache: torch.Tensor | None = None, max_len: int = 4096) -> None:
         self.max_len = max_len
-        nkv, _, head_dim = slot.k_cache.shape
+        self._slot: MemorySlot | None = None
+        if isinstance(k_cache, MemorySlot):
+            self._slot = k_cache
+            k_cache = self._slot.k_cache
+            v_cache = self._slot.v_cache
+        assert v_cache is not None
+        nkv, _, head_dim = k_cache.shape
         self._k = torch.empty(
             nkv, max_len, head_dim,
-            dtype=slot.k_cache.dtype, device=slot.k_cache.device,
+            dtype=k_cache.dtype, device=k_cache.device,
         )
         self._v = torch.empty(
             nkv, max_len, head_dim,
-            dtype=slot.v_cache.dtype, device=slot.v_cache.device,
+            dtype=v_cache.dtype, device=v_cache.device,
         )
-        self._len = slot.k_cache.size(-2)
-        self._k[..., : self._len, :] = slot.k_cache
-        self._v[..., : self._len, :] = slot.v_cache
+        self._len = k_cache.size(-2)
+        self._k[..., : self._len, :] = k_cache
+        self._v[..., : self._len, :] = v_cache
 
     @property
     def k(self) -> torch.Tensor:
@@ -342,13 +401,14 @@ class HostKvCache:
         new_len = k_new.size(-2)
         if self._len + new_len > self.max_len:
             raise RuntimeError(
-                f"Slot {self.slot.slot_id} cache overflow: {self._len + new_len} > {self.max_len}"
+                f"cache overflow: {self._len + new_len} > {self.max_len}"
             )
         self._k[..., self._len : self._len + new_len, :] = k_new
         self._v[..., self._len : self._len + new_len, :] = v_new
         self._len += new_len
-        self.slot.k_cache = self.k
-        self.slot.v_cache = self.v
+        if self._slot is not None:
+            self._slot.k_cache = self.k
+            self._slot.v_cache = self.v
 
 
 class MSAAttention(nn.Module):
@@ -406,17 +466,13 @@ class MSAAttention(nn.Module):
         flat_ids = slot_ids.flatten().long()
         unique_ids, inverse = torch.unique(flat_ids, return_inverse=True)
 
-        # Fetch unique caches once using vectorised batch_get
-        slots = registry.batch_get(unique_ids)
-        unique_k = torch.stack([s.k_cache for s in slots], dim=0)
-        unique_v = torch.stack([s.v_cache for s in slots], dim=0)
+        # Fetch unique caches once using vectorised indices
+        unique_indices = registry.get_indices(unique_ids)
+        unique_k, unique_v = registry.get_kv(unique_indices.to(device))
         if unique_k.device != device:
             unique_k = unique_k.to(device)
             unique_v = unique_v.to(device)
-        unique_offsets = torch.as_tensor(
-            [s.k_cache.size(-2) for s in slots],
-            dtype=torch.long, device=device,
-        )
+        unique_offsets = registry.get_offsets(unique_indices.to(device))
 
         # Index to reconstruct original order
         k_all = unique_k[inverse]
@@ -570,6 +626,46 @@ class HDIMSlotRouter(nn.Module):
         # Project multivector to key_dim
         return self.key_proj(mv)
 
+    def batch_create_slots(
+        self,
+        hidden_states: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        slot_id_base: int = 0,
+        domain_id: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Create slot tensors for all positions in a batch.
+
+        Args:
+            hidden_states: [B, T, hidden_size].
+            k_cache: [B, nkv, T, head_dim].
+            v_cache: [B, nkv, T, head_dim].
+            slot_id_base: starting slot ID.
+            domain_id: domain ID for all slots.
+
+        Returns:
+            (slot_ids, routing_keys, k_caches, v_caches) where:
+            - slot_ids: [B*T] tensor
+            - routing_keys: [B*T, key_dim]
+            - k_caches: [B*T, nkv, 1, head_dim]
+            - v_caches: [B*T, nkv, 1, head_dim]
+        """
+        B, T, _ = hidden_states.shape
+        inv = self.routing_key(hidden_states)  # [B, T, key_dim]
+        inv_flat = inv.reshape(B * T, -1)
+        total = B * T
+
+        # Transpose to [B, T, nkv, head_dim] for per-token slicing
+        k_t = k_cache.transpose(1, 2)
+        v_t = v_cache.transpose(1, 2)
+
+        # Flatten batch dimension and create per-token [nkv, 1, head_dim] slices
+        k_flat = k_t.reshape(total, k_cache.size(1), k_cache.size(-1)).unsqueeze(2)
+        v_flat = v_t.reshape(total, v_cache.size(1), v_cache.size(-1)).unsqueeze(2)
+
+        slot_ids = torch.arange(slot_id_base, slot_id_base + total, dtype=torch.long, device=hidden_states.device)
+
+        return slot_ids, inv_flat, k_flat.detach(), v_flat.detach()
 
     def create_slot(
         self,
@@ -590,7 +686,6 @@ class HDIMSlotRouter(nn.Module):
             A ``MemorySlot`` with the Clifford invariant as its routing key.
         """
         inv = self.routing_key(hidden_states)
-        # Flatten invariant to a 1-D key vector
         key = inv.view(-1)
         if key.numel() == 1:
             key = key.unsqueeze(0)
@@ -601,57 +696,3 @@ class HDIMSlotRouter(nn.Module):
             k_cache=k_cache,
             v_cache=v_cache,
         )
-
-    def batch_create_slots(
-        self,
-        hidden_states: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        slot_id_base: int = 0,
-        domain_id: int = 0,
-    ) -> tuple[List[MemorySlot], torch.Tensor]:
-        """Create ``MemorySlot`` objects for all positions in a batch.
-
-        Vectorises ``routing_key`` computation over the full batch, then builds
-        slots with a fast comprehension instead of nested Python loops.
-
-        Args:
-            hidden_states: [B, T, hidden_size].
-            k_cache: [B, nkv, T, head_dim].
-            v_cache: [B, nkv, T, head_dim].
-            slot_id_base: starting slot ID.
-            domain_id: domain ID for all slots.
-
-        Returns:
-            (slots, routing_keys) where routing_keys is ``[B*T, key_dim]``.
-        """
-        B, T, _ = hidden_states.shape
-        inv = self.routing_key(hidden_states)  # [B, T, key_dim]
-        inv_flat = inv.reshape(B * T, -1)
-        total = B * T
-
-        # Transpose to [B, T, nkv, head_dim] for per-token slicing
-        k_t = k_cache.transpose(1, 2)
-        v_t = v_cache.transpose(1, 2)
-
-        # Flatten batch dimension and create per-token [nkv, 1, head_dim] slices
-        k_flat = k_t.reshape(total, k_cache.size(1), k_cache.size(-1)).unsqueeze(2)
-        v_flat = v_t.reshape(total, v_cache.size(1), v_cache.size(-1)).unsqueeze(2)
-
-        # Unbind once (faster than per-element Python select).
-        # Detach k/v caches so they do not participate in backward graph.
-        inv_list = inv_flat.unbind(0)
-        k_list = k_flat.detach().unbind(0)
-        v_list = v_flat.detach().unbind(0)
-
-        slots = [
-            MemorySlot(
-                slot_id=slot_id_base + i,
-                domain_id=domain_id,
-                routing_key=inv_list[i],
-                k_cache=k_list[i],
-                v_cache=v_list[i],
-            )
-            for i in range(total)
-        ]
-        return slots, inv_flat

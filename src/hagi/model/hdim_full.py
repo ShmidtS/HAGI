@@ -60,7 +60,12 @@ class DomainRotor(nn.Module):
         return rotors[int(rotor_idx)]
 
     def inverse(self, rotor_idx: int | torch.Tensor = 0) -> torch.Tensor:
-        return reverse(self.value(rotor_idx))
+        rotors = self._normalized_rotors()
+        if isinstance(rotor_idx, torch.Tensor):
+            idx = rotor_idx.to(device=rotors.device, dtype=torch.long)
+            selected = reverse(rotors.index_select(0, idx.reshape(-1)))
+            return selected.reshape(*idx.shape, self.heads, self.blade_count)
+        return reverse(rotors[int(rotor_idx)])
 
     def _expand_like(self, rotor: torch.Tensor, multivector: torch.Tensor) -> torch.Tensor:
         while rotor.dim() < multivector.dim():
@@ -115,8 +120,9 @@ class GatedFusion(nn.Module):
         self.blade_count = blade_count
         mv_size = heads * blade_count
         self.mv_to_hidden = nn.Linear(mv_size, hidden_size)
-        self.gate = nn.Linear(hidden_size * 2, hidden_size)
-        nn.init.constant_(self.gate.bias, -2.0)
+        self.gate_hidden = nn.Linear(hidden_size, hidden_size)
+        self.gate_mv = nn.Linear(hidden_size, hidden_size)
+        nn.init.constant_(self.gate_hidden.bias, -2.0)
 
     def forward(
         self,
@@ -126,7 +132,7 @@ class GatedFusion(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         B, T, _, _ = transformed.shape
         mv_hidden = self.mv_to_hidden(transformed.reshape(B, T, self.heads * self.blade_count))
-        gate = torch.sigmoid(self.gate(torch.cat([hidden_states, mv_hidden], dim=-1)))
+        gate = torch.sigmoid(self.gate_hidden(hidden_states) + self.gate_mv(mv_hidden))
         fused = hidden_states + mv_hidden
         output = gate * fused + (1.0 - gate) * hidden_states
         if return_gate:
@@ -214,13 +220,15 @@ class DelayedHDIM(HDIMFull):
     ):
         super().__init__(hidden_size, heads, num_rotors, blade_count, use_hdim_cross_domain=use_hdim_cross_domain)
         self.delay_steps = delay_steps
-        self._buffer: list[torch.Tensor] = []
+        self._buffer_sum: torch.Tensor | None = None
+        self._buffer_count: int = 0
         self._total_steps: int | None = None
         self.reset_buffer()
 
     def reset_buffer(self, total_steps: int | None = None) -> None:
         """Clear the circular buffer and optional step budget."""
-        self._buffer.clear()
+        self._buffer_sum = None
+        self._buffer_count = 0
         self._total_steps = total_steps
 
     def forward(
@@ -241,20 +249,26 @@ class DelayedHDIM(HDIMFull):
             self._total_steps = total_steps
 
         multivector = self.project(hidden_states)
-        self._buffer.append(multivector)
+        if self._buffer_sum is None:
+            self._buffer_sum = multivector.detach().clone()
+        else:
+            self._buffer_sum += multivector.detach()
+        self._buffer_count += 1
 
         # Determine whether we should aggregate now.
         is_last_step = (
             self._total_steps is not None
             and delay_step == self._total_steps - 1
-            and len(self._buffer) > 0
+            and self._buffer_count > 0
         )
         is_full = (delay_step + 1) % self.delay_steps == 0
         should_aggregate = is_last_step or is_full
 
-        if should_aggregate and len(self._buffer) > 0:
-            agg_mv = torch.stack(self._buffer).mean(dim=0)
-            self._buffer = []
+        if should_aggregate and self._buffer_count > 0:
+            assert self._buffer_sum is not None
+            agg_mv = self._buffer_sum / self._buffer_count
+            self._buffer_sum = None
+            self._buffer_count = 0
 
             invariant = self.extract(agg_mv, self.rotors, src_rotor_idx)
             target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
