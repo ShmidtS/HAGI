@@ -66,6 +66,14 @@ def main():
     ap.add_argument("--seed", type=int, default=None,
                     help="override the training seed (weight init + data order). For seed-stability "
                          "runs: same config, different --seed, separate --ckpt-dir.")
+    ap.add_argument("--precision", default=None, choices=["fp32", "fp16", "bf16"],
+                    help="override training precision. Use fp16 on T4/V100 (no real bf16 there).")
+    ap.add_argument("--batch-size", type=int, default=None, help="override micro-batch size")
+    ap.add_argument("--grad-accum-steps", type=int, default=None,
+                    help="override grad-accum (keep batch_size*grad_accum*seq constant for a "
+                         "matched effective batch on smaller GPUs)")
+    ap.add_argument("--no-compile", action="store_true",
+                    help="force-disable torch.compile (escape hatch if inductor errors on a GPU)")
     ap.add_argument("--hf-repo", default=None,
                     help="HF Hub model repo id (e.g. user/hagi-stage0) to mirror checkpoints to. "
                          "On --resume auto with no local checkpoint, the latest is pulled from here. "
@@ -77,6 +85,12 @@ def main():
 
     cfg = load_config(args.config)
     tcfg = cfg["training"]
+    # CLI overrides (applied before max_steps is derived, so token/step stays consistent).
+    for key, val in (("precision", args.precision), ("batch_size", args.batch_size),
+                     ("grad_accum_steps", args.grad_accum_steps)):
+        if val is not None:
+            tcfg[key] = val
+            print(f"{key} overridden -> {val}")
     if args.train_tokens is not None:
         cfg["data"]["train_tokens"] = args.train_tokens
         print(f"train_tokens overridden -> {args.train_tokens:,}")
@@ -108,7 +122,7 @@ def main():
             print(f"--resume {args.resume}: no checkpoint found, starting fresh")
 
     # torch.compile emits fused Triton kernels (the real "use Triton"); CUDA only.
-    if tcfg.get("compile", False) and args.device.startswith("cuda"):
+    if tcfg.get("compile", False) and args.device.startswith("cuda") and not args.no_compile:
         model = torch.compile(model)
         print("torch.compile enabled")
 

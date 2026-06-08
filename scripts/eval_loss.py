@@ -70,9 +70,11 @@ def main():
     # Decisive read: B vs D (grade decomposition isolated), C vs D (integrated vs bolted-on).
     by = {name: (loss, ppl) for name, _, loss, ppl in rows}
 
-    def _find(suffix):  # tolerate names like ablation_b or ablation_b_s3
+    def _find(suffix):  # prefer exact (ablation_d) over prefixed (ablation_d_nogeo)
+        if f"ablation_{suffix}" in by:
+            return by[f"ablation_{suffix}"]
         for k in by:
-            if k == f"ablation_{suffix}" or k.startswith(f"ablation_{suffix}_"):
+            if k.startswith(f"ablation_{suffix}_"):
                 return by[k]
         return None
 
