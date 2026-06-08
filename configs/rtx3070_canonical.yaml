@@ -2,52 +2,48 @@ data:
   dataset_mode: memmap_packed
   max_seq_len: 1024
   mix:
-    cosmopedia: 0.1333
-    edu: 0.3333
-    openwebmath: 0.0667
-    openwebtext: 0.02
-    oscar_ru: 0.0667
-    python_instruct: 0.0267
-    smoltalk: 0.0533
-    tinystories: 0.0333
-    wikipedia_en: 0.1667
-    wikipedia_ru: 0.1
+    edu: 0.40
+    slimpajama: 0.25
+    wikipedia_en: 0.10
+    wikipedia_ru: 0.08
+    oscar_ru: 0.07
+    openwebmath: 0.03
+    smoltalk: 0.03
+    tinystories: 0.02
+    python_instruct: 0.02
   mix_paths:
   - name: edu
-    path: edu.bin
-    weight: 0.3333
-  - name: cosmopedia
-    path: cosmopedia.bin
-    weight: 0.1333
+    path: v4_3b/edu.bin
+    weight: 0.40
+  - name: slimpajama
+    path: v4_3b/slimpajama.bin
+    weight: 0.25
   - name: wikipedia_en
-    path: wikipedia_en.bin
-    weight: 0.1667
+    path: v4_3b/wikipedia_en.bin
+    weight: 0.10
   - name: wikipedia_ru
-    path: wikipedia_ru.bin
-    weight: 0.1
+    path: v4_3b/wikipedia_ru.bin
+    weight: 0.08
   - name: oscar_ru
-    path: oscar_ru.bin
-    weight: 0.0667
+    path: v4_3b/oscar_ru.bin
+    weight: 0.07
   - name: openwebmath
-    path: openwebmath.bin
-    weight: 0.0667
+    path: v4_3b/openwebmath.bin
+    weight: 0.03
   - name: smoltalk
-    path: smoltalk.bin
-    weight: 0.0533
+    path: v4_3b/smoltalk.bin
+    weight: 0.03
   - name: tinystories
-    path: tinystories.bin
-    weight: 0.0333
+    path: v4_3b/tinystories.bin
+    weight: 0.02
   - name: python_instruct
-    path: python_instruct.bin
-    weight: 0.0267
-  - name: openwebtext
-    path: openwebtext.bin
+    path: v4_3b/python_instruct.bin
     weight: 0.02
   num_workers: 4
   packing: bfd
   pin_memory: true
   tokenizer: HuggingFaceTB/SmolLM2-135M
-  train_tokens: 150000000
+  train_tokens: 100000000
 eval:
   benchmarks:
   - gsm8k

@@ -192,13 +192,14 @@ class NarsHrmController:
     def compute_gating(self, z_H: torch.Tensor, z_L: torch.Tensor) -> tuple[float, float]:
         """Return truth-weighted gating coefficients for z_H and z_L.
 
-        Higher loss / unstable grad -> lower gate (reduce influence).
+        Default gate 1.0 — HRM always contributes fully. NARS observation
+        can still dampen if training is highly unstable, but minimum is 0.5.
         """
         loss_tv = self.control_truths.get("loss_low", _DEFAULT_TV_00)
         grad_tv = self.control_truths.get("grad_stable", _DEFAULT_TV_00)
         # Combined truth strength: high = stable training -> full gate
-        h_gate = float(loss_tv.frequency * grad_tv.frequency)
-        l_gate = float(grad_tv.frequency)
+        h_gate = max(1.0, float(loss_tv.frequency * grad_tv.frequency))
+        l_gate = max(1.0, float(grad_tv.frequency))
         return h_gate, l_gate
 
 

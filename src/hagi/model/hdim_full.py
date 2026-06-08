@@ -122,7 +122,7 @@ class GatedFusion(nn.Module):
         self.mv_to_hidden = nn.Linear(mv_size, hidden_size)
         self.gate_hidden = nn.Linear(hidden_size, hidden_size)
         self.gate_mv = nn.Linear(hidden_size, hidden_size)
-        nn.init.constant_(self.gate_hidden.bias, -2.0)
+        nn.init.constant_(self.gate_hidden.bias, 0.0)
 
     def forward(
         self,

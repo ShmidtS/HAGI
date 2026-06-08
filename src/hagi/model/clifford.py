@@ -77,6 +77,17 @@ for _a in range(BLADE_COUNT):
 _STRUCT_TRITON = _STRUCT.permute(2, 0, 1).contiguous()
 
 
+# Cache per (device, dtype) to avoid repeated .to() sync
+_STRUCT_CACHE: dict[tuple, torch.Tensor] = {}
+
+
+def _get_struct(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (device, dtype)
+    if key not in _STRUCT_CACHE:
+        _STRUCT_CACHE[key] = _STRUCT_TRITON.to(device=device, dtype=dtype)
+    return _STRUCT_CACHE[key]
+
+
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
 
@@ -93,7 +104,7 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
 
     from .triton_kernels import geometric_product_triton
-    c = _STRUCT_TRITON.to(x.device, dtype=x.dtype)
+    c = _get_struct(x.device, x.dtype)
     return geometric_product_triton(x, y, c)
 
 

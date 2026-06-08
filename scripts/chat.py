@@ -164,6 +164,9 @@ def toy_chat(checkpoint_path: Path, device: str, max_new_tokens: int) -> None:
 def find_checkpoint(path: Path) -> Path:
     if path.is_file():
         return path
+    # Sharded checkpoint directory (model.pt, optimizer.pt, ema.pt, meta.pt)
+    if (path / "model.pt").exists():
+        return path
     checkpoints = sorted(path.glob("*.pt"), key=lambda item: item.stat().st_mtime, reverse=True)
     if not checkpoints:
         raise FileNotFoundError(f"no .pt checkpoints found in {path}")

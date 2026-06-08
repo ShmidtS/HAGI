@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from hagi.data.tokenizer import SMOLLM2_TOKENIZER, TokenizerWrapper
+
+# Load HF_TOKEN from project root .env file
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    with _env_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("HF_TOKEN="):
+                os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip().strip("\"'")
+                break
 
 DATASET_NAME = "HuggingFaceFW/fineweb-edu"
 
@@ -93,6 +104,11 @@ DATASET_PRESETS = {
         "split": "train",
         "license_note": "Open math web extraction; math reasoning signal. openbmb/openwebmath is unavailable on HF.",
     },
+    "slimpajama": {
+        "dataset": "DKYoon/SlimPajama-6B",
+        "split": "train",
+        "license_note": "6B token deduplicated subset of RedPajama; Apache-2.0.",
+    },
 }
 
 # arch_decision §Data adapted for unauthenticated download: 70% FineWeb-Edu / 15% Cosmopedia v2 / 10% SmolTalk / 5% Python instruction code.
@@ -130,6 +146,17 @@ MIX_PRESETS: dict[str, dict[str, float]] = {
         "tinystories": 0.0333,
         "python_instruct": 0.0267,
         "openwebtext": 0.0200,
+    },
+    "v4_3b": {
+        "edu": 0.40,
+        "slimpajama": 0.25,
+        "wikipedia_en": 0.10,
+        "wikipedia_ru": 0.08,
+        "oscar_ru": 0.07,
+        "openwebmath": 0.03,
+        "smoltalk": 0.03,
+        "tinystories": 0.02,
+        "python_instruct": 0.02,
     },
 }
 
@@ -179,7 +206,10 @@ def write_mix_manifest(
 def parse_token_count(value: str) -> int:
     text = value.strip().lower().replace("_", "")
     multiplier = 1
-    if text.endswith("m"):
+    if text.endswith("b"):
+        multiplier = 1_000_000_000
+        text = text[:-1]
+    elif text.endswith("m"):
         multiplier = 1_000_000
         text = text[:-1]
     elif text.endswith("k"):
