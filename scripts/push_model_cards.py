@@ -75,7 +75,56 @@ def _ablation_table(this: str) -> str:
     return "\n".join(rows)
 
 
-def card(m: str, user: str) -> str:
+def _family_block(user: str, this: str) -> str:
+    """Clickable nav across the whole model family (Stage 0 + the four ablations)."""
+    base = f"https://huggingface.co/{user}"
+    links = [("Stage 0", "pretraining baseline (separate track, not part of this ablation)", f"{base}/hagi-stage0")]
+    for k in ORDER:
+        links.append((k.upper(), MODELS[k]["role"], f"{base}/hagi-ablation-{k}"))
+    rows = []
+    for label, role, url in links:
+        mark = " - **you are here**" if label.lower() == this else ""
+        rows.append(f"| [{label}]({url}){mark} | {role} |")
+    return "\n".join(rows)
+
+
+def _geo_block(geo: dict | None) -> str:
+    """Optional geometry-diagnostic section (filled in after the Kaggle T4 run)."""
+    if not geo:
+        return ""
+    dnb, dngb = geo["dnb"], geo["dngb"]
+    seeds = geo.get("seeds", [])
+    n = len(seeds)
+    if dnb > 0 and dngb <= 0.25 * dnb:
+        read = ("Removing the geometric product recovers most of the gap, so the **geometric-product "
+                "cross-grade term was the main culprit** - not the grade split itself. Next bet: a "
+                "paper-faithful geometric design rather than grades-as-auxiliary.")
+    elif dngb > 0:
+        read = ("Removing the geometric product does **not** recover the gap - the **grade machinery "
+                "itself hurts** at this scale, independent of the geometric product. GDR-as-built is "
+                "falsified here; the path forward is a paper-faithful rebuild or a pivot to capability.")
+    else:
+        read = ("Grades without the geometric product **beat** B - an unexpected positive that warrants "
+                "a focused follow-up.")
+    return f"""
+
+## Geometry diagnostic (follow-up)
+
+To locate *why* full GDR (D) lost to recurrence-only (B), a third arm - **`D_nogeo`**,
+GDR with the geometric-product cross-grade term switched **off** (same {MODELS['d']['params']}
+parameters as D) - was trained head-to-head with B and D on the same held-out shard
+(Kaggle T4, fp16, {n} seed{'s' if n != 1 else ''}: {seeds}).
+
+| Comparison | Mean held-out loss delta (lower = better) |
+|-----------|-------------------------------------------|
+| D - B (full GDR vs recurrence-only) | {dnb:+.4f} |
+| D_nogeo - B (grades, no geometric product) | {dngb:+.4f} |
+
+{read}
+"""
+
+
+def card(m: str, user: str, geo: dict | None = None) -> str:
     f = MODELS[m]
     loop_txt = "loop x3" if f["loop"] else "none"
     gdr_txt = "grades (scalar/vector/bivector/trivector + geometric product)" if f["gdr"] else "none"
@@ -100,6 +149,12 @@ datasets:
 ---
 
 # HAGI Ablation - {f['name']}
+
+**TL;DR** - {f['role']}. One arm of a **four-model controlled ablation** testing whether
+Clifford **grade decomposition** improves reasoning-per-parameter in a small language
+model. **Headline result: it does not** - on held-out validation the plain recurrent
+baseline (**B**) beats full GDR (**D**) on every seed. This card documents this arm and
+links the rest of the family so you can traverse the whole experiment.
 
 One of **four same-budget models** in the HAGI **Grade-Decomposed Recurrence (GDR)**
 ablation. All four share data, tokenizer, schedule, and token budget and differ in
@@ -201,12 +256,14 @@ for _ in range(60):
 print(tok.decode(x[0].tolist()))
 ```
 
-## Sibling models
+## Model family (click to traverse)
 
-- **A** - dense baseline (control): `{user}/hagi-ablation-a`
-- **B** - recurrence only: `{user}/hagi-ablation-b`
-- **C** - Clifford, bolted-on: `{user}/hagi-ablation-c`
-- **D** - full GDR: `{user}/hagi-ablation-d`
+All models below share data, tokenizer, schedule, and token budget. Stage 0 is the
+separate pretraining-baseline track; A/B/C/D are this controlled ablation.
+
+| Model | Role |
+|-------|------|
+{_family_block(user, m)}
 
 ## Results
 
@@ -234,7 +291,7 @@ result - see `docs/ABLATION.md` for the gates.
 > {r['sample']}
 
 {_seed_block()}
-
+{_geo_block(geo)}
 ## Links
 
 - Code: https://github.com/ShmidtS/HAGI (branch `experimental`)
@@ -247,13 +304,23 @@ def main():
     ap = argparse.ArgumentParser(description="Push a README.md model card to each ablation repo.")
     ap.add_argument("--user", required=True, help="HF username (repos: <user>/hagi-ablation-{a,b,c,d})")
     ap.add_argument("--models", default="a,b,c,d", help="comma-separated subset to push")
+    ap.add_argument("--geo-json", default=None,
+                    help="optional JSON file with the geo-diagnostic verdict "
+                         '(e.g. {"seeds":[1,2],"dnb":0.018,"dngb":0.005}); adds a Geometry section')
     ap.add_argument("--dry-run", action="store_true", help="print the first card instead of pushing")
     args = ap.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
 
+    geo = None
+    if args.geo_json:
+        import json
+        with open(args.geo_json, encoding="utf-8") as fh:
+            geo = json.load(fh)
+        print(f"geo-diagnostic loaded: D-B={geo['dnb']:+.4f}  D_nogeo-B={geo['dngb']:+.4f}")
+
     if args.dry_run:
-        print(card(models[0], args.user))
+        print(card(models[0], args.user, geo))
         return
 
     from huggingface_hub import HfApi
@@ -263,12 +330,12 @@ def main():
         repo = f"{args.user}/hagi-ablation-{m}"
         api.create_repo(repo, repo_type="model", private=True, exist_ok=True)
         api.upload_file(
-            path_or_fileobj=io.BytesIO(card(m, args.user).encode("utf-8")),
+            path_or_fileobj=io.BytesIO(card(m, args.user, geo).encode("utf-8")),
             path_in_repo="README.md",
             repo_id=repo,
             repo_type="model",
         )
-        print(f"pushed README.md -> {repo}")
+        print(f"pushed README.md -> https://huggingface.co/{repo}")
 
 
 if __name__ == "__main__":
