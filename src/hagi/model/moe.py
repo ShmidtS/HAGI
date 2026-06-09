@@ -53,7 +53,7 @@ class MoESwiGLU(nn.Module):
             noise = torch.randn_like(router_logits) * 0.01
             router_logits = router_logits + noise.detach()
         router_logits = router_logits / self.router_temperature
-        router_logits = router_logits.clamp(-10, 10)
+        # router_logits = router_logits.clamp(-10, 10)  # removed for speed
         router_probs = F.softmax(router_logits, dim=-1)
 
         top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
@@ -101,7 +101,7 @@ class MoESwiGLU(nn.Module):
             top_k_mask.scatter_(1, top_k_indices, 1.0)
             fraction_per_expert = top_k_mask.mean(dim=0)
             aux_loss = self.alpha * self.num_experts * (fraction_per_expert * router_prob_per_expert).sum()
-            aux_loss = aux_loss.clamp_max(10.0)
+            # aux_loss = aux_loss.clamp_max(10.0)  # removed: aux_loss << 10 for typical alpha
             return output, aux_loss
 
         return output

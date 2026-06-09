@@ -249,6 +249,67 @@ class AdamMini(torch.optim.Optimizer):
                     p.add_(update, alpha=-lr)
 
 
+class AdEMAMix(torch.optim.Optimizer):
+    """AdamW with dual EMA: fast (beta1) and slow (beta3) momentum.
+
+    Mixes the two momenta with alpha and applies standard AdamW weight decay.
+    Replaces separate EMA copy because the slow momentum is already an EMA of
+    parameters.
+    """
+
+    def __init__(
+        self,
+        params,
+        lr: float = 3e-4,
+        betas: tuple[float, float, float] = (0.9, 0.999, 0.9999),
+        alpha: float = 0.5,
+        eps: float = 1e-8,
+        weight_decay: float = 0.1,
+    ):
+        defaults = dict(lr=lr, betas=betas, alpha=alpha, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None) -> float | None:  # type: ignore
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2, beta3 = group["betas"]
+            alpha = group["alpha"]
+            eps = group["eps"]
+            wd = group["weight_decay"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                g = p.grad
+                state = self.state[p]
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["m_fast"] = torch.zeros_like(p)
+                    state["m_slow"] = torch.zeros_like(p)
+                    state["v"] = torch.zeros_like(p)
+
+                state["step"] += 1
+                step = state["step"]
+                m_fast = state["m_fast"]
+                m_slow = state["m_slow"]
+                v = state["v"]
+
+                if wd != 0:
+                    p.mul_(1 - lr * wd)
+
+                m_fast.mul_(beta1).add_(g, alpha=1 - beta1)
+                m_slow.mul_(beta3).add_(g, alpha=1 - beta3)
+                v.mul_(beta2).addcmul_(g, g, value=1 - beta2)
+
+                m_mix = alpha * m_fast + (1 - alpha) * m_slow
+                bias_corr1 = 1 - beta1 ** step
+                bias_corr2 = 1 - beta2 ** step
+                m_hat = m_mix / bias_corr1
+                v_hat = v / bias_corr2
+                p.add_(m_hat / (v_hat.sqrt() + eps), alpha=-lr)
+
+
 class CombinedOptimizer(torch.optim.Optimizer):
     """Steps several optimizers together; exposes a unified zero_grad/step/state_dict."""
 
@@ -278,6 +339,35 @@ class CombinedOptimizer(torch.optim.Optimizer):
             if key not in state_dict:
                 raise KeyError(f"CombinedOptimizer.load_state_dict: missing key {key!r}")
             opt.load_state_dict(state_dict[key])
+
+
+def _build_muon_ademamix(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]) -> "CombinedOptimizer":
+    """Muon on 2D hidden weights + AdEMAMix on 1D/embed/head (replaces AdamW + separate EMA)."""
+    adamw_lr = float(cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
+    wd = float(cfg.get("weight_decay", 0.1))
+    betas_cfg = cast(tuple[float, float, float], tuple(cfg.get("betas", (0.9, 0.999, 0.9999))))
+    eps = float(cfg.get("eps", 1e-8))
+    alpha = float(cfg.get("ademamix_alpha", 0.5))
+    muon_params = [p for n, p in named if _is_muon_param(n, p)]
+    adam_decay = [p for n, p in named if not _is_muon_param(n, p) and p.ndim >= 2 and "norm" not in n.lower()]
+    adam_no_decay = [p for n, p in named if not _is_muon_param(n, p) and not (p.ndim >= 2 and "norm" not in n.lower())]
+    muon = Muon(
+        muon_params,
+        lr=float(cfg.get("muon_lr", 0.02)),
+        momentum=float(cfg.get("muon_momentum", 0.95)),
+        ns_steps=int(cfg.get("muon_ns_steps", 5)),
+    )
+    ademamix = AdEMAMix(
+        [
+            {"params": adam_decay, "weight_decay": wd},
+            {"params": adam_no_decay, "weight_decay": 0.0},
+        ],
+        lr=adamw_lr,
+        betas=betas_cfg,
+        alpha=alpha,
+        eps=eps,
+    )
+    return CombinedOptimizer([muon, ademamix])
 
 
 def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]) -> "CombinedOptimizer":
@@ -321,6 +411,9 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
 
     if kind in ("muon", "muon_adamw"):
         return _build_muon_adamw(named, cfg)
+
+    if kind == "muon_ademamix":
+        return _build_muon_ademamix(named, cfg)
 
     if kind == "adamw":
         decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]

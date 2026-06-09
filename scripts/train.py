@@ -332,8 +332,8 @@ def maybe_compile(model: HAGI, device: str) -> Any:
         and model.cfg.compile
         and device.startswith("cuda")
     ):
-        print("torch.compile enabled (mode=reduce-overhead)")
-        return torch.compile(model, mode="reduce-overhead")
+        print("torch.compile enabled (mode=default)")
+        return torch.compile(model, mode="default")
     return model
 
 
@@ -733,7 +733,7 @@ def magic_norm_clip(
         local_max = norms.max().detach()
         max_seen_t = torch.maximum(max_seen_t, local_max)
         if local_max > max_norm:
-            view.mul_((max_norm_t / norms).clamp(max=1.0).to(dtype=view.dtype))
+            view.mul_((max_norm_t / norms).clamp(max=1.0).detach().to(dtype=view.dtype))
     return max_seen_t
 
 

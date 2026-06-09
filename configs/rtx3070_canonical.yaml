@@ -53,7 +53,7 @@ eval:
   - winogrande
   every_n_steps: 2000
 model:
-  ce_chunk_size: 4096
+  ce_chunk_size: 0
   compile: false
   expression_layers: 4
   grades:

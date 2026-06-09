@@ -127,6 +127,9 @@ class HAGI(nn.Module):
             if cfg.hrm
             else None
         )
+        if self.hrm is not None:
+            self.hrm = torch.compile(self.hrm, mode="reduce-overhead", fullgraph=False)
+
 
         self.msa = None
         self.msa_router = None

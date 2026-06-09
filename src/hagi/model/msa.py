@@ -47,6 +47,7 @@ class SlotRegistry:
         self._slot_ids_tensor: torch.Tensor | None = None
         self._max_slots = max_slots
         self._slots_compat: Dict[int, MemorySlot] = {}
+        self._id_to_idx_tensor = torch.full((max_slots * 1000,), -1, dtype=torch.long)
 
     def _evict_oldest(self, n: int) -> None:
         """Remove oldest n slots to make room."""
@@ -61,6 +62,9 @@ class SlotRegistry:
         if self._v_caches is not None and self._v_caches.size(0) > 0:
             self._v_caches = self._v_caches[len(self._slot_ids):] if len(self._slot_ids) < self._v_caches.size(0) else None
         self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
+        self._id_to_idx_tensor.fill_(-1)
+        for i, sid in enumerate(self._slot_ids):
+            self._id_to_idx_tensor[sid] = i
         self._slot_ids_tensor = None
 
     def batch_register(
@@ -90,6 +94,9 @@ class SlotRegistry:
             self._k_caches = self._k_caches[keep] if self._k_caches is not None else None
             self._v_caches = self._v_caches[keep] if self._v_caches is not None else None
             self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
+            self._id_to_idx_tensor.fill_(-1)
+            for i, sid in enumerate(self._slot_ids):
+                self._id_to_idx_tensor[sid] = i
 
         # Evict if needed
         excess = len(self._slot_ids) + n - self._max_slots
@@ -101,6 +108,7 @@ class SlotRegistry:
         self._slot_ids.extend(ids_list)
         for i, sid in enumerate(ids_list):
             self._id_to_idx[sid] = start + i
+            self._id_to_idx_tensor[sid] = start + i
 
         self._routing_keys = routing_keys if self._routing_keys is None else torch.cat([self._routing_keys, routing_keys], dim=0)
         self._k_caches = k_caches if self._k_caches is None else torch.cat([self._k_caches, k_caches], dim=0)
@@ -138,13 +146,13 @@ class SlotRegistry:
 
     def get_indices(self, slot_ids: torch.Tensor) -> torch.Tensor:
         """Return indices [N] into batched tensors for the given slot IDs."""
-        indices = torch.empty(slot_ids.size(0), dtype=torch.long, device=slot_ids.device)
-        for i, sid in enumerate(slot_ids.tolist()):
-            idx = self._id_to_idx.get(int(sid))
-            if idx is None:
-                raise KeyError(f"Slot {sid} not found in registry")
-            indices[i] = idx
-        return indices
+        flat = slot_ids.long().flatten()
+        idx_tensor = self._id_to_idx_tensor.to(flat.device)
+        indices = idx_tensor[flat]
+        if (indices < 0).any():
+            bad = flat[indices < 0]
+            raise KeyError(f"Slots {bad.tolist()} not found in registry")
+        return indices.view_as(slot_ids)
 
     def keys_tensor(self, device: str | None = None) -> torch.Tensor:
         """Return a stacked tensor of all routing keys [N, key_dim]."""

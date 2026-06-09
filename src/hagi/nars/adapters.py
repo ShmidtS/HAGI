@@ -356,10 +356,11 @@ class NarsMsaReasoner:
         )
         top_k = min(top_k, N)
         top_values, top_indices = torch.topk(blended_tensor, k=top_k)
-        top_k_ids = torch.as_tensor(
-            [slot_ids[i] for i in top_indices.tolist()],
-            dtype=torch.long,
-        ).to(query_t.device)
+        top_k_ids = torch.index_select(
+            torch.as_tensor(slot_ids, dtype=torch.long, device=query_t.device),
+            0,
+            top_indices,
+        )
 
         return top_k_ids, top_values
 
