@@ -14,7 +14,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .binary_factorized import BinaryFactorizedLinear
-from .triton_kernels import rmsnorm_triton
+from .triton_kernels import rmsnorm_triton, _rmsnorm_torch
 
 
 @dataclass
@@ -56,6 +56,8 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.requires_grad:
+            return _rmsnorm_torch(x, self.weight, self.eps)
         return rmsnorm_triton(x, self.weight, self.eps)
 
 

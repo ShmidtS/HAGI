@@ -287,7 +287,8 @@ def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]
     betas_cfg = cast(tuple[float, float], tuple(cfg.get("betas", (0.9, 0.95))))
     eps = float(cfg.get("eps", 1e-8))
     muon_params = [p for n, p in named if _is_muon_param(n, p)]
-    adam_params = [p for n, p in named if not _is_muon_param(n, p)]
+    adam_decay = [p for n, p in named if not _is_muon_param(n, p) and p.ndim >= 2 and "norm" not in n.lower()]
+    adam_no_decay = [p for n, p in named if not _is_muon_param(n, p) and not (p.ndim >= 2 and "norm" not in n.lower())]
     muon = Muon(
         muon_params,
         lr=float(cfg.get("muon_lr", 0.02)),
@@ -295,11 +296,13 @@ def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]
         ns_steps=int(cfg.get("muon_ns_steps", 5)),
     )
     adam = torch.optim.AdamW(
-        adam_params,
+        [
+            {"params": adam_decay, "weight_decay": wd},
+            {"params": adam_no_decay, "weight_decay": 0.0},
+        ],
         lr=adamw_lr,
         betas=betas_cfg,
         eps=eps,
-        weight_decay=wd,
         fused=True,
         capturable=True,
     )

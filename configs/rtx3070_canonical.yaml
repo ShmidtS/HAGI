@@ -39,7 +39,7 @@ data:
   - name: python_instruct
     path: v4_3b/python_instruct.bin
     weight: 0.02
-  num_workers: 4
+  num_workers: 0
   packing: bfd
   pin_memory: true
   tokenizer: HuggingFaceTB/SmolLM2-135M
@@ -72,9 +72,9 @@ model:
   hidden_size: 768
   hrm: true
   hrm_h_cycles: 1
-  hrm_l_cycles: 2
+  hrm_l_cycles: 3
   l_dim: 256
-  loop_count: 1
+  loop_count: 10
   moe_alpha: 0.01
   moe_intermediate_size: 1024
   moe_top_k: 1
@@ -103,7 +103,7 @@ model:
 name: rtx3070_canonical
 training:
   compile: false
-  learning_rate: 0.0002
+  learning_rate: 0.00015
   batch_size: 8
   ckpt_interval: 1000
   composite_loss:
@@ -126,15 +126,15 @@ training:
   magic_norm_max: 1.0
   max_steps: 8000
   min_lr_ratio: 0.1
-  muon_lr: 0.005
+  muon_lr: 0.003
   muon_momentum: 0.95
-  muon_ns_steps: 1
+  muon_ns_steps: 5
   optimizer: muon_adamw
   pin_memory: true
   precision: manual_bf16
   schedule: cosine
   seed: 42
   use_prefix_lm: false
-  warmup_steps: 200
+  warmup_steps: 100
   weight_decay: 0.1
-  num_workers: 4
+  num_workers: 0

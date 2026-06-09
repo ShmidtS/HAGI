@@ -113,6 +113,9 @@ class HAGI(nn.Module):
                 self.gdr = hdim_module
             else:
                 self.gdr = GradeDecomposedRecurrence(cfg.grades)
+        self.gdr_aux_proj = None
+        if cfg.use_gdr and self.gdr is not None:
+            self.gdr_aux_proj = nn.Linear(cfg.hidden_size, cfg.hidden_size)
         self.hrm = (
             HRMCore(
                 hidden_size=cfg.hidden_size,
@@ -284,6 +287,7 @@ class HAGI(nn.Module):
                         sin,
                         gdr=self.gdr,
                         training_mode=training_mode,
+                        gradient_checkpointing=use_gradient_checkpointing,
                         tgt_rotor_idx=tgt_idx,
                         moe_aux_losses=moe_aux_losses,
                         nars_controller=self.nars_hrm,
@@ -292,12 +296,12 @@ class HAGI(nn.Module):
                     gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
                     pre_gdr_h = h if need_iso else None
                     h = gdr_state["fused"]
-                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
+                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, training_mode=training_mode, gradient_checkpointing=use_gradient_checkpointing, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
                 else:
                     h = self.gdr(h)
-                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
+                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, training_mode=training_mode, gradient_checkpointing=use_gradient_checkpointing, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
             else:
-                h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
+                h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, training_mode=training_mode, gradient_checkpointing=use_gradient_checkpointing, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
             layer_idx += len(self.reasoning)
         else:
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
@@ -429,6 +433,10 @@ class HAGI(nn.Module):
             )
         else:
             loss = None
+
+        if self.gdr_aux_proj is not None and gdr_state is not None and isinstance(gdr_state, dict):
+            if "fused" in gdr_state:
+                gdr_state["features"] = self.gdr_aux_proj(gdr_state["fused"])
 
         if training_mode:
             result = {"logits": logits}

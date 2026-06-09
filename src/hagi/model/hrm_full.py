@@ -131,6 +131,7 @@ class HRMCore(nn.Module):
         z_L: torch.Tensor | LState | None = None,
         gdr=None,
         training_mode: bool = False,
+        gradient_checkpointing: bool = False,
         tgt_rotor_idx: int | torch.Tensor = 0,
         moe_aux_losses: list[torch.Tensor] | None = None,
         nars_controller=None,
@@ -162,7 +163,7 @@ class HRMCore(nn.Module):
                 z_h_hidden = self.z_h_to_hidden(z_H).unsqueeze(1).expand(B, T, H)
                 for block in reasoning_blocks:
                     h_in = h + z_l_hidden + z_h_hidden
-                    result = block(h_in, cos, sin, attn_mask=attn_mask)
+                    result = block(h_in, cos, sin, gradient_checkpointing=gradient_checkpointing, attn_mask=attn_mask)
                     if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], torch.Tensor) and result[1].ndim == 0:
                         h = result[0]
                         if moe_aux_losses is not None:
