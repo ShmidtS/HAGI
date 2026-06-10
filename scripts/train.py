@@ -606,12 +606,11 @@ def compute_loss(
 
 
 def get_grad_norm(model: torch.nn.Module) -> float:
-    total = torch.tensor(0.0, device=next(model.parameters()).device)
-    for p in model.parameters():
-        if p.grad is not None:
-            total += p.grad.pow(2).sum()
-    if total == 0.0:
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    if not grads:
         return 0.0
+    norms = torch._foreach_norm(grads)
+    total = torch.stack(norms).pow(2).sum()
     return float(total.sqrt().item())
 
 

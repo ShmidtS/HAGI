@@ -13,7 +13,7 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 
-def cross_entropy_loss(
+def _cross_entropy_impl(
     logits: torch.Tensor,
     targets: torch.Tensor,
     ignore_index: int = -100,
@@ -29,8 +29,8 @@ def cross_entropy_loss(
     count == mean).
     """
     if logits.ndim > 2:
-        logits = logits.reshape(-1, logits.size(-1))
-        targets = targets.reshape(-1)
+        logits = logits.view(-1, logits.size(-1))
+        targets = targets.view(-1)
     if chunk_size <= 0 or logits.size(0) <= chunk_size:
         return F.cross_entropy(logits, targets, ignore_index=ignore_index)
     valid = (targets != ignore_index).sum().clamp(min=1)
@@ -40,6 +40,23 @@ def cross_entropy_loss(
         tg = targets[i : i + chunk_size]
         total = total + F.cross_entropy(lg, tg, ignore_index=ignore_index, reduction="sum")
     return total / valid
+
+
+_cross_entropy_compiled = (
+    torch.compile(_cross_entropy_impl, mode="default", dynamic=False)
+    if torch.cuda.is_available()
+    else None
+)
+
+
+def cross_entropy_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    ignore_index: int = -100,
+    chunk_size: int = 0,
+) -> torch.Tensor:
+    fn = _cross_entropy_compiled if logits.is_cuda and _cross_entropy_compiled is not None else _cross_entropy_impl
+    return fn(logits, targets, ignore_index, chunk_size)
 
 
 def auxiliary_gdr_loss(

@@ -15,7 +15,7 @@ from hagi.model import HAGI
 from hagi.train.config import config_from_dict, load_config
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
-SHIPPED = ["baseline.yaml", "gdr.yaml", "rtx3070_canonical.yaml"]
+SHIPPED = [p.name for p in CONFIG_DIR.glob("*.yaml")]
 
 
 @pytest.mark.parametrize("config_name", SHIPPED)

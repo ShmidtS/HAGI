@@ -72,10 +72,10 @@ class MoESwiGLU(nn.Module):
                 tokens = flat.index_select(0, indices)
                 expert_out = expert(tokens)
                 if self.top_k == 1:
-                    output.index_copy_(0, indices, expert_out)
+                    output.index_copy_(0, indices, expert_out.to(output.dtype))
                 else:
                     idx = indices.unsqueeze(-1).expand(-1, expert_out.size(-1))
-                    output.scatter_add_(0, idx, expert_out * probs.index_select(0, indices).unsqueeze(-1))
+                    output.scatter_add_(0, idx, expert_out.to(output.dtype) * probs.index_select(0, indices).unsqueeze(-1))
 
         output = output.view(B, T, D)
 

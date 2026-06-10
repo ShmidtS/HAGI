@@ -32,21 +32,26 @@ def test_build_muon_adamw_splits_two_param_groups():
     m = TinyModel()
     opt = build_optimizer(m, {"optimizer": "muon_adamw", "learning_rate": 3e-4, "muon_lr": 0.02})
 
-    # Two sub-optimizers exposed via CombinedOptimizer.param_groups.
+    # Three sub-optimizer groups: Muon + AdamW(decay) + AdamW(no_decay)
     groups = opt.param_groups
-    assert len(groups) == 2
+    assert len(groups) == 3
     muon_group = groups[0]
-    adam_group = groups[1]
+    adam_decay_group = groups[1]
+    adam_no_decay_group = groups[2]
     muon_ids = {id(p) for p in muon_group["params"]}
-    adam_ids = {id(p) for p in adam_group["params"]}
+    adam_decay_ids = {id(p) for p in adam_decay_group["params"]}
+    adam_no_decay_ids = {id(p) for p in adam_no_decay_group["params"]}
     # No parameter is in both groups.
-    assert muon_ids & adam_ids == set()
+    assert muon_ids & adam_decay_ids == set()
+    assert muon_ids & adam_no_decay_ids == set()
+    assert adam_decay_ids & adam_no_decay_ids == set()
 
     named = dict(m.named_parameters())
-    # Embedding + LM head + LayerNorm -> AdamW
-    assert id(named["embed.weight"]) in adam_ids
-    assert id(named["lm_head.weight"]) in adam_ids
-    assert id(named["norm.weight"]) in adam_ids
+    # Embedding + LM head are 2D, not muon -> AdamW decay
+    assert id(named["embed.weight"]) in adam_decay_ids
+    assert id(named["lm_head.weight"]) in adam_decay_ids
+    # LayerNorm -> AdamW no_decay
+    assert id(named["norm.weight"]) in adam_no_decay_ids
     # fc1, fc2 are 2D, not embed/head/norm -> Muon
     assert id(named["fc1.weight"]) in muon_ids
     assert id(named["fc2.weight"]) in muon_ids

@@ -58,9 +58,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.requires_grad:
-            return _rmsnorm_torch(x, self.weight, self.eps)
-        return rmsnorm_triton(x, self.weight, self.eps)
+        return torch.nn.functional.rms_norm(x, x.shape[-1:], self.weight, self.eps)
 
 
 def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):
@@ -72,14 +70,25 @@ def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):
     return cos, sin
 
 
-def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # x: [B, H, T, D]. cos/sin: [T, D/2].
+def _apply_rope_impl(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     x1, x2 = x[..., 0::2], x[..., 1::2]
     cos = cos[None, None, :, :]
     sin = sin[None, None, :, :]
     rx1 = x1 * cos - x2 * sin
     rx2 = x1 * sin + x2 * cos
-    return torch.stack([rx1, rx2], dim=-1).flatten(-2)
+    return torch.cat([rx1, rx2], dim=-1)
+
+
+_apply_rope_compiled = (
+    torch.compile(_apply_rope_impl, mode="default", dynamic=False)
+    if torch.cuda.is_available()
+    else None
+)
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    fn = _apply_rope_compiled if x.is_cuda and _apply_rope_compiled is not None else _apply_rope_impl
+    return fn(x, cos, sin)
 
 
 def _make_linear(in_features: int, out_features: int, cfg: TransformerConfig) -> nn.Module:
@@ -235,12 +244,12 @@ class SwiGLU(nn.Module):
         gate_key = prefix + "gate.weight"
         up_key = prefix + "up.weight"
         if gate_up_key in state_dict:
-            self.gate_up_weight.data = state_dict[gate_up_key]
-            del state_dict[gate_up_key]
+            state_dict.pop(gate_key, None)
+            state_dict.pop(up_key, None)
         elif all(k in state_dict for k in (gate_key, up_key)):
             gate = state_dict[gate_key]
             up = state_dict[up_key]
-            self.gate_up_weight.data = torch.cat([gate, up], dim=0)
+            state_dict[gate_up_key] = torch.cat([gate, up], dim=0)
             del state_dict[gate_key], state_dict[up_key]
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 

@@ -8,9 +8,13 @@ from hagi.train.config import config_from_dict, config_to_dict
 yaml = pytest.importorskip("yaml")
 
 
-@pytest.mark.parametrize("config_name", ["baseline.yaml", "gdr.yaml"])
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
+YAML_FILES = [p.name for p in CONFIG_DIR.glob("*.yaml")]
+
+
+@pytest.mark.parametrize("config_name", YAML_FILES)
 def test_yaml_configs_have_required_keys(config_name):
-    path = Path(__file__).resolve().parents[1] / "configs" / config_name
+    path = CONFIG_DIR / config_name
 
     with path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
