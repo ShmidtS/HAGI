@@ -55,6 +55,7 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                 assert isinstance(module.mlp_norm, RMSNorm)
                 gamma = module.mlp_norm.weight.data
                 if hasattr(module.mlp, "gate_up_weight"):
+                    assert isinstance(module.mlp.gate_up_weight, torch.Tensor)
                     gate, up = module.mlp.gate_up_weight.chunk(2, dim=0)
                     gate = gate * gamma.view(1, -1)
                     up = up * gamma.view(1, -1)
