@@ -1155,11 +1155,13 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             ema_path = args.resume / "ema.pt"
             if ema_path.exists():
                 try:
-                    model_ema.load_state_dict(
-                        torch.load(
-                            ema_path, map_location=args.device, weights_only=True
-                        )
+                    ema_state = torch.load(
+                        ema_path, map_location=args.device, weights_only=True
                     )
+                    # Strip orphaned fused-projection keys emitted by old state_dict
+                    for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
+                        ema_state.pop(key, None)
+                    model_ema.load_state_dict(ema_state)
                     print("loaded EMA state")
                 except Exception as exc:
                     print(f"EMA state mismatch, starting fresh: {exc}")
@@ -1173,7 +1175,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     print(f"optimizer state mismatch, starting fresh: {exc}")
             if "model_ema" in state:
                 try:
-                    model_ema.load_state_dict(state["model_ema"])
+                    ema_state = state["model_ema"]
+                    # Strip orphaned fused-projection keys emitted by old state_dict
+                    for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
+                        ema_state.pop(key, None)
+                    model_ema.load_state_dict(ema_state)
                     print("loaded EMA state")
                 except Exception as exc:
                     print(f"EMA state mismatch, starting fresh: {exc}")

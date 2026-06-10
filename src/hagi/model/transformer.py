@@ -118,13 +118,14 @@ class GroupedQueryAttention(nn.Module):
 
     def state_dict(self, *args, **kwargs):
         state = super().state_dict(*args, **kwargs)
+        prefix = kwargs.get("prefix", "")
         if hasattr(self, "qkv_weight"):
             q, k, v = self.qkv_weight.split(self._qkv_splits, dim=0)
-            state["q_proj.weight"] = q
-            state["k_proj.weight"] = k
-            state["v_proj.weight"] = v
-            state.pop("qkv_weight", None)
-            state.pop("_qkv_splits", None)
+            state[f"{prefix}q_proj.weight"] = q
+            state[f"{prefix}k_proj.weight"] = k
+            state[f"{prefix}v_proj.weight"] = v
+            state.pop(f"{prefix}qkv_weight", None)
+            state.pop(f"{prefix}_qkv_splits", None)
         return state
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
@@ -221,22 +222,26 @@ class SwiGLU(nn.Module):
 
     def state_dict(self, *args, **kwargs):
         state = super().state_dict(*args, **kwargs)
+        prefix = kwargs.get("prefix", "")
         if hasattr(self, "gate_up_weight"):
             gate, up = self.gate_up_weight.chunk(2, dim=0)
-            state["gate.weight"] = gate
-            state["up.weight"] = up
-            state.pop("gate_up_weight", None)
+            state[f"{prefix}gate.weight"] = gate
+            state[f"{prefix}up.weight"] = up
+            state.pop(f"{prefix}gate_up_weight", None)
         return state
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        if "gate_up_weight" in state_dict:
-            self.gate_up_weight.data = state_dict["gate_up_weight"]
-            del state_dict["gate_up_weight"]
-        elif all(k in state_dict for k in ("gate.weight", "up.weight")):
-            gate = state_dict["gate.weight"]
-            up = state_dict["up.weight"]
+        gate_up_key = prefix + "gate_up_weight"
+        gate_key = prefix + "gate.weight"
+        up_key = prefix + "up.weight"
+        if gate_up_key in state_dict:
+            self.gate_up_weight.data = state_dict[gate_up_key]
+            del state_dict[gate_up_key]
+        elif all(k in state_dict for k in (gate_key, up_key)):
+            gate = state_dict[gate_key]
+            up = state_dict[up_key]
             self.gate_up_weight.data = torch.cat([gate, up], dim=0)
-            del state_dict["gate.weight"], state_dict["up.weight"]
+            del state_dict[gate_key], state_dict[up_key]
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

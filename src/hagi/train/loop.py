@@ -223,6 +223,9 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
         # Normalize keys saved from a torch.compiled model
         if any(k.startswith("hrm._orig_mod.") for k in state_dict):
             state_dict = {k.replace("hrm._orig_mod.", "hrm.", 1): v for k, v in state_dict.items()}
+        # Strip orphaned fused-projection keys emitted at top level by old state_dict
+        for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
+            state_dict.pop(key, None)
         model.load_state_dict(state_dict)
         model.to(device)
         if load_ema and (p / "ema.pt").exists():
@@ -232,6 +235,9 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
         return model, int(meta.get("step", 0)), ema_state
 
     state = torch.load(path, map_location=device, weights_only=True)
+    # Strip orphaned fused-projection keys emitted at top level by old state_dict
+    for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
+        state.pop(key, None)
     cfg = config_from_dict(state["config"])
     model = HAGI(cfg)
 

@@ -458,12 +458,13 @@ class MSAAttention(nn.Module):
 
     def state_dict(self, *args, **kwargs):
         state = super().state_dict(*args, **kwargs)
+        prefix = kwargs.get("prefix", "")
         if hasattr(self, "kv_proj"):
             kv = self.kv_proj.weight
             k, v = kv.split(self.num_kv_heads * self.head_dim, dim=0)
-            state["k_proj.weight"] = k
-            state["v_proj.weight"] = v
-            state.pop("kv_proj.weight", None)
+            state[f"{prefix}k_proj.weight"] = k
+            state[f"{prefix}v_proj.weight"] = v
+            state.pop(f"{prefix}kv_proj.weight", None)
         return state
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):

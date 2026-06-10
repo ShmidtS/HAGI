@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import random
 import shutil
+import sys
 from pathlib import Path
 
 import torch
@@ -193,7 +194,7 @@ def load_production_model(checkpoint: Path, compile_model: bool, use_msa: bool =
         model.cfg.use_msa = use_msa
     if hasattr(model.cfg, "use_nars"):
         model.cfg.use_nars = use_nars
-    if compile_model and device == "cuda" and hasattr(torch, "compile"):
+    if compile_model and device == "cuda" and hasattr(torch, "compile") and sys.platform != "win32":
         model = torch.compile(model)
         assert isinstance(model, torch.nn.Module)
     return model, step
