@@ -45,6 +45,12 @@ EVAL_TOKENS = "819,200"
 # Result: D beat B in 0/5 — grade decomposition consistently HURTS held-out loss.
 SEED_STABILITY = dict(seeds=[1, 2, 3, 4, 5], d_below_b=0, mean_d_minus_b=0.0175, val="shard_00006.bin")
 
+# Geo-diagnostic (follow-up to the gate): B vs D vs D_nogeo on the held-out shard, Kaggle T4
+# fp16, 120M tokens, seed 1. D reproduced the negative (D-B=+0.0210); switching the geometric
+# product OFF recovered only ~16% (D_nogeo-B=+0.0176), so the *grade machinery itself* hurts,
+# not the geometric product. GDR-as-built is falsified on held-out. Baked in by default.
+GEO_DIAG = dict(seeds=[1], dnb=0.0210, dngb=0.0176)
+
 
 def _results_table(this: str) -> str:
     rows = []
@@ -125,6 +131,7 @@ parameters as D) - was trained head-to-head with B and D on the same held-out sh
 
 
 def card(m: str, user: str, geo: dict | None = None) -> str:
+    geo = geo if geo is not None else GEO_DIAG  # the geo-diagnostic ships in the card by default
     f = MODELS[m]
     loop_txt = "loop x3" if f["loop"] else "none"
     gdr_txt = "grades (scalar/vector/bivector/trivector + geometric product)" if f["gdr"] else "none"
