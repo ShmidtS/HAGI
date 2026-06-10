@@ -219,7 +219,11 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
         meta = torch.load(p / "meta.pt", map_location=device, weights_only=True) if (p / "meta.pt").exists() else {}
         cfg = config_from_dict(meta["config"])
         model = HAGI(cfg)
-        model.load_state_dict(torch.load(p / "model.pt", map_location=device, weights_only=True))
+        state_dict = torch.load(p / "model.pt", map_location=device, weights_only=True)
+        # Normalize keys saved from a torch.compiled model
+        if any(k.startswith("hrm._orig_mod.") for k in state_dict):
+            state_dict = {k.replace("hrm._orig_mod.", "hrm.", 1): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
         model.to(device)
         if load_ema and (p / "ema.pt").exists():
             ema_state = torch.load(p / "ema.pt", map_location=device, weights_only=True)

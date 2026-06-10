@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import random
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -130,7 +131,7 @@ class HAGI(nn.Module):
             if cfg.hrm
             else None
         )
-        if self.hrm is not None:
+        if self.hrm is not None and sys.platform != "win32":
             self.hrm = torch.compile(self.hrm, mode="reduce-overhead", fullgraph=False)
 
 

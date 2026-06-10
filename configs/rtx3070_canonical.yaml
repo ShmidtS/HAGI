@@ -43,7 +43,7 @@ data:
   packing: bfd
   pin_memory: true
   tokenizer: HuggingFaceTB/SmolLM2-135M
-  train_tokens: 100000000
+  train_tokens: 3000000000
 eval:
   benchmarks:
   - gsm8k
@@ -128,7 +128,7 @@ training:
   min_lr_ratio: 0.1
   muon_lr: 0.003
   muon_momentum: 0.95
-  muon_ns_steps: 5
+  muon_ns_steps: 10
   optimizer: muon_adamw
   pin_memory: true
   precision: manual_bf16

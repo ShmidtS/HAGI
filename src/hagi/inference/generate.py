@@ -128,6 +128,9 @@ def _model_device(model: Any) -> Any:
 def _maybe_compile(model: Any, compile_model: bool) -> Any:
     if not compile_model or torch is None or not hasattr(torch, "compile"):
         return model
+    import sys
+    if sys.platform == "win32":
+        return model
     device = _model_device(model)
     if device is not None and device.type == "cuda":
         return torch.compile(model)
