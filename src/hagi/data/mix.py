@@ -78,13 +78,13 @@ class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
     def __getitem__(self, index: int) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        rng = random.Random(self.seed + int(index))
-        source_index = rng.choices(range(len(self.paths)), weights=self.weights.tolist(), k=1)[0]
+        rng = np.random.default_rng(self.seed + int(index))
+        source_index = rng.choice(len(self.paths), p=self.weights)
         array = self._array(source_index)
         max_start = len(array) - self.seq_len
         if max_start <= 0:
             raise ValueError("memmap dataset is too small")
-        start = rng.randrange(0, max_start)
+        start = rng.integers(0, max_start)
         chunk = np.asarray(array[start : start + self.seq_len + 1], dtype=np.int64)
         return chunk[:-1], chunk[1:]
 

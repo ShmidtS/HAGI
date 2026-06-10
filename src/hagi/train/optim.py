@@ -43,19 +43,33 @@ class Muon(torch.optim.Optimizer):
             momentum = group["momentum"]
             nesterov = group["nesterov"]
             ns_steps = group["ns_steps"]
+            # Group by shape for fused foreach ops
+            shape_groups: dict[tuple[int, ...], list[torch.Tensor]] = {}
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                g = p.grad
-                state = self.state[p]
-                if "momentum_buffer" not in state:
-                    state["momentum_buffer"] = torch.zeros_like(g)
-                buf = state["momentum_buffer"]
-                buf.mul_(momentum).add_(g)
-                update = g.add(buf, alpha=momentum) if nesterov else buf
-                update = zeropower_via_newtonschulz5(update, ns_steps)
-                scale = min(max(1.0, p.size(0) / p.size(1)) ** 0.5, 2.0)
-                p.add_(update.reshape(p.shape).type_as(p), alpha=-lr * scale)
+                shape_groups.setdefault(p.shape, []).append(p)
+            for params in shape_groups.values():
+                grads: list[torch.Tensor] = []
+                bufs: list[torch.Tensor] = []
+                for p in params:
+                    g = p.grad
+                    assert g is not None
+                    grads.append(g)
+                    state = self.state[p]
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(g)
+                    bufs.append(state["momentum_buffer"])
+                torch._foreach_mul_(bufs, momentum)
+                torch._foreach_add_(bufs, grads)
+                if nesterov:
+                    updates = [g.add(b, alpha=momentum) for g, b in zip(grads, bufs)]
+                else:
+                    updates = bufs
+                for p, update in zip(params, updates):
+                    update = zeropower_via_newtonschulz5(update, ns_steps)
+                    scale = min(max(1.0, p.size(0) / p.size(1)) ** 0.5, 2.0)
+                    p.add_(update.reshape(p.shape).type_as(p), alpha=-lr * scale)
 
 
 def _is_muon_param(name: str, p: nn.Parameter) -> bool:

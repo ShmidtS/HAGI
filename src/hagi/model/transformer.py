@@ -30,6 +30,8 @@ class TransformerConfig:
     qk_norm: bool = False
     use_binary_factorized: bool = False
     binary_factorized_rank: int = 8
+    fuse_qkv: bool = True
+    fuse_gate_up: bool = True
     use_moe: bool = False
     num_experts: int = 8
     moe_top_k: int = 2
@@ -101,12 +103,54 @@ class GroupedQueryAttention(nn.Module):
         if self.qk_norm_enabled:
             self.q_norm = RMSNorm(self.head_dim, cfg.norm_eps)
             self.k_norm = RMSNorm(self.head_dim, cfg.norm_eps)
+        if getattr(cfg, "fuse_qkv", False) and not cfg.use_binary_factorized:
+            if isinstance(self.q_proj, nn.Linear) and isinstance(self.k_proj, nn.Linear) and isinstance(self.v_proj, nn.Linear):
+                self._fuse_qkv()
+
+    def _fuse_qkv(self):
+        wq = self.q_proj.weight.data
+        wk = self.k_proj.weight.data
+        wv = self.v_proj.weight.data
+        assert isinstance(wq, torch.Tensor) and isinstance(wk, torch.Tensor) and isinstance(wv, torch.Tensor)
+        self.qkv_weight = nn.Parameter(torch.cat([wq, wk, wv], dim=0).contiguous())
+        self._qkv_splits = [wq.size(0), wk.size(0), wv.size(0)]
+        del self.q_proj, self.k_proj, self.v_proj
+
+    def state_dict(self, *args, **kwargs):
+        state = super().state_dict(*args, **kwargs)
+        if hasattr(self, "qkv_weight"):
+            q, k, v = self.qkv_weight.split(self._qkv_splits, dim=0)
+            state["q_proj.weight"] = q
+            state["k_proj.weight"] = k
+            state["v_proj.weight"] = v
+            state.pop("qkv_weight", None)
+            state.pop("_qkv_splits", None)
+        return state
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        if "qkv_weight" in state_dict:
+            self.qkv_weight.data = state_dict["qkv_weight"]
+            del state_dict["qkv_weight"]
+        elif all(k in state_dict for k in ("q_proj.weight", "k_proj.weight", "v_proj.weight")):
+            q = state_dict["q_proj.weight"]
+            k = state_dict["k_proj.weight"]
+            v = state_dict["v_proj.weight"]
+            self.qkv_weight.data = torch.cat([q, k, v], dim=0)
+            del state_dict["q_proj.weight"], state_dict["k_proj.weight"], state_dict["v_proj.weight"]
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         B, T, _ = x.shape
-        q = self.q_proj(x).view(B, T, self.nq, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, T, self.nkv, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, T, self.nkv, self.head_dim).transpose(1, 2)
+        if hasattr(self, "qkv_weight"):
+            qkv = F.linear(x, self.qkv_weight)
+            q, k, v = qkv.split(self._qkv_splits, dim=-1)
+        else:
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+        q = q.view(B, T, self.nq, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.nkv, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.nkv, self.head_dim).transpose(1, 2)
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
         if self.qk_norm_enabled:
@@ -152,7 +196,7 @@ class GroupedQueryAttention(nn.Module):
         attn_k = k.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         attn_v = v.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
-        out = out.transpose(1, 2).contiguous().view(B, out.shape[2], -1)
+        out = out.transpose(1, 2).reshape(B, out.shape[2], -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out
 
@@ -163,9 +207,45 @@ class SwiGLU(nn.Module):
         self.gate = _make_linear(cfg.hidden_size, cfg.intermediate_size, cfg)
         self.up = _make_linear(cfg.hidden_size, cfg.intermediate_size, cfg)
         self.down = _make_linear(cfg.intermediate_size, cfg.hidden_size, cfg)
+        if getattr(cfg, "fuse_gate_up", False) and not cfg.use_binary_factorized:
+            if isinstance(self.gate, nn.Linear) and isinstance(self.up, nn.Linear):
+                self._fuse_gate_up()
+
+    def _fuse_gate_up(self):
+        w1 = self.gate.weight.data
+        w3 = self.up.weight.data
+        assert isinstance(w1, torch.Tensor) and isinstance(w3, torch.Tensor)
+        self.gate_up_weight = nn.Parameter(torch.cat([w1, w3], dim=0).contiguous())
+        del self.gate, self.up
+
+    def state_dict(self, *args, **kwargs):
+        state = super().state_dict(*args, **kwargs)
+        if hasattr(self, "gate_up_weight"):
+            gate, up = self.gate_up_weight.chunk(2, dim=0)
+            state["gate.weight"] = gate
+            state["up.weight"] = up
+            state.pop("gate_up_weight", None)
+        return state
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        if "gate_up_weight" in state_dict:
+            self.gate_up_weight.data = state_dict["gate_up_weight"]
+            del state_dict["gate_up_weight"]
+        elif all(k in state_dict for k in ("gate.weight", "up.weight")):
+            gate = state_dict["gate.weight"]
+            up = state_dict["up.weight"]
+            self.gate_up_weight.data = torch.cat([gate, up], dim=0)
+            del state_dict["gate.weight"], state_dict["up.weight"]
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down(F.silu(self.gate(x)) * self.up(x))
+        if hasattr(self, "gate_up_weight"):
+            gate_up = F.linear(x, self.gate_up_weight)
+            gate, up = gate_up.chunk(2, dim=-1)
+        else:
+            gate = self.gate(x)
+            up = self.up(x)
+        return self.down(F.silu(gate) * up)
 
     def forward_repacked(self, x: torch.Tensor) -> torch.Tensor:
         """Fused gate-up projection for contiguous memory access during inference."""
@@ -207,7 +287,7 @@ class TransformerBlock(nn.Module):
         attn_mask=None,
     ):
         use_checkpoint = gradient_checkpointing and self.training and not use_cache
-        use_repacked = not self.training and hasattr(self.attn, "qkv_weight")
+        use_repacked = hasattr(self.attn, "qkv_weight")
         if use_checkpoint:
             h = self._apply_folded_norm(x, "attn")
             attn_out = checkpoint(

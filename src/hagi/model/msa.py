@@ -447,11 +447,35 @@ class MSAAttention(nn.Module):
             else nn.Linear(i, o, bias=False)
         )
         self.q_proj = _make(hidden_size, num_query_heads * self.head_dim)
-        self.k_proj = _make(hidden_size, num_kv_heads * self.head_dim)
-        self.v_proj = _make(hidden_size, num_kv_heads * self.head_dim)
+        if not use_binary_factorized:
+            self.kv_proj = nn.Linear(hidden_size, 2 * num_kv_heads * self.head_dim, bias=False)
+        else:
+            self.k_proj = _make(hidden_size, num_kv_heads * self.head_dim)
+            self.v_proj = _make(hidden_size, num_kv_heads * self.head_dim)
         self.o_proj = _make(num_query_heads * self.head_dim, hidden_size)
 
         self.rope = DocumentWiseRoPE(self.head_dim, max_seq_len, rope_theta)
+
+    def state_dict(self, *args, **kwargs):
+        state = super().state_dict(*args, **kwargs)
+        if hasattr(self, "kv_proj"):
+            kv = self.kv_proj.weight
+            k, v = kv.split(self.num_kv_heads * self.head_dim, dim=0)
+            state["k_proj.weight"] = k
+            state["v_proj.weight"] = v
+            state.pop("kv_proj", None)
+        return state
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        if "kv_proj" in state_dict:
+            self.kv_proj.weight.data = state_dict["kv_proj"]
+            del state_dict["kv_proj"]
+        elif all(k in state_dict for k in ("k_proj.weight", "v_proj.weight")):
+            k = state_dict["k_proj.weight"]
+            v = state_dict["v_proj.weight"]
+            self.kv_proj.weight.data = torch.cat([k, v], dim=0)
+            del state_dict["k_proj.weight"], state_dict["v_proj.weight"]
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def _fetch_kv_from_slots(
         self,

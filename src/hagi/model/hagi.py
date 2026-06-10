@@ -20,6 +20,7 @@ import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from ..losses import cross_entropy_loss
 from ..nars.adapters import NarsHdimReasoner, NarsHrmController, NarsMsaReasoner
 from .gdr import GradeConfig, GradeDecomposedRecurrence
 from .hdim_full import DelayedHDIM, HDIMFull
@@ -246,8 +247,8 @@ class HAGI(nn.Module):
         need_iso = training_mode and (weights is None or weights.get("w_iso", 0.0) != 0.0)
         need_quality = training_mode and (weights is None or weights.get("w_quality", 0.0) != 0.0)
 
-        def run_block(block, hidden, past=None) -> Any:
-            if use_gradient_checkpointing:
+        def run_block(block, hidden, past=None, gc: bool = True) -> Any:
+            if use_gradient_checkpointing and gc:
                 result = checkpoint(block, hidden, cos, sin, use_reentrant=False)
             elif use_cache:
                 result = block(hidden, cos, sin, past, use_cache=True)
@@ -385,8 +386,12 @@ class HAGI(nn.Module):
             nkv = self.msa.num_kv_heads
             head_dim = self.msa.head_dim
 
-            k = self.msa.k_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
-            v = self.msa.v_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
+            if hasattr(self.msa, "kv_proj"):
+                kv = self.msa.kv_proj(h).view(b, t, 2 * nkv, head_dim).transpose(1, 2)
+                k, v = kv.split(nkv, dim=1)
+            else:
+                k = self.msa.k_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
+                v = self.msa.v_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
 
             slot_ids, routing_keys, k_caches, v_caches = self.hdim_slot_router.batch_create_slots(
                 hidden_states=h,
@@ -431,7 +436,6 @@ class HAGI(nn.Module):
         logits = self.lm_head(h)
 
         if targets is not None:
-            from ..losses import cross_entropy_loss
             loss = cross_entropy_loss(
                 logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
@@ -450,7 +454,7 @@ class HAGI(nn.Module):
             if loss is not None:
                 result["loss"] = loss
             if moe_aux_losses:
-                result["moe_aux_loss"] = sum(moe_aux_losses)
+                result["moe_aux_loss"] = torch.stack(moe_aux_losses).sum()
                 result["num_moe_layers"] = len(moe_aux_losses)
             if (weights is None or weights.get("w_aux", 0.0) != 0.0) and gdr_state is not None and isinstance(gdr_state, dict):
                 if "fused" in gdr_state or "features" in gdr_state:

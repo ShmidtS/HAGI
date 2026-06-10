@@ -159,10 +159,9 @@ class HRMCore(nn.Module):
         pre_gdr_h = None
         for h_cycle in range(self.h_cycles):
             for l_cycle in range(self.l_cycles):
-                z_l_hidden = self.z_l_to_hidden(z_L).unsqueeze(1).expand(B, T, H)
-                z_h_hidden = self.z_h_to_hidden(z_H).unsqueeze(1).expand(B, T, H)
+                bias = self.z_l_to_hidden(z_L).unsqueeze(1).expand(B, T, H) + self.z_h_to_hidden(z_H).unsqueeze(1).expand(B, T, H)
                 for block in reasoning_blocks:
-                    h_in = h + z_l_hidden + z_h_hidden
+                    h_in = h + bias
                     result = block(h_in, cos, sin, gradient_checkpointing=gradient_checkpointing, attn_mask=attn_mask)
                     if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], torch.Tensor) and result[1].ndim == 0:
                         h = result[0]

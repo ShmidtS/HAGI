@@ -5,6 +5,7 @@ import copy
 import math
 import time
 import warnings
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -306,11 +307,8 @@ def scheduled_weight(
 
 
 def autocast_ctx(precision: str, device: str):
-    if precision == "fp32" or not device.startswith("cuda"):
-        return torch.autocast(device_type="cpu", enabled=False)
-    if precision in ("manual_fp16", "manual_bf16"):
-        # Manual: model is already in target dtype, no autocast needed
-        return torch.autocast(device_type="cpu", enabled=False)
+    if precision in ("fp32", "manual_fp16", "manual_bf16") or not device.startswith("cuda"):
+        return nullcontext()
     dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     return torch.autocast(device_type="cuda", dtype=dtype)
 
@@ -689,23 +687,15 @@ def update_ema(
         if hasattr(torch, "_foreach_mul"):
             ema_device = ema_params[0].device if ema_params else None
             if ema_device == params[0].device:
-                param_tensors: list[torch.Tensor] = [p for p in params]
-                ema_param_tensors: list[torch.Tensor] = [p for p in ema_params]
-                torch._foreach_mul_(ema_param_tensors, decay)
-                torch._foreach_add_(
-                    ema_param_tensors,
-                    [p.detach() for p in param_tensors],
-                    alpha=1.0 - decay,
-                )
+                torch._foreach_mul_(cast(list[torch.Tensor], ema_params), decay)
+                torch._foreach_add_(cast(list[torch.Tensor], ema_params), [p.detach() for p in params], alpha=1.0 - decay)
             else:
                 for ema_param, param in zip(ema_params, params, strict=True):
                     ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
         else:
             for ema_param, param in zip(ema_params, params, strict=True):
                 ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
-        for ema_buffer, buffer in zip(
-            model_ema.buffers(), model.buffers(), strict=True
-        ):
+        for ema_buffer, buffer in zip(model_ema.buffers(), model.buffers(), strict=True):
             ema_buffer.copy_(buffer)
 
 
@@ -732,8 +722,7 @@ def magic_norm_clip(
         norms = view.norm(dim=-1, keepdim=True).clamp_min(1e-4).float()
         local_max = norms.max().detach()
         max_seen_t = torch.maximum(max_seen_t, local_max)
-        if local_max > max_norm:
-            view.mul_((max_norm_t / norms).clamp(max=1.0).detach().to(dtype=view.dtype))
+        view.mul_((max_norm_t / norms).clamp(max=1.0).detach().to(dtype=view.dtype))
     return max_seen_t
 
 
@@ -1255,14 +1244,24 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     training_mode=effective_weights is not None,
                     weights=effective_weights,
                 )
-                if not train_cfg.get("use_gdr_aux", False):
-                    if isinstance(output, dict):
-                        output.pop("auxiliary_output", None)
                 logits = unwrap_logits(output)
                 chunk_size = getattr(model_cfg, "ce_chunk_size", 0)
-                loss, components = compute_loss(
-                    logits, targets, output, effective_weights, chunk_size=chunk_size
-                )
+                # Fast path: skip composite_loss when only CE is needed and components not logged
+                if (
+                    not need_components
+                    and isinstance(output, dict)
+                    and output.get("loss") is not None
+                    and effective_weights is not None
+                    and effective_weights.get("w_aux", 0) == 0
+                    and effective_weights.get("w_iso", 0) == 0
+                    and effective_weights.get("w_moe", 0) == 0
+                ):
+                    loss = output["loss"]
+                    components = {}
+                else:
+                    loss, components = compute_loss(
+                        logits, targets, output, effective_weights, chunk_size=chunk_size
+                    )
                 raw_loss = loss.detach().float()
                 loss = loss / grad_accum_steps
             t_forward += time.perf_counter() - t_fwd_start

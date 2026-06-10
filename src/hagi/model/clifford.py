@@ -79,6 +79,10 @@ _STRUCT_TRITON = _STRUCT.permute(2, 0, 1).contiguous()
 
 # Cache per (device, dtype) to avoid repeated .to() sync
 _STRUCT_CACHE: dict[tuple, torch.Tensor] = {}
+_GRADE_MASK_CACHE: dict[tuple, torch.Tensor] = {}
+_REVERSE_SIGNS_CACHE: dict[tuple, torch.Tensor] = {}
+_BV_MASK_CACHE: dict[tuple, torch.Tensor] = {}
+_OTHER_MASK_CACHE: dict[tuple, torch.Tensor] = {}
 
 
 def _get_struct(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -86,6 +90,50 @@ def _get_struct(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     if key not in _STRUCT_CACHE:
         _STRUCT_CACHE[key] = _STRUCT_TRITON.to(device=device, dtype=dtype)
     return _STRUCT_CACHE[key]
+
+
+def _get_grade_mask(device: torch.device, dtype: torch.dtype, grade: int) -> torch.Tensor:
+    key = (device, dtype, grade)
+    if key not in _GRADE_MASK_CACHE:
+        _GRADE_MASK_CACHE[key] = torch.tensor(
+            [1.0 if GRADE[i] == grade else 0.0 for i in range(BLADE_COUNT)],
+            dtype=dtype,
+            device=device,
+        )
+    return _GRADE_MASK_CACHE[key]
+
+
+def _get_reverse_signs(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (device, dtype)
+    if key not in _REVERSE_SIGNS_CACHE:
+        _REVERSE_SIGNS_CACHE[key] = torch.tensor(
+            [(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)],
+            dtype=dtype,
+            device=device,
+        )
+    return _REVERSE_SIGNS_CACHE[key]
+
+
+def _get_bv_mask(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (device, dtype)
+    if key not in _BV_MASK_CACHE:
+        _BV_MASK_CACHE[key] = torch.tensor(
+            [1.0 if GRADE[i] == 2 else 0.0 for i in range(BLADE_COUNT)],
+            dtype=dtype,
+            device=device,
+        )
+    return _BV_MASK_CACHE[key]
+
+
+def _get_other_mask(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (device, dtype)
+    if key not in _OTHER_MASK_CACHE:
+        _OTHER_MASK_CACHE[key] = torch.tensor(
+            [1.0 if GRADE[i] not in (0, 2) else 0.0 for i in range(BLADE_COUNT)],
+            dtype=dtype,
+            device=device,
+        )
+    return _OTHER_MASK_CACHE[key]
 
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -110,21 +158,13 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 def grade_projection(mv: torch.Tensor, grade: int) -> torch.Tensor:
     """Zero out all blades not of the given grade. Returns [..., 8]."""
-    mask = torch.tensor(
-        [1.0 if GRADE[i] == grade else 0.0 for i in range(BLADE_COUNT)],
-        dtype=mv.dtype,
-        device=mv.device,
-    )
+    mask = _get_grade_mask(mv.device, mv.dtype, grade)
     return mv * mask
 
 
 def reverse(mv: torch.Tensor) -> torch.Tensor:
     """Clifford reverse: sign (-1)^(k(k-1)/2) per grade k. Returns [..., 8]."""
-    signs = torch.tensor(
-        [(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)],
-        dtype=mv.dtype,
-        device=mv.device,
-    )
+    signs = _get_reverse_signs(mv.device, mv.dtype)
     return mv * signs
 
 
@@ -176,11 +216,7 @@ def bivector_exp(mv: torch.Tensor) -> torch.Tensor:
     For |B| -> 0, falls back to first-order Taylor: 1 - B/2.
     """
     assert mv.shape[-1] == BLADE_COUNT
-    bv_mask = torch.tensor(
-        [1.0 if GRADE[i] == 2 else 0.0 for i in range(BLADE_COUNT)],
-        dtype=mv.dtype,
-        device=mv.device,
-    )
+    bv_mask = _get_bv_mask(mv.device, mv.dtype)
     bivector = mv * bv_mask
     b_sq = -geometric_product(bivector, bivector)[..., :1]
     b_sq = b_sq.clamp_min(0.0)
@@ -194,10 +230,6 @@ def bivector_exp(mv: torch.Tensor) -> torch.Tensor:
     out = torch.zeros_like(mv)
     out[..., :1] = cos_half.unsqueeze(-1)
     out = out + rotor_bv
-    other_mask = torch.tensor(
-        [1.0 if GRADE[i] not in (0, 2) else 0.0 for i in range(BLADE_COUNT)],
-        dtype=mv.dtype,
-        device=mv.device,
-    )
+    other_mask = _get_other_mask(mv.device, mv.dtype)
     out = out + mv * other_mask
     return out
