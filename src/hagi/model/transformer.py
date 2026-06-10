@@ -128,15 +128,16 @@ class GroupedQueryAttention(nn.Module):
         return state
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        if "qkv_weight" in state_dict:
-            self.qkv_weight.data = state_dict["qkv_weight"]
-            del state_dict["qkv_weight"]
-        elif all(k in state_dict for k in ("q_proj.weight", "k_proj.weight", "v_proj.weight")):
-            q = state_dict["q_proj.weight"]
-            k = state_dict["k_proj.weight"]
-            v = state_dict["v_proj.weight"]
-            self.qkv_weight.data = torch.cat([q, k, v], dim=0)
-            del state_dict["q_proj.weight"], state_dict["k_proj.weight"], state_dict["v_proj.weight"]
+        qkv_key = prefix + "qkv_weight"
+        q_key = prefix + "q_proj.weight"
+        k_key = prefix + "k_proj.weight"
+        v_key = prefix + "v_proj.weight"
+        if qkv_key not in state_dict and all(k in state_dict for k in (q_key, k_key, v_key)):
+            q = state_dict[q_key]
+            k = state_dict[k_key]
+            v = state_dict[v_key]
+            state_dict[qkv_key] = torch.cat([q, k, v], dim=0)
+            del state_dict[q_key], state_dict[k_key], state_dict[v_key]
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:

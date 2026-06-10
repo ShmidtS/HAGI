@@ -463,18 +463,18 @@ class MSAAttention(nn.Module):
             k, v = kv.split(self.num_kv_heads * self.head_dim, dim=0)
             state["k_proj.weight"] = k
             state["v_proj.weight"] = v
-            state.pop("kv_proj", None)
+            state.pop("kv_proj.weight", None)
         return state
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        if "kv_proj" in state_dict:
-            self.kv_proj.weight.data = state_dict["kv_proj"]
-            del state_dict["kv_proj"]
-        elif all(k in state_dict for k in ("k_proj.weight", "v_proj.weight")):
-            k = state_dict["k_proj.weight"]
-            v = state_dict["v_proj.weight"]
-            self.kv_proj.weight.data = torch.cat([k, v], dim=0)
-            del state_dict["k_proj.weight"], state_dict["v_proj.weight"]
+        kv_key = prefix + "kv_proj.weight"
+        k_key = prefix + "k_proj.weight"
+        v_key = prefix + "v_proj.weight"
+        if kv_key not in state_dict and all(k in state_dict for k in (k_key, v_key)):
+            k = state_dict[k_key]
+            v = state_dict[v_key]
+            state_dict[kv_key] = torch.cat([k, v], dim=0)
+            del state_dict[k_key], state_dict[v_key]
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def _fetch_kv_from_slots(
