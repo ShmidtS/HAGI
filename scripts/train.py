@@ -890,6 +890,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_fp16_accumulation = True
 
     model = HAGI(model_cfg).to(args.device)
     if hasattr(model.cfg, "gradient_checkpointing"):
@@ -1027,6 +1028,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_fp16_accumulation = True
 
     start_step = 0
     if args.resume is not None and args.resume.exists():

@@ -353,10 +353,7 @@ class DocumentWiseRoPE(nn.Module):
         x1, x2 = x[..., 0::2], x[..., 1::2]
         rx1 = x1 * cos_idx - x2 * sin_idx
         rx2 = x1 * sin_idx + x2 * cos_idx
-        out = torch.empty_like(x)
-        out[..., 0::2] = rx1
-        out[..., 1::2] = rx2
-        return out
+        return torch.stack([rx1, rx2], dim=-1).flatten(-2)
 
 
 class HostKvCache:
@@ -600,7 +597,7 @@ class MSAAttention(nn.Module):
             out_k = out_k.squeeze(1)  # [B*nq*T, head_dim]
             out_k = out_k.view(B, self.num_query_heads, T, self.head_dim)
 
-        out = out_k.transpose(1, 2).contiguous().view(B, T, -1)
+        out = out_k.transpose(1, 2).reshape(B, T, -1)
         out = self.o_proj(out)
         return out
 

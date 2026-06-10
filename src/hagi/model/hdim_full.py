@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from .clifford import BLADE_COUNT, GRADE, geometric_product, reverse
+from .gdr import GradeConfig, GradeDecomposedRecurrence
 
 
 class HiddenToMultivector(nn.Module):
@@ -150,6 +151,7 @@ class HDIMFull(nn.Module):
         num_rotors: int = 4,
         blade_count: int = BLADE_COUNT,
         use_hdim_cross_domain: bool = True,
+        grades: GradeConfig | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -161,6 +163,7 @@ class HDIMFull(nn.Module):
         self.extract = InvariantExtractor()
         self.transfer = DomainTransfer()
         self.fuse = GatedFusion(hidden_size, heads, blade_count)
+        self.gdr = GradeDecomposedRecurrence(grades) if grades is not None else None
 
     def forward(
         self,
@@ -185,6 +188,8 @@ class HDIMFull(nn.Module):
         target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
         target_invariant = self.extract(multivector, self.rotors, tgt_rotor_idx)
         fused, gate = self.fuse(target, hidden_states, return_gate=True)
+        if self.gdr is not None:
+            fused = self.gdr(fused)
         if return_state:
             return {
                 "fused": fused,
@@ -217,8 +222,9 @@ class DelayedHDIM(HDIMFull):
         blade_count: int = BLADE_COUNT,
         delay_steps: int = 2,
         use_hdim_cross_domain: bool = True,
+        grades: GradeConfig | None = None,
     ):
-        super().__init__(hidden_size, heads, num_rotors, blade_count, use_hdim_cross_domain=use_hdim_cross_domain)
+        super().__init__(hidden_size, heads, num_rotors, blade_count, use_hdim_cross_domain=use_hdim_cross_domain, grades=grades)
         self.delay_steps = delay_steps
         self._buffer_sum: torch.Tensor | None = None
         self._buffer_count: int = 0

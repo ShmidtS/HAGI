@@ -76,7 +76,7 @@ model:
   l_dim: 256
   loop_count: 10
   moe_alpha: 0.01
-  moe_intermediate_size: 1024
+  moe_intermediate_size: 512
   moe_top_k: 1
   msa_slot_count: 100
   msa_top_k: 5

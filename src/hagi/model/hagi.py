@@ -10,6 +10,7 @@ A single class covers all four ablation models via config flags:
 
 from __future__ import annotations
 
+import copy
 import random
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,10 +28,11 @@ from .transformer import RMSNorm, TransformerBlock, TransformerConfig, build_rop
 
 
 def _pick_rotor_idx(seed: int, step: int, num_rotors: int) -> int:
-    """Pick a target rotor index via CPU Python RNG (no GPU sync)."""
+    """Pick a target rotor index via LCG (no GPU sync, no object allocation)."""
     if num_rotors <= 1:
         return 0
-    return random.Random(int(seed) + int(step)).randint(1, num_rotors - 1)
+    state = (seed * 1103515245 + step * 12345) & 0x7fffffff
+    return (state % (num_rotors - 1)) + 1
 
 
 @dataclass
@@ -107,7 +109,8 @@ class HAGI(nn.Module):
                     hidden_size=cfg.hidden_size,
                     heads=cfg.hdim_heads,
                     delay_steps=cfg.hdim_delay_steps,
-                ) if cfg.hdim_delay_steps > 1 else HDIMFull(hidden_size=cfg.hidden_size, heads=cfg.hdim_heads)
+                    grades=cfg.grades,
+                ) if cfg.hdim_delay_steps > 1 else HDIMFull(hidden_size=cfg.hidden_size, heads=cfg.hdim_heads, grades=cfg.grades)
                 if not getattr(cfg, "use_hdim_cross_domain", False):
                     hdim_module.use_hdim_cross_domain = False
                 self.gdr = hdim_module

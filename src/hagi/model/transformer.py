@@ -77,10 +77,7 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
     sin = sin[None, None, :, :]
     rx1 = x1 * cos - x2 * sin
     rx2 = x1 * sin + x2 * cos
-    out = torch.empty_like(x)
-    out[..., 0::2] = rx1
-    out[..., 1::2] = rx2
-    return out
+    return torch.stack([rx1, rx2], dim=-1).flatten(-2)
 
 
 def _make_linear(in_features: int, out_features: int, cfg: TransformerConfig) -> nn.Module:
@@ -129,7 +126,7 @@ class GroupedQueryAttention(nn.Module):
         attn_k = k.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         attn_v = v.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
         out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
-        out = out.transpose(1, 2).contiguous().view(B, out.shape[2], -1)
+        out = out.transpose(1, 2).reshape(B, out.shape[2], -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out
 

@@ -113,9 +113,9 @@ def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
         return flat.new_zeros(())
     if not isinstance(labels, torch.Tensor):
         labels = torch.as_tensor(labels, device=features.device)
-
-    flat = features.reshape(-1, features.size(-1))
-    labels = labels.to(device=features.device).reshape(-1)
+    else:
+        labels = labels.to(device=features.device)
+    labels = labels.reshape(-1)
     n = flat.size(0)
     if n != labels.numel() or n < 2:
         logger.debug("auxiliary contrastive labels invalid; L_aux set to 0")
