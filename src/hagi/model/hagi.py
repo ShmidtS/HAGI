@@ -31,13 +31,13 @@ def _pick_rotor_idx(seed: int, step: int, num_rotors: int) -> int:
     """Pick a target rotor index via LCG (no GPU sync, no object allocation)."""
     if num_rotors <= 1:
         return 0
-    state = (seed * 1103515245 + step * 12345) & 0x7fffffff
+    state = (seed * 1103515245 + step * 12345) & 0x7FFFFFFF
     return (state % (num_rotors - 1)) + 1
 
 
 @dataclass
 class HAGIConfig:
-    vocab_size: int = 32000
+    vocab_size: int = 49152
     hidden_size: int = 768
     perception_layers: int = 4
     reasoning_layers: int = 4
@@ -45,28 +45,28 @@ class HAGIConfig:
     loop_count: int = 1
     use_loop: bool = True
     use_gdr: bool = True
-    hdim_full: bool = False
+    hdim_full: bool = True
     hdim_heads: int = 4
     hdim_delay_steps: int = 1
-    hrm: bool = False
+    hrm: bool = True
     hrm_h_cycles: int = 1
-    hrm_l_cycles: int = 2
+    hrm_l_cycles: int = 3
     h_dim: int = 256
     l_dim: int = 256
-    gradient_checkpointing: bool = False
+    gradient_checkpointing: bool = True
     rotor_seed: int = 42
-    use_hdim_cross_domain: bool = False
-    use_msa: bool = False
+    use_hdim_cross_domain: bool = True
+    use_msa: bool = True
     msa_slot_count: int = 100
     msa_top_k: int = 5
-    use_nars: bool = False
+    use_nars: bool = True
     thinking_noise: float = 0.0
     use_quality_head: bool = False
     use_binary_factorized: bool = False
     binary_factorized_rank: int = 8
-    use_moe: bool = False
-    num_experts: int = 8
-    moe_top_k: int = 2
+    use_moe: bool = True
+    num_experts: int = 4
+    moe_top_k: int = 1
     moe_intermediate_size: int | None = None
     moe_alpha: float = 0.01
     ce_chunk_size: int = 0
@@ -85,33 +85,51 @@ class HAGIConfig:
         self.transformer.moe_intermediate_size = self.moe_intermediate_size
         self.transformer.moe_alpha = self.moe_alpha
         if self.use_moe and self.transformer.moe_intermediate_size is None:
-            self.transformer.moe_intermediate_size = self.transformer.intermediate_size // self.num_experts
-        if self.use_gdr and not self.hdim_full and not self.hrm:
-            assert self.hidden_size == self.grades.hidden_size, (
-                f"grade dims sum to {self.grades.hidden_size}, hidden is {self.hidden_size}"
+            self.transformer.moe_intermediate_size = (
+                self.transformer.intermediate_size // self.num_experts
             )
+        if self.use_gdr and not self.hdim_full and not self.hrm:
+            assert (
+                self.hidden_size == self.grades.hidden_size
+            ), f"grade dims sum to {self.grades.hidden_size}, hidden is {self.hidden_size}"
 
 
 class HAGI(nn.Module):
+    _step: torch.Tensor
+
     def __init__(self, cfg: HAGIConfig):
         super().__init__()
         self.cfg = cfg
         tcfg = cfg.transformer
 
         self.embed = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
-        self.perception = nn.ModuleList(TransformerBlock(tcfg) for _ in range(cfg.perception_layers))
-        self.reasoning = nn.ModuleList(TransformerBlock(tcfg) for _ in range(cfg.reasoning_layers))
-        self.expression = nn.ModuleList(TransformerBlock(tcfg) for _ in range(cfg.expression_layers))
+        self.perception = nn.ModuleList(
+            TransformerBlock(tcfg) for _ in range(cfg.perception_layers)
+        )
+        self.reasoning = nn.ModuleList(
+            TransformerBlock(tcfg) for _ in range(cfg.reasoning_layers)
+        )
+        self.expression = nn.ModuleList(
+            TransformerBlock(tcfg) for _ in range(cfg.expression_layers)
+        )
 
         self.gdr = None
         if cfg.use_gdr:
             if cfg.hdim_full:
-                hdim_module = DelayedHDIM(
-                    hidden_size=cfg.hidden_size,
-                    heads=cfg.hdim_heads,
-                    delay_steps=cfg.hdim_delay_steps,
-                    grades=cfg.grades,
-                ) if cfg.hdim_delay_steps > 1 else HDIMFull(hidden_size=cfg.hidden_size, heads=cfg.hdim_heads, grades=cfg.grades)
+                hdim_module = (
+                    DelayedHDIM(
+                        hidden_size=cfg.hidden_size,
+                        heads=cfg.hdim_heads,
+                        delay_steps=cfg.hdim_delay_steps,
+                        grades=cfg.grades,
+                    )
+                    if cfg.hdim_delay_steps > 1
+                    else HDIMFull(
+                        hidden_size=cfg.hidden_size,
+                        heads=cfg.hdim_heads,
+                        grades=cfg.grades,
+                    )
+                )
                 if not getattr(cfg, "use_hdim_cross_domain", False):
                     hdim_module.use_hdim_cross_domain = False
                 self.gdr = hdim_module
@@ -177,7 +195,13 @@ class HAGI(nn.Module):
         # with .to(device); dtype cast is memoized in _rope_cache). The dict
         # cache below is only an overflow fallback for T > max_seq_len.
         head_dim = tcfg.hidden_size // tcfg.num_query_heads
-        rope_cos, rope_sin = build_rope_cache(tcfg.max_seq_len, head_dim, tcfg.rope_theta, torch.device("cpu"), torch.float32)
+        rope_cos, rope_sin = build_rope_cache(
+            tcfg.max_seq_len,
+            head_dim,
+            tcfg.rope_theta,
+            torch.device("cpu"),
+            torch.float32,
+        )
         self.register_buffer("rope_cos", rope_cos, persistent=False)
         self.register_buffer("rope_sin", rope_sin, persistent=False)
         self._rope = {}
@@ -185,14 +209,19 @@ class HAGI(nn.Module):
         # Persisted step counter: the rotor schedule stays deterministic across
         # checkpoint save/resume. Old checkpoints without this key load fine
         # (see _load_from_state_dict).
-        self.register_buffer("_step", torch.zeros((), dtype=torch.long))
+        self._step = torch.zeros((), dtype=torch.long)
+        _step = self._step
+        del self._step
+        self.register_buffer("_step", _step)
 
         self.apply(self._init_weights)
 
         # GPT-2 style depth-scaled init: residual-branch output projections are
         # scaled by 1/sqrt(2*L) so the residual stream variance stays bounded
         # with depth (and with recurrent reasoning loops).
-        total_layers = cfg.perception_layers + cfg.reasoning_layers + cfg.expression_layers
+        total_layers = (
+            cfg.perception_layers + cfg.reasoning_layers + cfg.expression_layers
+        )
         residual_scale = 1.0 / math.sqrt(2 * max(1, total_layers))
         with torch.no_grad():
             for name, p in self.named_parameters():
@@ -210,17 +239,36 @@ class HAGI(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
         elif isinstance(module, RMSNorm):
-            if hasattr(module, 'weight') and module.weight is not None:
+            if hasattr(module, "weight") and module.weight is not None:
                 torch.nn.init.ones_(module.weight)
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
         # Tolerant loading for checkpoints created before _step became a buffer.
         step_key = prefix + "_step"
         if step_key not in state_dict:
             state_dict[step_key] = self._step.detach().clone()
         elif not isinstance(state_dict[step_key], torch.Tensor):
-            state_dict[step_key] = torch.tensor(int(state_dict[step_key]), dtype=torch.long)
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+            state_dict[step_key] = torch.tensor(
+                int(state_dict[step_key]), dtype=torch.long
+            )
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def _rope_cache(self, T: int, device, dtype, offset: int = 0):
         total = T + offset
@@ -232,8 +280,12 @@ class HAGI(nn.Module):
         # Fallback for sequences beyond max_seq_len (kept small and bounded).
         key = (total, device, dtype)
         if key not in self._rope:
-            head_dim = self.cfg.transformer.hidden_size // self.cfg.transformer.num_query_heads
-            self._rope[key] = build_rope_cache(total, head_dim, self.cfg.transformer.rope_theta, device, dtype)
+            head_dim = (
+                self.cfg.transformer.hidden_size // self.cfg.transformer.num_query_heads
+            )
+            self._rope[key] = build_rope_cache(
+                total, head_dim, self.cfg.transformer.rope_theta, device, dtype
+            )
             if len(self._rope) > 8:
                 self._rope.pop(next(iter(self._rope)))
         cos, sin = self._rope[key]
@@ -270,13 +322,21 @@ class HAGI(nn.Module):
         layer_idx = 0
         gdr_state = None
         pre_gdr_h = None
-        use_gradient_checkpointing = self.cfg.gradient_checkpointing and self.training and not use_cache
+        use_gradient_checkpointing = (
+            self.cfg.gradient_checkpointing and self.training and not use_cache
+        )
         if self.training:
             self._step.add_(1)
         moe_aux_losses: list[torch.Tensor] = []
-        collect_moe_aux = training_mode and (weights is None or weights.get("w_moe", 0.0) != 0.0)
-        need_iso = training_mode and (weights is None or weights.get("w_iso", 0.0) != 0.0)
-        need_quality = training_mode and (weights is None or weights.get("w_quality", 0.0) != 0.0)
+        collect_moe_aux = training_mode and (
+            weights is None or weights.get("w_moe", 0.0) != 0.0
+        )
+        need_iso = training_mode and (
+            weights is None or weights.get("w_iso", 0.0) != 0.0
+        )
+        need_quality = training_mode and (
+            weights is None or weights.get("w_quality", 0.0) != 0.0
+        )
 
         def run_block(block, hidden, past=None, gc: bool = True) -> Any:
             if use_gradient_checkpointing and gc:
@@ -287,7 +347,11 @@ class HAGI(nn.Module):
                 result = block(hidden, cos, sin)
             if not use_cache and isinstance(result, tuple) and len(result) == 2:
                 h_out, aux_loss = result
-                if isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0 and collect_moe_aux:
+                if (
+                    isinstance(aux_loss, torch.Tensor)
+                    and aux_loss.ndim == 0
+                    and collect_moe_aux
+                ):
                     moe_aux_losses.append(aux_loss)
                 return h_out
             return result
@@ -296,7 +360,11 @@ class HAGI(nn.Module):
             """Run a sequence of transformer blocks, threading the KV cache."""
             nonlocal layer_idx
             for block in blocks:
-                past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
+                past = (
+                    past_key_values[layer_idx]
+                    if past_key_values is not None and layer_idx < len(past_key_values)
+                    else None
+                )
                 if use_cache:
                     hidden, next_kv = run_block(block, hidden, past)  # type: ignore[assignment]
                     assert next_key_values is not None
@@ -314,8 +382,14 @@ class HAGI(nn.Module):
         if self.gdr is not None:
             if training_mode and hasattr(self.gdr, "rotors"):
                 num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, int(self._step), num_rotors)
-            if training_mode and isinstance(self.gdr, DelayedHDIM) and self.gdr.delay_steps > 1:
+                tgt_idx = _pick_rotor_idx(
+                    self.cfg.rotor_seed, int(self._step.item()), num_rotors
+                )
+            if (
+                training_mode
+                and isinstance(self.gdr, DelayedHDIM)
+                and self.gdr.delay_steps > 1
+            ):
                 gdr_type = "delayed"
             elif training_mode and isinstance(self.gdr, HDIMFull):
                 gdr_type = "hdim"
@@ -338,15 +412,44 @@ class HAGI(nn.Module):
                         nars_controller=self.nars_hrm,
                     )
                 elif gdr_type == "hdim":
-                    gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
+                    gdr_state = self.gdr(
+                        h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True
+                    )
                     pre_gdr_h = h if need_iso else None
                     h = gdr_state["fused"]
-                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, training_mode=training_mode, gradient_checkpointing=use_gradient_checkpointing, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
+                    h, _, _, _, _ = self.hrm(
+                        h,
+                        self.reasoning,
+                        cos,
+                        sin,
+                        training_mode=training_mode,
+                        gradient_checkpointing=use_gradient_checkpointing,
+                        moe_aux_losses=moe_aux_losses,
+                        nars_controller=self.nars_hrm,
+                    )
                 else:
                     h = self.gdr(h)
-                    h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, training_mode=training_mode, gradient_checkpointing=use_gradient_checkpointing, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
+                    h, _, _, _, _ = self.hrm(
+                        h,
+                        self.reasoning,
+                        cos,
+                        sin,
+                        training_mode=training_mode,
+                        gradient_checkpointing=use_gradient_checkpointing,
+                        moe_aux_losses=moe_aux_losses,
+                        nars_controller=self.nars_hrm,
+                    )
             else:
-                h, _, _, _, _ = self.hrm(h, self.reasoning, cos, sin, training_mode=training_mode, gradient_checkpointing=use_gradient_checkpointing, moe_aux_losses=moe_aux_losses, nars_controller=self.nars_hrm)
+                h, _, _, _, _ = self.hrm(
+                    h,
+                    self.reasoning,
+                    cos,
+                    sin,
+                    training_mode=training_mode,
+                    gradient_checkpointing=use_gradient_checkpointing,
+                    moe_aux_losses=moe_aux_losses,
+                    nars_controller=self.nars_hrm,
+                )
             layer_idx += len(self.reasoning)
         else:
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
@@ -366,7 +469,12 @@ class HAGI(nn.Module):
                 else:
                     if self.gdr is not None:
                         if gdr_type == "hdim":
-                            gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
+                            gdr_state = self.gdr(
+                                h,
+                                src_rotor_idx=0,
+                                tgt_rotor_idx=tgt_idx,
+                                return_state=True,
+                            )
                             pre_gdr_h = h if need_iso else None
                             h = gdr_state["fused"]
                         else:
@@ -396,12 +504,14 @@ class HAGI(nn.Module):
                 k = self.msa.k_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
                 v = self.msa.v_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
 
-            slot_ids, routing_keys, k_caches, v_caches = self.hdim_slot_router.batch_create_slots(
-                hidden_states=h,
-                k_cache=k,
-                v_cache=v,
-                slot_id_base=0,
-                domain_id=0,
+            slot_ids, routing_keys, k_caches, v_caches = (
+                self.hdim_slot_router.batch_create_slots(
+                    hidden_states=h,
+                    k_cache=k,
+                    v_cache=v,
+                    slot_id_base=0,
+                    domain_id=0,
+                )
             )
             self.msa_registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)
 
@@ -421,12 +531,16 @@ class HAGI(nn.Module):
                 )
                 msa_scores = msa_weights
 
-            msa_out = self.msa(h, msa_slot_ids, self.msa_registry, nars_weights=nars_weights)
+            msa_out = self.msa(
+                h, msa_slot_ids, self.msa_registry, nars_weights=nars_weights
+            )
             h = h + msa_out
 
         h = run_stage(self.expression, h)
 
-        pre_logits_hidden = h if need_quality and self.quality_head is not None else None
+        pre_logits_hidden = (
+            h if need_quality and self.quality_head is not None else None
+        )
         h = self.final_norm(h)
 
         logits = None
@@ -439,7 +553,9 @@ class HAGI(nn.Module):
                 self.lm_head.weight,
                 targets,
                 ignore_index=ignore_index,
-                chunk_size=self.cfg.ce_chunk_size if self.cfg.ce_chunk_size > 0 else 4096,
+                chunk_size=(
+                    self.cfg.ce_chunk_size if self.cfg.ce_chunk_size > 0 else 4096
+                ),
             )
         else:
             logits = self.lm_head(h)
@@ -451,7 +567,11 @@ class HAGI(nn.Module):
                     chunk_size=self.cfg.ce_chunk_size,
                 )
 
-        if self.gdr_aux_proj is not None and gdr_state is not None and isinstance(gdr_state, dict):
+        if (
+            self.gdr_aux_proj is not None
+            and gdr_state is not None
+            and isinstance(gdr_state, dict)
+        ):
             if "fused" in gdr_state:
                 gdr_state["features"] = self.gdr_aux_proj(gdr_state["fused"])
 
@@ -462,16 +582,30 @@ class HAGI(nn.Module):
             if moe_aux_losses:
                 result["moe_aux_loss"] = torch.stack(moe_aux_losses).sum()
                 result["num_moe_layers"] = len(moe_aux_losses)
-            if (weights is None or weights.get("w_aux", 0.0) != 0.0) and gdr_state is not None and isinstance(gdr_state, dict):
+            if (
+                (weights is None or weights.get("w_aux", 0.0) != 0.0)
+                and gdr_state is not None
+                and isinstance(gdr_state, dict)
+            ):
                 if "fused" in gdr_state or "features" in gdr_state:
                     # inject batch-index labels for contrastive auxiliary loss
                     if "labels" not in gdr_state:
                         b, t, _ = h.shape
-                        gdr_state["labels"] = torch.arange(b, device=h.device).unsqueeze(1).expand(b, t).reshape(-1)
-                    if any(k in gdr_state for k in ("features", "embeddings", "output")):
+                        gdr_state["labels"] = (
+                            torch.arange(b, device=h.device)
+                            .unsqueeze(1)
+                            .expand(b, t)
+                            .reshape(-1)
+                        )
+                    if any(
+                        k in gdr_state for k in ("features", "embeddings", "output")
+                    ):
                         result["auxiliary_output"] = gdr_state
                     else:
-                        result["auxiliary_output"] = {"features": gdr_state["fused"], "labels": gdr_state["labels"]}
+                        result["auxiliary_output"] = {
+                            "features": gdr_state["fused"],
+                            "labels": gdr_state["labels"],
+                        }
             if pre_gdr_h is not None and gdr_state is not None:
                 # Use hidden states before/after HDIM for meaningful L_iso
                 result["invariant_src"] = pre_gdr_h
@@ -483,7 +617,9 @@ class HAGI(nn.Module):
                 result["msa_slot_ids"] = msa_slot_ids
                 result["msa_scores"] = msa_scores
             if pre_logits_hidden is not None and self.quality_head is not None:
-                result["quality_score"] = self.quality_head(pre_logits_hidden).squeeze(-1)
+                result["quality_score"] = self.quality_head(pre_logits_hidden).squeeze(
+                    -1
+                )
             return result
 
         if loss is not None:

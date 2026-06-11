@@ -93,7 +93,9 @@ def fused_linear_cross_entropy(
         h_c = flat_h[i : i + chunk_size]
         t_c = flat_t[i : i + chunk_size]
         if needs_grad:
-            total = total + _ckpt(_chunk_loss, h_c, t_c, use_reentrant=False)
+            chunk_loss = _ckpt(_chunk_loss, h_c, t_c, use_reentrant=False)
+            assert isinstance(chunk_loss, torch.Tensor)
+            total = total + chunk_loss
         else:
             total = total + _chunk_loss(h_c, t_c)
     return (total / valid).to(hidden.dtype)

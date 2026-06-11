@@ -20,11 +20,13 @@ DEFAULT_CONFIG_PATH = Path("E:/HAGI/configs/rtx3070_canonical.yaml")
 DEFAULT_CHECKPOINT_DIR = Path("E:/HAGI/checkpoints/rtx3070")
 TOY_CHECKPOINT_PATH = Path("E:/HAGI/checkpoints/toy_chat.pt")
 
-TOY_VOCAB_SIZE = 64
+TOY_VOCAB_SIZE = 49152
 TOY_SEQ_LEN = 40
 TOY_SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
 TOY_TEXT_TOKENS = list("What is?Answer. 0123456789\n")
-TOY_TOKEN_TO_ID = {token: idx for idx, token in enumerate(TOY_SPECIAL_TOKENS + TOY_TEXT_TOKENS)}
+TOY_TOKEN_TO_ID = {
+    token: idx for idx, token in enumerate(TOY_SPECIAL_TOKENS + TOY_TEXT_TOKENS)
+}
 TOY_ID_TO_TOKEN = {idx: token for token, idx in TOY_TOKEN_TO_ID.items()}
 TOY_PAD_ID = TOY_TOKEN_TO_ID["<pad>"]
 TOY_BOS_ID = TOY_TOKEN_TO_ID["<bos>"]
@@ -130,7 +132,9 @@ def toy_answer(model: HAGI, question: str, device: str, max_new_tokens: int) -> 
     if not prompt.endswith("?"):
         prompt = f"What is {prompt}?" if prompt.isdigit() else f"{prompt}?"
     prompt = f"{prompt}\nAnswer"
-    prompt_ids = torch.tensor([toy_encode(prompt, add_bos=True)], dtype=torch.long, device=device)
+    prompt_ids = torch.tensor(
+        [toy_encode(prompt, add_bos=True)], dtype=torch.long, device=device
+    )
     output = generate(
         model,
         prompt_ids,
@@ -168,7 +172,9 @@ def find_checkpoint(path: Path) -> Path:
     # Sharded checkpoint directory (model.pt, optimizer.pt, ema.pt, meta.pt)
     if (path / "model.pt").exists():
         return path
-    checkpoints = sorted(path.glob("*.pt"), key=lambda item: item.stat().st_mtime, reverse=True)
+    checkpoints = sorted(
+        path.glob("*.pt"), key=lambda item: item.stat().st_mtime, reverse=True
+    )
     if not checkpoints:
         raise FileNotFoundError(f"no .pt checkpoints found in {path}")
     return checkpoints[0]
@@ -183,7 +189,9 @@ def vram_usage() -> str:
     return f"VRAM used={used:.2f}GB reserved={reserved:.2f}GB total={total:.2f}GB"
 
 
-def load_production_model(checkpoint: Path, compile_model: bool, use_msa: bool = True, use_nars: bool = True) -> tuple[torch.nn.Module, int]:
+def load_production_model(
+    checkpoint: Path, compile_model: bool, use_msa: bool = True, use_nars: bool = True
+) -> tuple[torch.nn.Module, int]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, step, _ = load_checkpoint(str(checkpoint), device=device, use_ema=True)
     model.eval()
@@ -192,7 +200,12 @@ def load_production_model(checkpoint: Path, compile_model: bool, use_msa: bool =
         model.cfg.use_msa = use_msa
     if hasattr(model.cfg, "use_nars"):
         model.cfg.use_nars = use_nars
-    if compile_model and device == "cuda" and hasattr(torch, "compile") and sys.platform != "win32":
+    if (
+        compile_model
+        and device == "cuda"
+        and hasattr(torch, "compile")
+        and sys.platform != "win32"
+    ):
         model = torch.compile(model)
         assert isinstance(model, torch.nn.Module)
     return model, step
@@ -249,7 +262,9 @@ def production_repl(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="HAGI chat REPL (production + toy).")
-    parser.add_argument("--config", type=Path, default=None, help="config path (production mode)")
+    parser.add_argument(
+        "--config", type=Path, default=None, help="config path (production mode)"
+    )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--mode", choices=["auto", "production", "toy"], default="auto")
     parser.add_argument("--train", action=argparse.BooleanOptionalAction, default=True)
@@ -262,7 +277,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--system", default=None)
-    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--compile", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--rollouts", type=int, default=1)
     parser.add_argument("--noise-sigma", type=float, default=0.0)
     return parser.parse_args()

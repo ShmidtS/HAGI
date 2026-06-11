@@ -15,12 +15,12 @@ except ImportError:  # pragma: no cover - torch is an optional runtime fallback
 
 @dataclass
 class CacheKeyValues:
-    layers: list[tuple[Any, Any]]
+    layers: list[Any]
 
     def __len__(self) -> int:
         return len(self.layers)
 
-    def __getitem__(self, index: int) -> tuple[Any, Any]:
+    def __getitem__(self, index: int) -> Any:
         return self.layers[index]
 
     @classmethod
@@ -29,7 +29,7 @@ class CacheKeyValues:
             return cache
         return cls(list(cache or []))
 
-    def to_model_cache(self) -> list[tuple[Any, Any]]:
+    def to_model_cache(self) -> list[Any]:
         return self.layers
 
 

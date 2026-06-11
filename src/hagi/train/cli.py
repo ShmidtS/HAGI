@@ -28,8 +28,12 @@ def _tiny_batcher(
     generator: torch.Generator,
 ):
     def get_batch() -> tuple[torch.Tensor, torch.Tensor]:
-        x = torch.randint(vocab_size, (batch_size, seq_len), generator=generator).to(device)
-        y = torch.randint(vocab_size, (batch_size, seq_len), generator=generator).to(device)
+        x = torch.randint(vocab_size, (batch_size, seq_len), generator=generator).to(
+            device
+        )
+        y = torch.randint(vocab_size, (batch_size, seq_len), generator=generator).to(
+            device
+        )
         return x, y
 
     return get_batch
@@ -42,7 +46,9 @@ def _memmap_batcher(
     generator: torch.Generator,
 ):
     if len(dataset) <= 0:
-        raise ValueError(f"memmap dataset is too small for block_size={dataset.block_size}")
+        raise ValueError(
+            f"memmap dataset is too small for block_size={dataset.block_size}"
+        )
 
     def get_batch() -> tuple[torch.Tensor, torch.Tensor]:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
@@ -63,12 +69,18 @@ def _build_batcher(
     model_cfg = cfg.get("model", {})
     train_cfg = cfg.get("training", {})
     data_cfg = cfg.get("data", {})
-    vocab_size = int(model_cfg.get("vocab_size", 32000))
+    vocab_size = int(model_cfg.get("vocab_size", 49152))
     batch_size = int(train_cfg.get("batch_size", 4))
-    seq_len = int(data_cfg.get("max_seq_len", model_cfg.get("transformer", {}).get("max_seq_len", 128)))
+    seq_len = int(
+        data_cfg.get(
+            "max_seq_len", model_cfg.get("transformer", {}).get("max_seq_len", 128)
+        )
+    )
 
     if overfit:
-        return _tiny_batcher(vocab_size, min(batch_size, 4), min(seq_len, 64), device, generator)
+        return _tiny_batcher(
+            vocab_size, min(batch_size, 4), min(seq_len, 64), device, generator
+        )
 
     train_path = data_cfg.get("train_path") or data_cfg.get("path")
     if train_path:
@@ -77,7 +89,9 @@ def _build_batcher(
         dataset = MemmapDataset(train_path, block_size=block_size, dtype=dtype)
         return _memmap_batcher(dataset, batch_size, device, generator)
 
-    return _tiny_batcher(vocab_size, min(batch_size, 4), min(seq_len, 64), device, generator)
+    return _tiny_batcher(
+        vocab_size, min(batch_size, 4), min(seq_len, 64), device, generator
+    )
 
 
 def run(
@@ -120,7 +134,11 @@ def run(
         grad_clip=float(train_cfg.get("grad_clip", 1.0)),
         precision=str(train_cfg.get("precision", precision)),
         gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", False)),
-        eval_interval=int(cfg.get("eval", {}).get("every_n_steps", train_cfg.get("eval_interval", 2000))),
+        eval_interval=int(
+            cfg.get("eval", {}).get(
+                "every_n_steps", train_cfg.get("eval_interval", 2000)
+            )
+        ),
         eval_iters=int(train_cfg.get("eval_iters", 50)),
         ckpt_interval=int(train_cfg.get("ckpt_interval", 5000)),
         ckpt_dir=str(train_cfg.get("ckpt_dir", ckpt_dir)),
@@ -131,12 +149,15 @@ def run(
 
     if start_step:
         print(f"resumed from step {start_step}")
-    loss = train(model, optimizer, get_batch, loop_cfg, device=device, start_step=start_step)
+    loss = train(
+        model, optimizer, get_batch, loop_cfg, device=device, start_step=start_step
+    )
     print(f"final_loss {loss:.4f}")
 
 
 def main() -> None:
     if typer is not None:
+
         def cli(
             config: Path = typer.Option(..., "--config"),
             device: str = typer.Option("cpu", "--device"),
