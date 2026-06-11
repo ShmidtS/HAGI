@@ -91,6 +91,70 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
     return fn(x, cos, sin)
 
 
+_TORCH_MAJOR_MINOR = tuple(int(p) for p in torch.__version__.split("+")[0].split(".")[:2])
+_SDPA_SUPPORTS_GQA = _TORCH_MAJOR_MINOR >= (2, 5)
+_FLASH_AVAILABLE: bool | None = None
+
+
+def _use_enable_gqa(q: torch.Tensor) -> bool:
+    """Use enable_gqa only when the flash SDPA backend can actually run.
+
+    enable_gqa restricts SDPA backend selection: on builds without flash
+    attention (e.g. Windows) SDPA silently falls back to the slow math kernel,
+    which can halve training throughput. The expand fallback keeps backend
+    choice free (mem-efficient kernel) and is faster in that case.
+    """
+    global _FLASH_AVAILABLE
+    if not _SDPA_SUPPORTS_GQA or not q.is_cuda:
+        return False
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if _FLASH_AVAILABLE is None:
+        try:
+            _FLASH_AVAILABLE = bool(torch.backends.cuda.is_flash_attention_available())
+        except (AttributeError, RuntimeError):
+            _FLASH_AVAILABLE = False
+    return _FLASH_AVAILABLE
+
+
+def _update_kv(k, v, past_key_value, use_cache: bool, attn_mask):
+    """Apply the KV cache (in-place static cache or tuple concat).
+
+    Returns (k, v, next_key_value, is_causal). A static cache (anything exposing
+    ``update``) is written by index — no per-step torch.cat. A first call into an
+    empty static cache is a causal prefill.
+    """
+    if past_key_value is None:
+        return k, v, ((k, v) if use_cache else None), attn_mask is None
+    if hasattr(past_key_value, "update"):
+        prior_len = past_key_value.seq_len
+        k, v = past_key_value.update(k, v)
+        return k, v, (past_key_value if use_cache else None), (attn_mask is None and prior_len == 0)
+    past_key, past_value = past_key_value
+    k = torch.cat([past_key, k], dim=2)
+    v = torch.cat([past_value, v], dim=2)
+    return k, v, ((k, v) if use_cache else None), False
+
+
+def _sdpa_gqa(q, k, v, attn_mask, is_causal: bool, nq: int, nkv: int):
+    """SDPA with native GQA on PyTorch >= 2.5; zero-copy expand fallback otherwise.
+
+    PyTorch 2.0+ automatically selects the flash-attention backend on Ampere+
+    when head_dim <= 128 and dtype is FP16/BF16; no explicit context manager
+    needed. The fallback's reshape after expand materializes K/V copies, which
+    enable_gqa avoids entirely.
+    """
+    if nq == nkv:
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
+    if _use_enable_gqa(q):
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=is_causal, enable_gqa=True)
+    rep = nq // nkv
+    B, _, T, D = k.shape
+    attn_k = k.unsqueeze(2).expand(B, nkv, rep, T, D).reshape(B, nq, T, D)
+    attn_v = v.unsqueeze(2).expand(B, nkv, rep, T, D).reshape(B, nq, T, D)
+    return F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
+
+
 def _make_linear(in_features: int, out_features: int, cfg: TransformerConfig) -> nn.Module:
     if cfg.use_binary_factorized:
         return BinaryFactorizedLinear(in_features, out_features, cfg.binary_factorized_rank)
@@ -167,20 +231,8 @@ class GroupedQueryAttention(nn.Module):
         if self.qk_norm_enabled:
             q = self.q_norm(q)
             k = self.k_norm(k)
-        if past_key_value is not None:
-            past_key, past_value = past_key_value
-            k = torch.cat([past_key, k], dim=2)
-            v = torch.cat([past_value, v], dim=2)
-        next_key_value = (k, v) if use_cache else None
-        is_causal = attn_mask is None and past_key_value is None
-        # PyTorch 2.0+ automatically selects flash-attention backend on Ampere+ when
-        # head_dim <= 128 and dtype is FP16/BF16; no explicit context manager needed.
-        # Use zero-copy expand+view instead of repeat_interleave to avoid materialising copies.
-        rep = self.nq // self.nkv
-        B, _, T, D = k.shape
-        attn_k = k.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
-        attn_v = v.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
-        out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
+        k, v, next_key_value, is_causal = _update_kv(k, v, past_key_value, use_cache, attn_mask)
+        out = _sdpa_gqa(q, k, v, attn_mask, is_causal, self.nq, self.nkv)
         out = out.transpose(1, 2).reshape(B, out.shape[2], -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out
@@ -196,17 +248,8 @@ class GroupedQueryAttention(nn.Module):
         v = v.view(B, T, self.nkv, self.head_dim).transpose(1, 2)
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
-        if past_key_value is not None:
-            past_key, past_value = past_key_value
-            k = torch.cat([past_key, k], dim=2)
-            v = torch.cat([past_value, v], dim=2)
-        next_key_value = (k, v) if use_cache else None
-        is_causal = attn_mask is None and past_key_value is None
-        rep = self.nq // self.nkv
-        B, _, T, D = k.shape
-        attn_k = k.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
-        attn_v = v.unsqueeze(2).expand(B, self.nkv, rep, T, D).reshape(B, self.nq, T, D)
-        out = F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
+        k, v, next_key_value, is_causal = _update_kv(k, v, past_key_value, use_cache, attn_mask)
+        out = _sdpa_gqa(q, k, v, attn_mask, is_causal, self.nq, self.nkv)
         out = out.transpose(1, 2).reshape(B, out.shape[2], -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out

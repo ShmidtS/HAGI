@@ -59,7 +59,7 @@ class HAGILMEval(LM):  # type: ignore[misc]
         self.max_length = max_length
         self.tokenizer = load_tokenizer(tokenizer)
 
-        model, _, _ = load_checkpoint(ckpt, device=self.device)
+        model, _, _ = load_checkpoint(ckpt, device=self.device, use_ema=True)
         self.model = model.eval()
 
     def tok_encode(self, s: str) -> list[int]:

@@ -28,6 +28,31 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e
     return x.to(G.dtype)
 
 
+@torch.no_grad()
+def zeropower_via_newtonschulz5_batched(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
+    """Batched quintic Newton-Schulz over a [B, M, N] stack of matrices.
+
+    Numerically equivalent to running zeropower_via_newtonschulz5 per matrix,
+    but executes one bmm chain instead of B sequential matmul chains — much
+    less kernel-launch overhead for many small same-shape parameters.
+    """
+    assert G.ndim == 3, "batched Muon orthogonalization expects [B, M, N]"
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    x = G.bfloat16()
+    transposed = G.size(1) > G.size(2)
+    if transposed:
+        x = x.transpose(1, 2)
+    norms = x.flatten(1).norm(dim=1).view(-1, 1, 1) + eps
+    x = x / norms
+    for _ in range(steps):
+        A = x @ x.transpose(1, 2)
+        B = b * A + c * (A @ A)
+        x = a * x + B @ x
+    if transposed:
+        x = x.transpose(1, 2)
+    return x.to(G.dtype)
+
+
 class Muon(torch.optim.Optimizer):
     """Momentum SGD with per-step orthogonalization of 2D updates."""
 
@@ -65,11 +90,19 @@ class Muon(torch.optim.Optimizer):
                 if nesterov:
                     updates = [g.add(b, alpha=momentum) for g, b in zip(grads, bufs)]
                 else:
-                    updates = bufs
-                for p, update in zip(params, updates):
-                    update = zeropower_via_newtonschulz5(update, ns_steps)
-                    scale = min(max(1.0, p.size(0) / p.size(1)) ** 0.5, 2.0)
-                    p.add_(update.reshape(p.shape).type_as(p), alpha=-lr * scale)
+                    updates = list(bufs)
+                if len(updates) > 1:
+                    # One batched bmm chain for the whole same-shape group.
+                    stacked = torch.stack(updates)
+                    ortho = zeropower_via_newtonschulz5_batched(stacked, ns_steps)
+                    p0 = params[0]
+                    scale = min(max(1.0, p0.size(0) / p0.size(1)) ** 0.5, 2.0)
+                    torch._foreach_add_(params, list(ortho.type_as(p0).unbind(0)), alpha=-lr * scale)
+                else:
+                    for p, update in zip(params, updates):
+                        update = zeropower_via_newtonschulz5(update, ns_steps)
+                        scale = min(max(1.0, p.size(0) / p.size(1)) ** 0.5, 2.0)
+                        p.add_(update.reshape(p.shape).type_as(p), alpha=-lr * scale)
 
 
 def _is_muon_param(name: str, p: nn.Parameter) -> bool:

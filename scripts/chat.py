@@ -146,7 +146,7 @@ def toy_answer(model: HAGI, question: str, device: str, max_new_tokens: int) -> 
 
 
 def toy_chat(checkpoint_path: Path, device: str, max_new_tokens: int) -> None:
-    model, step, _ = load_checkpoint(str(checkpoint_path), device=device)
+    model, step, _ = load_checkpoint(str(checkpoint_path), device=device, use_ema=True)
     model.eval()
     print(f"loaded checkpoint from step {step}: {checkpoint_path}")
     print("Type /quit to exit.")
@@ -185,7 +185,7 @@ def vram_usage() -> str:
 
 def load_production_model(checkpoint: Path, compile_model: bool, use_msa: bool = True, use_nars: bool = True) -> tuple[torch.nn.Module, int]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, step, _ = load_checkpoint(str(checkpoint), device=device)
+    model, step, _ = load_checkpoint(str(checkpoint), device=device, use_ema=True)
     model.eval()
     # Enable MSA and NARS for inference if configured
     if hasattr(model.cfg, "use_msa"):

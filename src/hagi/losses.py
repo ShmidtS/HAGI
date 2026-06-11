@@ -59,6 +59,46 @@ def cross_entropy_loss(
     return fn(logits, targets, ignore_index, chunk_size)
 
 
+def fused_linear_cross_entropy(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    targets: torch.Tensor,
+    ignore_index: int = -100,
+    chunk_size: int = 4096,
+) -> torch.Tensor:
+    """Chunked lm_head projection + cross-entropy without materializing [N, V] logits.
+
+    Each row-chunk is projected and reduced under activation checkpointing, so at
+    most ``chunk_size x V`` logits exist at any time (in forward AND backward; the
+    chunk is recomputed during backward). With V = 32k and N = B*T the full logits
+    tensor is the dominant activation-memory term; this path cuts it by a factor
+    of N / chunk_size. Numerically identical to the unchunked path (sum over
+    chunks / valid-token count == mean).
+    """
+    from torch.utils.checkpoint import checkpoint as _ckpt
+
+    flat_h = hidden.reshape(-1, hidden.size(-1))
+    flat_t = targets.reshape(-1)
+    if chunk_size <= 0:
+        chunk_size = 4096
+    valid = (flat_t != ignore_index).sum().clamp(min=1)
+
+    def _chunk_loss(h_chunk: torch.Tensor, t_chunk: torch.Tensor) -> torch.Tensor:
+        logits = F.linear(h_chunk, weight)
+        return F.cross_entropy(logits.float(), t_chunk, ignore_index=ignore_index, reduction="sum")
+
+    needs_grad = torch.is_grad_enabled() and (flat_h.requires_grad or weight.requires_grad)
+    total = flat_h.new_zeros((), dtype=torch.float32)
+    for i in range(0, flat_h.size(0), chunk_size):
+        h_c = flat_h[i : i + chunk_size]
+        t_c = flat_t[i : i + chunk_size]
+        if needs_grad:
+            total = total + _ckpt(_chunk_loss, h_c, t_c, use_reentrant=False)
+        else:
+            total = total + _chunk_loss(h_c, t_c)
+    return (total / valid).to(hidden.dtype)
+
+
 def auxiliary_gdr_loss(
     gdr_output: torch.Tensor,
     grade_targets: torch.Tensor | None = None,

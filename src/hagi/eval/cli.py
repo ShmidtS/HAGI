@@ -37,7 +37,7 @@ def _golden_eval(model: HAGI) -> dict[str, Any]:
 
 def _load_model(checkpoint: Path, config: Path | None) -> tuple[HAGI, int]:
     if config is None:
-        model, step, _ = load_checkpoint(str(checkpoint), device="cpu")
+        model, step, _ = load_checkpoint(str(checkpoint), device="cpu", use_ema=True)
         return model, step
 
     cfg = _load_yaml(config)

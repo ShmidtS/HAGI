@@ -13,6 +13,14 @@ The Cl(3,0,0) geometric product provides cross-grade interaction:
 
 This module is applied once per recurrence iteration inside the reasoning core.
 See docs/ARCHITECTURE.md for the full specification and the hypothesis under test.
+
+Implementation note: the per-grade updates use a shared trunk
+(Linear(ctx, ctx) + SiLU) followed by a single fused head
+(Linear(ctx, scalar+vector+bivector+trivector)) instead of four separate
+two-layer MLPs. Each grade still reads the full graded context; this cuts
+eight matmuls down to two. State-dict keys changed accordingly
+(mlp_scalar/... -> grade_trunk/grade_head): checkpoints produced before this
+change cannot be loaded into the new layout.
 """
 
 from __future__ import annotations
@@ -58,12 +66,14 @@ class GradeDecomposedRecurrence(nn.Module):
         super().__init__()
         self.cfg = cfg
         ctx = cfg.scalar + cfg.vector + cfg.bivector + cfg.trivector
+        self.ctx_size = ctx
 
-        # Per-grade update MLPs (each reads the full graded context).
-        self.mlp_scalar = nn.Sequential(nn.Linear(ctx, ctx), nn.SiLU(), nn.Linear(ctx, cfg.scalar))
-        self.mlp_vector = nn.Sequential(nn.Linear(ctx, ctx), nn.SiLU(), nn.Linear(ctx, cfg.vector))
-        self.mlp_bivector = nn.Sequential(nn.Linear(ctx, ctx), nn.SiLU(), nn.Linear(ctx, cfg.bivector))
-        self.mlp_trivector = nn.Sequential(nn.Linear(ctx, ctx), nn.SiLU(), nn.Linear(ctx, cfg.trivector))
+        # Shared trunk + single fused head replaces four per-grade MLPs:
+        # two matmuls instead of eight, identical receptive field (full ctx).
+        # Checkpoints saved with the old per-grade layout are detected in
+        # _load_from_state_dict and the legacy modules are rebuilt on the fly.
+        self.grade_trunk = nn.Sequential(nn.Linear(ctx, ctx), nn.SiLU())
+        self.grade_head = nn.Linear(ctx, ctx)
 
         # Vector grade reshaped into multivectors for the geometric product.
         assert cfg.vector % BLADE_COUNT == 0, "vector grade must be divisible by 8"
@@ -74,6 +84,42 @@ class GradeDecomposedRecurrence(nn.Module):
         self.geo_to_bivector = nn.Linear(cfg.vector, cfg.bivector, bias=False)
         self.gate_scalar = nn.Parameter(torch.zeros(1))
         self.gate_bivector = nn.Parameter(torch.zeros(1))
+
+    def _build_legacy_mlps(self) -> None:
+        """Recreate the pre-fusion per-grade MLP layout (for old checkpoints).
+
+        Modules are re-registered in the ORIGINAL order (mlp_* first, then
+        geo_to_* and gates) so that parameters() ordering matches the old
+        model exactly and optimizer state resumes correctly.
+        """
+        cfg = self.cfg
+        ctx = self.ctx_size
+        ref = self.geo_to_scalar.weight
+        device, dtype = ref.device, ref.dtype
+
+        geo_s, geo_b = self.geo_to_scalar, self.geo_to_bivector
+        gate_s, gate_b = self.gate_scalar, self.gate_bivector
+        del self.grade_trunk, self.grade_head
+        del self.geo_to_scalar, self.geo_to_bivector
+        del self.gate_scalar, self.gate_bivector
+
+        def _mk(out_dim: int) -> nn.Sequential:
+            return nn.Sequential(nn.Linear(ctx, ctx), nn.SiLU(), nn.Linear(ctx, out_dim)).to(device=device, dtype=dtype)
+
+        self.mlp_scalar = _mk(cfg.scalar)
+        self.mlp_vector = _mk(cfg.vector)
+        self.mlp_bivector = _mk(cfg.bivector)
+        self.mlp_trivector = _mk(cfg.trivector)
+        self.geo_to_scalar = geo_s
+        self.geo_to_bivector = geo_b
+        self.gate_scalar = gate_s
+        self.gate_bivector = gate_b
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        legacy = any(key.startswith(prefix + "mlp_") for key in state_dict)
+        if legacy and not hasattr(self, "mlp_scalar"):
+            self._build_legacy_mlps()
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def split(self, h: torch.Tensor):
         b = self.cfg.bounds
@@ -99,13 +145,27 @@ class GradeDecomposedRecurrence(nn.Module):
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         scalar, vector, bivector, trivector, residual = self.split(h)
-        ctx = h[..., :self.cfg.bounds[4]]
+        graded_ctx = h[..., :self.cfg.bounds[4]]
+
+        if hasattr(self, "mlp_scalar"):
+            # Legacy layout (resumed from a pre-fusion checkpoint).
+            s_upd = self.mlp_scalar(graded_ctx)
+            v_upd = self.mlp_vector(graded_ctx)
+            b_upd = self.mlp_bivector(graded_ctx)
+            t_upd = self.mlp_trivector(graded_ctx)
+        else:
+            graded = self.grade_head(self.grade_trunk(graded_ctx))
+            s_upd, v_upd, b_upd, t_upd = torch.split(
+                graded,
+                [self.cfg.scalar, self.cfg.vector, self.cfg.bivector, self.cfg.trivector],
+                dim=-1,
+            )
 
         sm, vm = self.cfg.scalar_momentum, self.cfg.vector_momentum
-        scalar_new = sm * scalar + (1 - sm) * self.mlp_scalar(ctx)
-        vector_new = vm * vector + (1 - vm) * self.mlp_vector(ctx)
-        bivector_new = self.mlp_bivector(ctx)
-        trivector_new = self.mlp_trivector(ctx)
+        scalar_new = sm * scalar + (1 - sm) * s_upd
+        vector_new = vm * vector + (1 - vm) * v_upd
+        bivector_new = b_upd
+        trivector_new = t_upd
 
         geo_scalar, geo_bivector = self.geometric_interaction(vector_new)
         scalar_new = scalar_new + geo_scalar

@@ -88,6 +88,14 @@ def train(
     model.train()
     if hasattr(model.cfg, "gradient_checkpointing"):
         model.cfg.gradient_checkpointing = cfg.gradient_checkpointing
+    # Opt-in whole-model compile (model cfg.compile). Forward passes go through
+    # `run_model`; checkpoints keep using `model` so state_dict keys never get
+    # the `_orig_mod.` prefix.
+    run_model = model
+    if getattr(getattr(model, "cfg", None), "compile", False) and device.startswith("cuda"):
+        import sys as _sys
+        if _sys.platform != "win32" and hasattr(torch, "compile"):
+            run_model = torch.compile(model)
     use_scaler = cfg.precision == "fp16" and device.startswith("cuda")
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
@@ -110,7 +118,7 @@ def train(
         for _ in range(cfg.grad_accum_steps):
             x, y = get_batch()
             with _autocast_ctx(cfg.precision, device):
-                result = model(x, targets=y, training_mode=True)
+                result = run_model(x, targets=y, training_mode=True)
                 loss = result["loss"] if isinstance(result, dict) else result[1]
                 loss = loss / cfg.grad_accum_steps
             scaler.scale(loss).backward() if use_scaler else loss.backward()
@@ -198,7 +206,7 @@ def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str, ema_state:
         on_checkpoint(str(path))
 
 
-def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bool = False) -> tuple[HAGI, int, dict[str, Any] | None]:
+def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bool = False, use_ema: bool = False) -> tuple[HAGI, int, dict[str, Any] | None]:
     """Rebuild a HAGI model from a checkpoint.
 
     Args:
@@ -206,6 +214,7 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
         device: target device
         optimizer: optional optimizer to load state into
         load_ema: whether to return EMA state dict
+        use_ema: whether to load EMA weights into the model itself (inference)
 
     Returns:
         (model, step, ema_state | None)
@@ -228,10 +237,12 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
             state_dict.pop(key, None)
         model.load_state_dict(state_dict)
         model.to(device)
-        if load_ema and (p / "ema.pt").exists():
+        ema_state = None
+        if (use_ema or load_ema) and (p / "ema.pt").exists():
             ema_state = torch.load(p / "ema.pt", map_location=device, weights_only=True)
-        else:
-            ema_state = None
+            if use_ema:
+                model.load_state_dict(ema_state)
+                ema_state = None
         return model, int(meta.get("step", 0)), ema_state
 
     state = torch.load(path, map_location=device, weights_only=True)
@@ -271,7 +282,10 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
     if hasattr(model, "nars_msa") and model.nars_msa is not None and "nars_msa" in state:
         model.nars_msa.load_state_dict(state["nars_msa"])
 
-    ema_state = state.get("model_ema") if load_ema else None
+    ema_state = state.get("model_ema") if (use_ema or load_ema) else None
+    if use_ema and ema_state is not None:
+        model.load_state_dict(ema_state)
+        ema_state = None
     return model, int(state.get("step", 0)), ema_state
 
 

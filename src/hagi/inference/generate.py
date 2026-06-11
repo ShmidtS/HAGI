@@ -143,6 +143,30 @@ def _split_output(output: Any) -> tuple[Any, CacheKeyValues | None]:
     return (output[0] if isinstance(output, tuple) else output), None
 
 
+def _cache_is_empty(cache: Any) -> bool:
+    """True when there is no cache or it is a fresh (unwritten) static cache."""
+    if cache is None:
+        return True
+    layers = getattr(cache, "layers", cache)
+    if not layers:
+        return True
+    return getattr(layers[0], "seq_len", None) == 0
+
+
+def _maybe_static_cache(model: Any, generated: Any, max_new_tokens: int, cache: Any, use_cache: bool, use_static_cache: bool) -> Any:
+    """Preallocate a static KV cache (write-by-index, no per-step torch.cat)."""
+    if cache is not None or not use_static_cache or not use_cache or torch is None:
+        return cache
+    try:
+        from hagi.model.kv_cache import make_static_cache
+    except ImportError:
+        return cache
+    layers = make_static_cache(model, generated.size(0), generated.size(1) + max_new_tokens)
+    if layers is None:
+        return cache
+    return CacheKeyValues(layers)
+
+
 def _forward(model: Any, input_ids: Any, cache: CacheKeyValues | None, use_cache: bool) -> tuple[Any, CacheKeyValues | None]:
     if use_cache:
         try:
@@ -167,8 +191,13 @@ def generate(
     compile_model: bool = False,
     pin_memory: bool = False,
     training_mode: bool = False,
+    use_static_cache: bool = False,
 ) -> Any:
-    """Generate token ids with optional KV-cache acceleration."""
+    """Generate token ids with optional KV-cache acceleration.
+
+    use_static_cache=True preallocates per-block buffers written by index
+    (no per-step torch.cat); requires a HAGI-style model with .cfg.
+    """
     was_training = bool(getattr(model, "training", False))
     if not training_mode and hasattr(model, "eval"):
         model.eval()
@@ -192,7 +221,9 @@ def generate(
         if device is not None:
             generated = generated.to(device)
 
-        next_input = generated if cache is None else generated[:, -1:]
+        cache = _maybe_static_cache(model, generated, max_new_tokens, cache, use_cache, use_static_cache)
+        # An empty (fresh static) cache still needs the full prompt for prefill.
+        next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
         active_cache = cache
         generated_tokens: List[Any] = []
         for _ in range(max_new_tokens):
@@ -239,6 +270,7 @@ def stream_generate(
     use_cache: bool = True,
     compile_model: bool = False,
     pin_memory: bool = False,
+    use_static_cache: bool = False,
 ) -> Iterator[Any]:
     """Yield next token ids as they are generated."""
     if torch is None:
@@ -275,7 +307,9 @@ def stream_generate(
     device = _model_device(model)
     if device is not None:
         generated = generated.to(device)
-    next_input = generated if cache is None else generated[:, -1:]
+    cache = _maybe_static_cache(model, generated, max_new_tokens, cache, use_cache, use_static_cache)
+    # An empty (fresh static) cache still needs the full prompt for prefill.
+    next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
     active_cache = cache
     for _ in range(max_new_tokens):
         logits, active_cache = _forward(model, next_input, active_cache, use_cache)

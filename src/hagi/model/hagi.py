@@ -10,9 +10,7 @@ A single class covers all four ablation models via config flags:
 
 from __future__ import annotations
 
-import copy
-import random
-import sys
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,7 +18,7 @@ import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from ..losses import cross_entropy_loss
+from ..losses import cross_entropy_loss, fused_linear_cross_entropy
 from ..nars.adapters import NarsHdimReasoner, NarsHrmController, NarsMsaReasoner
 from .gdr import GradeConfig, GradeDecomposedRecurrence
 from .hdim_full import DelayedHDIM, HDIMFull
@@ -72,6 +70,7 @@ class HAGIConfig:
     moe_intermediate_size: int | None = None
     moe_alpha: float = 0.01
     ce_chunk_size: int = 0
+    use_fused_ce: bool = False
     compile: bool = False
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
@@ -121,6 +120,10 @@ class HAGI(nn.Module):
         self.gdr_aux_proj = None
         if cfg.use_gdr and self.gdr is not None:
             self.gdr_aux_proj = nn.Linear(cfg.hidden_size, cfg.hidden_size)
+        # NOTE: HRM is intentionally NOT wrapped in torch.compile here. Compiling
+        # a submodule inside __init__ prefixes its state_dict keys with
+        # `_orig_mod.` and breaks checkpoint compatibility. Use cfg.compile to
+        # compile the whole model in the training entry point instead.
         self.hrm = (
             HRMCore(
                 hidden_size=cfg.hidden_size,
@@ -132,9 +135,6 @@ class HAGI(nn.Module):
             if cfg.hrm
             else None
         )
-        if self.hrm is not None and sys.platform != "win32":
-            self.hrm = torch.compile(self.hrm, mode="reduce-overhead", fullgraph=False)
-
 
         self.msa = None
         self.msa_router = None
@@ -173,9 +173,33 @@ class HAGI(nn.Module):
         if cfg.use_quality_head:
             self.quality_head = nn.Linear(cfg.hidden_size, 1, bias=True)
 
+        # RoPE precomputed once up to max_seq_len (non-persistent buffers move
+        # with .to(device); dtype cast is memoized in _rope_cache). The dict
+        # cache below is only an overflow fallback for T > max_seq_len.
+        head_dim = tcfg.hidden_size // tcfg.num_query_heads
+        rope_cos, rope_sin = build_rope_cache(tcfg.max_seq_len, head_dim, tcfg.rope_theta, torch.device("cpu"), torch.float32)
+        self.register_buffer("rope_cos", rope_cos, persistent=False)
+        self.register_buffer("rope_sin", rope_sin, persistent=False)
         self._rope = {}
-        self._step = 0
+
+        # Persisted step counter: the rotor schedule stays deterministic across
+        # checkpoint save/resume. Old checkpoints without this key load fine
+        # (see _load_from_state_dict).
+        self.register_buffer("_step", torch.zeros((), dtype=torch.long))
+
         self.apply(self._init_weights)
+
+        # GPT-2 style depth-scaled init: residual-branch output projections are
+        # scaled by 1/sqrt(2*L) so the residual stream variance stays bounded
+        # with depth (and with recurrent reasoning loops).
+        total_layers = cfg.perception_layers + cfg.reasoning_layers + cfg.expression_layers
+        residual_scale = 1.0 / math.sqrt(2 * max(1, total_layers))
+        with torch.no_grad():
+            for name, p in self.named_parameters():
+                if name.endswith("o_proj.weight") or name.endswith("down.weight"):
+                    p.mul_(residual_scale)
+        # Re-assert weight tying (init must not silently untie).
+        self.lm_head.weight = self.embed.weight
 
     def _init_weights(self, module: nn.Module) -> None:
         std = 0.02
@@ -189,28 +213,31 @@ class HAGI(nn.Module):
             if hasattr(module, 'weight') and module.weight is not None:
                 torch.nn.init.ones_(module.weight)
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        # Tolerant loading for checkpoints created before _step became a buffer.
+        step_key = prefix + "_step"
+        if step_key not in state_dict:
+            state_dict[step_key] = self._step.detach().clone()
+        elif not isinstance(state_dict[step_key], torch.Tensor):
+            state_dict[step_key] = torch.tensor(int(state_dict[step_key]), dtype=torch.long)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
     def _rope_cache(self, T: int, device, dtype, offset: int = 0):
-        if hasattr(self, "_rope_cos") and hasattr(self, "_rope_sin"):
-            cos = self._rope_cos
-            sin = self._rope_sin
-            if cos.device != device or cos.dtype != dtype:
-                cos = cos.to(device=device, dtype=dtype)
-                sin = sin.to(device=device, dtype=dtype)
-                self._rope_cos = cos
-                self._rope_sin = sin
-            assert isinstance(cos, torch.Tensor)
-            assert isinstance(sin, torch.Tensor)
-            return cos[offset : offset + T], sin[offset : offset + T]
-        key = (T + offset, device, dtype)
+        total = T + offset
+        if total <= self.rope_cos.size(0):
+            if self.rope_cos.device != device or self.rope_cos.dtype != dtype:
+                self.rope_cos = self.rope_cos.to(device=device, dtype=dtype)
+                self.rope_sin = self.rope_sin.to(device=device, dtype=dtype)
+            return self.rope_cos[offset:total], self.rope_sin[offset:total]
+        # Fallback for sequences beyond max_seq_len (kept small and bounded).
+        key = (total, device, dtype)
         if key not in self._rope:
             head_dim = self.cfg.transformer.hidden_size // self.cfg.transformer.num_query_heads
-            self._rope[key] = build_rope_cache(T + offset, head_dim, self.cfg.transformer.rope_theta, device, dtype)
-            # Limit cache size to prevent unbounded growth
-            if len(self._rope) > 100:
-                oldest = next(iter(self._rope))
-                del self._rope[oldest]
+            self._rope[key] = build_rope_cache(total, head_dim, self.cfg.transformer.rope_theta, device, dtype)
+            if len(self._rope) > 8:
+                self._rope.pop(next(iter(self._rope)))
         cos, sin = self._rope[key]
-        return cos[offset : offset + T], sin[offset : offset + T]
+        return cos[offset:total], sin[offset:total]
 
     def forward(
         self,
@@ -226,6 +253,10 @@ class HAGI(nn.Module):
 
         nanoGPT-compatible. Targets are next-token labels aligned to input_ids
         (caller does the shift, or passes -100 for masked positions).
+
+        When cfg.use_fused_ce is set and targets are provided, the loss is
+        computed via the chunked fused lm_head+CE path and `logits` is None
+        (full [B, T, V] logits are never materialized).
         """
         B, T = input_ids.shape
         cache_pos = 0
@@ -241,7 +272,7 @@ class HAGI(nn.Module):
         pre_gdr_h = None
         use_gradient_checkpointing = self.cfg.gradient_checkpointing and self.training and not use_cache
         if self.training:
-            self._step += 1
+            self._step.add_(1)
         moe_aux_losses: list[torch.Tensor] = []
         collect_moe_aux = training_mode and (weights is None or weights.get("w_moe", 0.0) != 0.0)
         need_iso = training_mode and (weights is None or weights.get("w_iso", 0.0) != 0.0)
@@ -261,15 +292,21 @@ class HAGI(nn.Module):
                 return h_out
             return result
 
-        for block in self.perception:
-            past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
-            if use_cache:
-                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
-                assert next_key_values is not None
-                next_key_values.append(next_kv)
-            else:
-                h = run_block(block, h)  # type: ignore[assignment]
-            layer_idx += 1
+        def run_stage(blocks, hidden):
+            """Run a sequence of transformer blocks, threading the KV cache."""
+            nonlocal layer_idx
+            for block in blocks:
+                past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
+                if use_cache:
+                    hidden, next_kv = run_block(block, hidden, past)  # type: ignore[assignment]
+                    assert next_key_values is not None
+                    next_key_values.append(next_kv)
+                else:
+                    hidden = run_block(block, hidden)  # type: ignore[assignment]
+                layer_idx += 1
+            return hidden
+
+        h = run_stage(self.perception, h)
 
         # Precompute rotor index and gdr dispatch type once
         tgt_idx = None
@@ -277,7 +314,7 @@ class HAGI(nn.Module):
         if self.gdr is not None:
             if training_mode and hasattr(self.gdr, "rotors"):
                 num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
-                tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, self._step, num_rotors)
+                tgt_idx = _pick_rotor_idx(self.cfg.rotor_seed, int(self._step), num_rotors)
             if training_mode and isinstance(self.gdr, DelayedHDIM) and self.gdr.delay_steps > 1:
                 gdr_type = "delayed"
             elif training_mode and isinstance(self.gdr, HDIMFull):
@@ -314,61 +351,27 @@ class HAGI(nn.Module):
         else:
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
             for i in range(loops):
-                if self.gdr is not None:
-                    if gdr_type == "delayed":
-                        for j, block in enumerate(self.reasoning):
-                            current_step = i * len(self.reasoning) + j
-                            gdr_state = self.gdr(
-                                h,
-                                src_rotor_idx=0,
-                                tgt_rotor_idx=tgt_idx,
-                                return_state=True,
-                                delay_step=current_step,
-                            )
-                            pre_gdr_h = h if need_iso else None
-                            h = gdr_state["fused"]
-                            past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
-                            if use_cache:
-                                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
-                                assert next_key_values is not None
-                                next_key_values.append(next_kv)
-                            else:
-                                h = run_block(block, h)  # type: ignore[assignment]
-                            layer_idx += 1
-                    elif gdr_type == "hdim":
-                        gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
+                if self.gdr is not None and gdr_type == "delayed":
+                    for j, block in enumerate(self.reasoning):
+                        gdr_state = self.gdr(
+                            h,
+                            src_rotor_idx=0,
+                            tgt_rotor_idx=tgt_idx,
+                            return_state=True,
+                            delay_step=i * len(self.reasoning) + j,
+                        )
                         pre_gdr_h = h if need_iso else None
                         h = gdr_state["fused"]
-                        for block in self.reasoning:
-                            past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
-                            if use_cache:
-                                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
-                                assert next_key_values is not None
-                                next_key_values.append(next_kv)
-                            else:
-                                h = run_block(block, h)  # type: ignore[assignment]
-                            layer_idx += 1
-                    else:
-                        h = self.gdr(h)
-                        for block in self.reasoning:
-                            past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
-                            if use_cache:
-                                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
-                                assert next_key_values is not None
-                                next_key_values.append(next_kv)
-                            else:
-                                h = run_block(block, h)  # type: ignore[assignment]
-                            layer_idx += 1
+                        h = run_stage((block,), h)
                 else:
-                    for block in self.reasoning:
-                        past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
-                        if use_cache:
-                            h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
-                            assert next_key_values is not None
-                            next_key_values.append(next_kv)
+                    if self.gdr is not None:
+                        if gdr_type == "hdim":
+                            gdr_state = self.gdr(h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True)
+                            pre_gdr_h = h if need_iso else None
+                            h = gdr_state["fused"]
                         else:
-                            h = run_block(block, h)  # type: ignore[assignment]
-                        layer_idx += 1
+                            h = self.gdr(h)
+                    h = run_stage(self.reasoning, h)
                 if self.training and self.cfg.thinking_noise > 0.0:
                     h = h + torch.randn_like(h) * self.cfg.thinking_noise
                 h = h + self.iter_embed[i]
@@ -421,29 +424,32 @@ class HAGI(nn.Module):
             msa_out = self.msa(h, msa_slot_ids, self.msa_registry, nars_weights=nars_weights)
             h = h + msa_out
 
-        for block in self.expression:
-            past = past_key_values[layer_idx] if past_key_values is not None and layer_idx < len(past_key_values) else None
-            if use_cache:
-                h, next_kv = run_block(block, h, past)  # type: ignore[assignment]
-                assert next_key_values is not None
-                next_key_values.append(next_kv)
-            else:
-                h = run_block(block, h)  # type: ignore[assignment]
-            layer_idx += 1
+        h = run_stage(self.expression, h)
 
         pre_logits_hidden = h if need_quality and self.quality_head is not None else None
         h = self.final_norm(h)
-        logits = self.lm_head(h)
 
-        if targets is not None:
-            loss = cross_entropy_loss(
-                logits.reshape(-1, logits.size(-1)),
-                targets.reshape(-1),
+        logits = None
+        loss = None
+        if targets is not None and self.cfg.use_fused_ce and not use_cache:
+            # Memory-efficient opt-in path: lm_head + CE per chunk, the full
+            # [B, T, V] logits tensor is never materialized.
+            loss = fused_linear_cross_entropy(
+                h,
+                self.lm_head.weight,
+                targets,
                 ignore_index=ignore_index,
-                chunk_size=self.cfg.ce_chunk_size,
+                chunk_size=self.cfg.ce_chunk_size if self.cfg.ce_chunk_size > 0 else 4096,
             )
         else:
-            loss = None
+            logits = self.lm_head(h)
+            if targets is not None:
+                loss = cross_entropy_loss(
+                    logits.reshape(-1, logits.size(-1)),
+                    targets.reshape(-1),
+                    ignore_index=ignore_index,
+                    chunk_size=self.cfg.ce_chunk_size,
+                )
 
         if self.gdr_aux_proj is not None and gdr_state is not None and isinstance(gdr_state, dict):
             if "fused" in gdr_state:
@@ -460,8 +466,8 @@ class HAGI(nn.Module):
                 if "fused" in gdr_state or "features" in gdr_state:
                     # inject batch-index labels for contrastive auxiliary loss
                     if "labels" not in gdr_state:
-                        b, t, _ = logits.shape
-                        gdr_state["labels"] = torch.arange(b, device=logits.device).unsqueeze(1).expand(b, t).reshape(-1)
+                        b, t, _ = h.shape
+                        gdr_state["labels"] = torch.arange(b, device=h.device).unsqueeze(1).expand(b, t).reshape(-1)
                     if any(k in gdr_state for k in ("features", "embeddings", "output")):
                         result["auxiliary_output"] = gdr_state
                     else:
@@ -487,7 +493,7 @@ class HAGI(nn.Module):
         return logits
 
     def clear_rope_cache(self) -> None:
-        """Clear the RoPE cache to prevent memory growth during generation."""
+        """Clear the overflow RoPE cache (the precomputed buffers stay)."""
         self._rope.clear()
 
     def num_parameters(self, unique: bool = True) -> int:

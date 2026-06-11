@@ -128,7 +128,7 @@ training:
   min_lr_ratio: 0.1
   muon_lr: 0.003
   muon_momentum: 0.95
-  muon_ns_steps: 10
+  muon_ns_steps: 20
   optimizer: muon_adamw
   pin_memory: true
   precision: manual_bf16
