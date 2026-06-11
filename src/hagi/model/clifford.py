@@ -159,7 +159,7 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 def grade_projection(mv: torch.Tensor, grade: int) -> torch.Tensor:
     """Zero out all blades not of the given grade. Returns [..., 8]."""
     mask = _get_grade_mask(mv.device, mv.dtype, grade)
-    return mv * mask
+    return torch.where(mask != 0, mv, torch.zeros_like(mv))
 
 
 def reverse(mv: torch.Tensor) -> torch.Tensor:

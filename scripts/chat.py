@@ -186,8 +186,6 @@ def vram_usage() -> str:
 def load_production_model(checkpoint: Path, compile_model: bool, use_msa: bool = True, use_nars: bool = True) -> tuple[torch.nn.Module, int]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, step, _ = load_checkpoint(str(checkpoint), device=device)
-    if device == "cuda":
-        model = model.half()
     model.eval()
     # Enable MSA and NARS for inference if configured
     if hasattr(model.cfg, "use_msa"):
