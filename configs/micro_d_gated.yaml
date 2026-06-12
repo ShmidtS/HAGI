@@ -1,0 +1,58 @@
+# Micro ablation D_gated - ReZero-gated GDR, ~38M, for LOCAL diagnosis.
+# THE FAIR TEST: every grade update is h + alpha*f(h) with alpha init 0, so this
+# model is functionally IDENTICAL to micro_b at step 0 and must EARN the grade
+# dynamics through the gates. Fixes the three legacy faults (half-open sigmoid
+# gates, wholesale bivector/trivector replacement, far-from-identity init).
+# Read: gates stay ~0 & loss==B -> machinery useless (bet truly dead).
+#       gates open & loss < B  -> prior negative was an optimization artifact.
+# Effective batch = 4 * 8 * 512 = 16,384 tokens/step -> 25M tokens = ~1,526 steps.
+name: micro_d_gated
+model:
+  vocab_size: 49152
+  hidden_size: 384
+  perception_layers: 4
+  reasoning_layers: 4
+  expression_layers: 4
+  loop_count: 3
+  use_loop: true
+  use_gdr: true
+  ce_chunk_size: 1024
+  gradient_checkpointing: false
+  transformer:
+    num_query_heads: 6
+    num_kv_heads: 2
+    intermediate_size: 1024
+    rope_theta: 10000.0
+    max_seq_len: 2048
+  grades:
+    scalar: 32
+    vector: 96
+    bivector: 96
+    trivector: 32
+    residual: 128
+    scalar_momentum: 0.9   # ignored in gated mode (gates subsume update rates)
+    vector_momentum: 0.5
+    gated: true
+
+training:
+  optimizer: adamw
+  precision: bf16
+  compile: true
+  batch_size: 4
+  grad_accum_steps: 8          # effective batch = 4 * 8 * 512 = 16,384 tokens/step
+  learning_rate: 3.0e-4
+  warmup_steps: 150
+  weight_decay: 0.1
+  grad_clip: 1.0
+  ckpt_interval: 500
+  log_interval: 50
+  seed: 42
+
+data:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"
+  train_tokens: 25_000_000
+  max_seq_len: 512
+
+eval:
+  every_n_steps: 0
+  benchmarks: []
