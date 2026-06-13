@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
 try:
-    import torch
-    from torch.utils.data import DataLoader, Sampler
+    from torch.utils.data import DataLoader, Dataset as _TorchDataset, Sampler as _TorchSampler
+    Dataset = cast(Any, _TorchDataset)
+    Sampler = cast(Any, _TorchSampler)
 except ImportError:
-    torch = None  # type: ignore[assignment]
     DataLoader = None  # type: ignore[assignment]
-    Sampler = None  # type: ignore[assignment, misc]
+
+    class Dataset:  # type: ignore[no-redef]
+        pass
+
+    class Sampler:  # type: ignore[no-redef]
+        pass
 
 
 def _shift_collate(batch: list[Any]) -> tuple[Any, Any]:
@@ -45,7 +50,7 @@ class ChunkedRandomSampler(Sampler):
         return len(self.data_source)
 
 
-class RandomSubsetDataset:
+class RandomSubsetDataset(Dataset):  # type: ignore[type-arg, misc]
     """Wraps a dataset and yields a random subset of a fixed size."""
 
     def __init__(self, base_dataset: Any, subset_size: int, seed: int = 0) -> None:
@@ -114,10 +119,22 @@ class SequentialCyclingIterator:
         self.current_idx = 0
         self.current_cycle = 0
         self._current_iter: Any = None
+        # Preload all datasets once so cycle switches are instant
+        self._datasets: dict[str, Any] = {}
+        from hagi.data.dataloader import MemmapDataset
+        for entry in entries:
+            path = entry["path"]
+            name = entry.get("name", path)
+            self._datasets[name] = MemmapDataset(
+                path, seq_len=self.seq_len, dtype=self.dtype, preload=False
+            )
 
     def _make_loader(self, path: str | Path, seed: int = 0) -> Any:
-        from hagi.data.dataloader import MemmapDataset
-        base = MemmapDataset(path, seq_len=self.seq_len, dtype=self.dtype, preload=True)
+        name = self.entries[self.current_idx].get("name", path)
+        base = self._datasets.get(name)
+        if base is None:
+            from hagi.data.dataloader import MemmapDataset
+            base = MemmapDataset(path, seq_len=self.seq_len, dtype=self.dtype, preload=True)
         if self.steps_per_cycle is not None and self.steps_per_cycle > 0:
             subset_size = self.steps_per_cycle * self.batch_size
             dataset = RandomSubsetDataset(base, subset_size, seed=seed)
@@ -138,7 +155,7 @@ class SequentialCyclingIterator:
         if self.num_workers > 0:
             kwargs["prefetch_factor"] = 4
             kwargs["persistent_workers"] = True
-        return DataLoader(dataset, **kwargs)
+        return DataLoader(dataset, **kwargs)  # type: ignore[operator]
 
     def __iter__(self):
         return self
