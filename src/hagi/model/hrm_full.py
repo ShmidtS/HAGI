@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from .transformer import RMSNorm, TransformerBlock
 
@@ -162,7 +163,10 @@ class HRMCore(nn.Module):
                 bias = self.z_l_to_hidden(z_L).unsqueeze(1) + self.z_h_to_hidden(z_H).unsqueeze(1)
                 for block in reasoning_blocks:
                     h_in = h + bias
-                    result = block(h_in, cos, sin, gradient_checkpointing=gradient_checkpointing, attn_mask=attn_mask)
+                    if gradient_checkpointing:
+                        result = checkpoint(block, h_in, cos, sin, attn_mask=attn_mask, use_reentrant=False)
+                    else:
+                        result = block(h_in, cos, sin, attn_mask=attn_mask)
                     if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], torch.Tensor) and result[1].ndim == 0:
                         h = result[0]
                         if moe_aux_losses is not None:
