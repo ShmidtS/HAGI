@@ -43,7 +43,7 @@ class MoESwiGLU(nn.Module):
         nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
         self.experts = nn.ModuleList(_SwiGLUExpert(cfg) for _ in range(cfg.num_experts))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         B, T, D = x.shape
         assert D == self.hidden_size
 
@@ -57,23 +57,36 @@ class MoESwiGLU(nn.Module):
         router_probs = F.softmax(router_logits, dim=-1)
 
         top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
-        top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
+        if self.top_k > 1:
+            top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
 
         # Sparse dispatch: only compute tokens that actually route to each expert
         output = torch.zeros_like(flat)
         for k_idx in range(self.top_k):
             expert_idx = top_k_indices[:, k_idx]  # [B*T]
             probs = top_k_probs[:, k_idx]  # [B*T]
-            for e_idx, expert in enumerate(self.experts):
-                mask = expert_idx == e_idx
-                indices = torch.where(mask)[0]
-                if indices.numel() == 0:
-                    continue
-                tokens = flat.index_select(0, indices)
-                expert_out = expert(tokens)
-                if self.top_k == 1:
-                    output.index_copy_(0, indices, expert_out.to(output.dtype))
-                else:
+            if self.top_k == 1:
+                # Fast path: sort by expert index for contiguous dispatch and fewer
+                # kernel launches (one sort instead of num_experts where+index_select).
+                sorted_experts, sort_order = torch.sort(expert_idx)
+                sorted_tokens = flat[sort_order]
+                unique_experts, counts = torch.unique_consecutive(sorted_experts, return_counts=True)
+                offset = 0
+                for e_idx, count in zip(unique_experts.tolist(), counts.tolist()):
+                    expert = self.experts[e_idx]
+                    slice_tokens = sorted_tokens[offset:offset + count]
+                    expert_out = expert(slice_tokens)
+                    out_indices = sort_order[offset:offset + count]
+                    output.index_copy_(0, out_indices, expert_out.to(output.dtype))
+                    offset += count
+            else:
+                for e_idx, expert in enumerate(self.experts):
+                    mask = expert_idx == e_idx
+                    indices = torch.where(mask)[0]
+                    if indices.numel() == 0:
+                        continue
+                    tokens = flat.index_select(0, indices)
+                    expert_out = expert(tokens)
                     idx = indices.unsqueeze(-1).expand(-1, expert_out.size(-1))
                     output.scatter_add_(0, idx, expert_out.to(output.dtype) * probs.index_select(0, indices).unsqueeze(-1))
 
@@ -85,10 +98,12 @@ class MoESwiGLU(nn.Module):
             top_k_mask.scatter_(1, top_k_indices, 1.0)
             fraction_per_expert = top_k_mask.mean(dim=0)
             aux_loss = self.alpha * self.num_experts * (fraction_per_expert * router_prob_per_expert).sum()
-            # aux_loss = aux_loss.clamp_max(10.0)  # removed: aux_loss << 10 for typical alpha
             return output, aux_loss
 
         return output
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self._forward_impl(x)
 
     def forward_repacked(self, x: torch.Tensor) -> torch.Tensor:
         result = self.forward(x)

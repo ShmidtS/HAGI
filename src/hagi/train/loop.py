@@ -93,8 +93,7 @@ def train(
     # the `_orig_mod.` prefix.
     run_model = model
     if getattr(getattr(model, "cfg", None), "compile", False) and device.startswith("cuda"):
-        import sys as _sys
-        if _sys.platform != "win32" and hasattr(torch, "compile"):
+        if hasattr(torch, "compile"):
             run_model = torch.compile(model)
     use_scaler = cfg.precision == "fp16" and device.startswith("cuda")
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)

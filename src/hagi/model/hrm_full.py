@@ -159,7 +159,7 @@ class HRMCore(nn.Module):
         pre_gdr_h = None
         for h_cycle in range(self.h_cycles):
             for l_cycle in range(self.l_cycles):
-                bias = self.z_l_to_hidden(z_L).unsqueeze(1).expand(B, T, H) + self.z_h_to_hidden(z_H).unsqueeze(1).expand(B, T, H)
+                bias = self.z_l_to_hidden(z_L).unsqueeze(1) + self.z_h_to_hidden(z_H).unsqueeze(1)
                 for block in reasoning_blocks:
                     h_in = h + bias
                     result = block(h_in, cos, sin, gradient_checkpointing=gradient_checkpointing, attn_mask=attn_mask)
