@@ -314,6 +314,65 @@ def autocast_ctx(precision: str, device: str):
     return torch.autocast(device_type="cuda", dtype=dtype)
 
 
+def maybe_disable_gradient_checkpointing(
+    model: HAGI,
+    device: str,
+    batch_size: int = 4,
+    seq_len: int = 1024,
+    target_batch: int = 8,
+    safety: float = 1.0,
+    headroom: float = 0.85,
+) -> None:
+    """Disable gradient checkpointing if a dry-run shows enough memory headroom.
+
+    Creates a fresh model from the same config, runs a single forward+backward
+    with a half-size batch, extrapolates to the target training batch size,
+    and disables checkpointing only when the estimated peak stays below
+    ``headroom * total_memory``.
+    """
+    if not device.startswith("cuda") or not torch.cuda.is_available():
+        return
+    if not getattr(model.cfg, "gradient_checkpointing", False):
+        return
+    test_model = HAGI(model.cfg).to(device)
+    param_dtype = next(model.parameters()).dtype
+    if param_dtype != torch.float32:
+        test_model = test_model.to(param_dtype)
+    test_model.cfg.gradient_checkpointing = False
+    test_model.train()
+    try:
+        vocab_size = getattr(model.cfg, "vocab_size", 49152)
+        x = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        y = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            output = test_model(x, targets=y, training_mode=True)
+            loss = output["loss"] if isinstance(output, dict) else output[1]
+            loss.backward()
+            torch.cuda.synchronize()
+            peak = torch.cuda.max_memory_allocated()
+            total = torch.cuda.get_device_properties(device).total_memory
+        scale = target_batch / batch_size * safety
+        est_peak = peak * scale
+        if est_peak > total * headroom:
+            print(
+                f"Kept gradient checkpointing (est. peak {est_peak / 1024**3:.1f}GB > "
+                f"{headroom * 100:.0f}% of {total / 1024**3:.1f}GB)"
+            )
+        else:
+            model.cfg.gradient_checkpointing = False
+            print(
+                f"Disabled gradient checkpointing (est. peak {est_peak / 1024**3:.1f}GB <= "
+                f"{headroom * 100:.0f}% of {total / 1024**3:.1f}GB)"
+            )
+    except Exception:
+        pass
+    finally:
+        del test_model
+        torch.cuda.empty_cache()
+
+
 def gpu_util(device: str) -> str:
     if not device.startswith("cuda") or not torch.cuda.is_available():
         return "n/a"
@@ -351,10 +410,8 @@ def to_device(batch: Any, device: str, non_blocking: bool) -> Any:
 def apply_prefix_mask(targets: torch.Tensor, batch: Any) -> torch.Tensor:
     if not isinstance(batch, PrefixLMBatch):
         return targets
-    masked = targets.clone()
-    positions = torch.arange(masked.size(1), device=masked.device).unsqueeze(0)
-    masked[positions < batch.partition.unsqueeze(1)] = -100
-    return masked
+    positions = torch.arange(targets.size(1), device=targets.device).unsqueeze(0)
+    return targets.masked_fill(positions < batch.partition.unsqueeze(1), -100)
 
 
 def prefix_lm_collate(
@@ -866,6 +923,7 @@ def run_dry_profile(
 def run_basic(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     model_cfg = config_from_dict(cfg.get("model", {}))
     model = HAGI(model_cfg).to(args.device)
+    maybe_disable_gradient_checkpointing(model, args.device)
     print_model_size(model)
     print_vram_usage()
 
@@ -961,6 +1019,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     if precision == "manual_bf16" and args.device.startswith("cuda"):
         model = model.to(torch.bfloat16)
         print("Using manual BF16: model converted to bfloat16, no autocast")
+    maybe_disable_gradient_checkpointing(model, args.device)
 
     for group in optimizer.param_groups:
         group["initial_lr"] = group["lr"]
@@ -1064,13 +1123,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         model.cfg.gradient_checkpointing = bool(
             train_cfg.get("gradient_checkpointing", model.cfg.gradient_checkpointing)
         )
-    if args.resume is not None and args.resume.exists():
-        model_ema = copy.deepcopy(model).to(args.device)
-    else:
-        model_ema = copy.deepcopy(model).to(args.device)
-    model_ema.eval()
-    for param in model_ema.parameters():
-        param.requires_grad_(False)
+    model_ema: torch.nn.Module | None = None
     train_model = maybe_compile(model, args.device)
     train_model.train()
 
@@ -1173,12 +1226,15 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
     if precision == "manual_fp16" and args.device.startswith("cuda"):
         model = model.half()
-        model_ema = model_ema.half()
+        if model_ema is not None:
+            model_ema = model_ema.half()
         print("Using manual FP16: model converted to float16, no autocast")
     if precision == "manual_bf16" and args.device.startswith("cuda"):
         model = model.to(torch.bfloat16)
-        model_ema = model_ema.to(torch.bfloat16)
+        if model_ema is not None:
+            model_ema = model_ema.to(torch.bfloat16)
         print("Using manual BF16: model converted to bfloat16, no autocast")
+    maybe_disable_gradient_checkpointing(model, args.device)
 
     print_model_summary(
         model, model_cfg, args.device, use_prefix_lm, composite_weights is not None
@@ -1203,6 +1259,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     print(f"optimizer state mismatch, starting fresh: {exc}")
             ema_path = args.resume / "ema.pt"
             if ema_path.exists():
+                if model_ema is None:
+                    model_ema = copy.deepcopy(model).to(args.device)
+                    model_ema.eval()
+                    for param in model_ema.parameters():
+                        param.requires_grad_(False)
                 try:
                     ema_state = torch.load(
                         ema_path, map_location=args.device, weights_only=True
@@ -1223,6 +1284,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 except Exception as exc:
                     print(f"optimizer state mismatch, starting fresh: {exc}")
             if "model_ema" in state:
+                if model_ema is None:
+                    model_ema = copy.deepcopy(model).to(args.device)
+                    model_ema.eval()
+                    for param in model_ema.parameters():
+                        param.requires_grad_(False)
                 try:
                     ema_state = state["model_ema"]
                     # Strip orphaned fused-projection keys emitted by old state_dict
@@ -1418,6 +1484,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         t_clip = t_clip_end - t_unscale_end
         t_magic = t_magic_end - t_clip_end
         if step >= ema_start_step:
+            if model_ema is None:
+                model_ema = copy.deepcopy(model).to(args.device)
+                model_ema.eval()
+                for param in model_ema.parameters():
+                    param.requires_grad_(False)
             update_ema(model, model_ema, ema_decay)
 
         last_loss = float("nan")
@@ -1444,7 +1515,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             weight_text = ""
             if effective_weights is not None:
                 weight_text = f" | w_aux {effective_weights['w_aux']:.4f} | w_iso {effective_weights['w_iso']:.4f}"
-            eval_model_tag = "ema" if step >= ema_start_step else "model"
+            eval_model_tag = "ema" if (step >= ema_start_step and model_ema is not None) else "model"
             mem_text = ""
             if args.device.startswith("cuda"):
                 allocated = torch.cuda.memory_allocated(args.device) / (1024**3)
@@ -1466,7 +1537,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             and step > 0
             and step % eval_interval == 0
         ):
-            eval_model = model_ema if step >= ema_start_step else model
+            eval_model = model_ema if (step >= ema_start_step and model_ema is not None) else model
             metrics = run_eval(
                 eval_model,
                 eval_loader,
