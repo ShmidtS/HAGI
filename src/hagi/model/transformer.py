@@ -324,6 +324,8 @@ class TransformerBlock(nn.Module):
             self.mlp = MoESwiGLU(cfg)
         else:
             self.mlp = SwiGLU(cfg)
+        self._use_repacked = hasattr(self.attn, "qkv_weight")
+        self._mlp_repacked = hasattr(self.mlp, "gate_up_weight")
 
     def _apply_folded_norm(self, x: torch.Tensor, which: str) -> torch.Tensor:
         """Inline rsqrt-only normalization when the gamma weight has been folded."""
@@ -345,7 +347,7 @@ class TransformerBlock(nn.Module):
         attn_mask=None,
     ):
         use_checkpoint = gradient_checkpointing and self.training and not use_cache
-        use_repacked = hasattr(self.attn, "qkv_weight")
+        use_repacked = getattr(self, "_use_repacked", False)
         if use_checkpoint:
             h = self._apply_folded_norm(x, "attn")
             attn_out = checkpoint(
@@ -373,7 +375,7 @@ class TransformerBlock(nn.Module):
             mlp_out = checkpoint(lambda h: self.mlp(h), h, use_reentrant=False)
         else:
             h = self._apply_folded_norm(x, "mlp")
-            if use_repacked and hasattr(self.mlp, "gate_up_weight"):
+            if use_repacked and getattr(self, "_mlp_repacked", False):
                 mlp_out = self.mlp.forward_repacked(h)
             else:
                 mlp_out = self.mlp(h)
