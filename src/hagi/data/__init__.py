@@ -3,6 +3,7 @@ from hagi.data.dataloader import MemmapDataset
 from hagi.data.mix import WeightedMemmapDataset, get_mixed_memmap_dataloader
 from hagi.data.packing import best_fit_decreasing_pack
 from hagi.data.prefix_lm import PrefixLMBatch, create_prefix_lm_batch, prefix_lm_mask
+from hagi.data.sequential import SequentialCyclingIterator
 from hagi.data.sft_dataset import SFTDataset, get_sft_dataloader
 from hagi.data.tokenizer import TokenizerWrapper
 
@@ -10,6 +11,7 @@ __all__ = [
     "MemmapDataset",
     "PrefixLMBatch",
     "SFTDataset",
+    "SequentialCyclingIterator",
     "TokenizerWrapper",
     "WeightedMemmapDataset",
     "best_fit_decreasing_pack",

@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, Subset
 from hagi.data import (
     MemmapDataset,
     PrefixLMBatch,
+    SequentialCyclingIterator,
     create_prefix_lm_batch,
     get_memmap_dataloader,
     get_mixed_memmap_dataloader,
@@ -386,6 +387,23 @@ def resolve_mix_paths(
     return resolved
 
 
+def _resolve_sequential_entries(
+    data_cfg: dict[str, Any], data_dir: Path
+) -> list[dict[str, Any]]:
+    """Resolve mix_paths entries with names for sequential cycling."""
+    entries: list[dict[str, Any]] = []
+    for entry in data_cfg.get("mix_paths", []):
+        path = Path(entry["path"])
+        if not path.is_absolute() and not path.exists():
+            path = data_dir / path
+        entries.append({
+            "path": str(path),
+            "name": entry.get("name", "unknown"),
+            "weight": float(entry.get("weight", 1.0)),
+        })
+    return entries
+
+
 def resolve_eval_path(data_cfg: dict[str, Any], data_dir: Path) -> Path | None:
     configured = data_cfg.get("eval_path")
     if not configured:
@@ -406,6 +424,8 @@ def build_full_dataloader(
     device: str,
     eval_samples: int = 0,
     dataset_mode: str = "memmap",
+    sequential_cycles: int = 0,
+    steps_per_cycle: int | None = None,
 ) -> tuple[Any, Any | None, int, int, bool]:
     train_cfg = cfg.get("training", {})
     data_cfg = cfg.get("data", {})
@@ -457,16 +477,29 @@ def build_full_dataloader(
     if mix_paths:
         if use_prefix_lm:
             raise ValueError("mix_paths does not support prefix_lm")
-        train_loader = get_mixed_memmap_dataloader(
-            mix_paths,
-            batch_size=batch_size,
-            seq_len=seq_len,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            dtype=dtype,
-            seed=int(train_cfg.get("seed", 0)),
-            preload=True,
-        )
+        if sequential_cycles > 0:
+            entries = _resolve_sequential_entries(data_cfg, data_dir)
+            train_loader = SequentialCyclingIterator(
+                entries,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                dtype=dtype,
+                cycles_per_dataset=sequential_cycles,
+                steps_per_cycle=steps_per_cycle,
+            )
+        else:
+            train_loader = get_mixed_memmap_dataloader(
+                mix_paths,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                dtype=dtype,
+                seed=int(train_cfg.get("seed", 0)),
+                preload=True,
+            )
         eval_path = resolve_eval_path(data_cfg, data_dir)
         eval_loader = (
             _make_loader(
@@ -1091,6 +1124,30 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     )
     eval_interval = int(train_cfg.get("eval_interval", 0))
     eval_samples = int(train_cfg.get("eval_samples", 500))
+    sequential_cycles = int(
+        args.dataset_cycles
+        if args.dataset_cycles is not None
+        else data_cfg.get("sequential_cycles", 0)
+    )
+    # Compute max_steps early so we can derive steps_per_cycle for sequential mode
+    _seq_len = int(data_cfg.get("max_seq_len", 512))
+    _batch_size = int(train_cfg.get("batch_size", 2))
+    grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
+    if grad_accum_steps <= 0:
+        raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
+    max_steps = (
+        int(args.max_steps)
+        if args.max_steps is not None
+        else _resolve_max_steps(train_cfg, data_cfg, _batch_size, _seq_len)
+    )
+    steps_per_cycle: int | None = None
+    if sequential_cycles > 0:
+        num_datasets = len(data_cfg.get("mix_paths", []))
+        if num_datasets > 0:
+            total_batches = max_steps * grad_accum_steps
+            steps_per_cycle = total_batches // (num_datasets * sequential_cycles)
+            if steps_per_cycle == 0:
+                steps_per_cycle = 1
     dataloader, eval_loader, batch_size, seq_len, pin_memory = build_full_dataloader(
         cfg,
         train_path,
@@ -1099,17 +1156,10 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         args.device,
         eval_samples=eval_samples,
         dataset_mode=dataset_mode,
+        sequential_cycles=sequential_cycles,
+        steps_per_cycle=steps_per_cycle,
     )
     data_iter = iter(dataloader)
-
-    max_steps = (
-        int(args.max_steps)
-        if args.max_steps is not None
-        else _resolve_max_steps(train_cfg, data_cfg, batch_size, seq_len)
-    )
-    grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
-    if grad_accum_steps <= 0:
-        raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
     warmup_steps = int(train_cfg.get("warmup_steps", 500))
     learning_rate = float(
         train_cfg.get("learning_rate", train_cfg.get("adamw_lr", 5.0e-4))
@@ -1471,6 +1521,12 @@ def main() -> None:
         choices=["memmap", "memmap_packed", "sft"],
         default=None,
         help="dataset loading mode (overrides config)",
+    )
+    parser.add_argument(
+        "--dataset-cycles",
+        type=int,
+        default=None,
+        help="cycles per dataset in sequential mode (overrides config)",
     )
     parser.add_argument(
         "--mode",

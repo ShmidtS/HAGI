@@ -41,6 +41,7 @@ data:
     weight: 0.02
   num_workers: 0
   packing: bfd
+  sequential_cycles: 3
   pin_memory: true
   tokenizer: HuggingFaceTB/SmolLM2-135M
   train_tokens: 3000000000
