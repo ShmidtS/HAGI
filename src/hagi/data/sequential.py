@@ -119,22 +119,10 @@ class SequentialCyclingIterator:
         self.current_idx = 0
         self.current_cycle = 0
         self._current_iter: Any = None
-        # Preload all datasets once so cycle switches are instant
-        self._datasets: dict[str, Any] = {}
-        from hagi.data.dataloader import MemmapDataset
-        for entry in entries:
-            path = entry["path"]
-            name = entry.get("name", path)
-            self._datasets[name] = MemmapDataset(
-                path, seq_len=self.seq_len, dtype=self.dtype, preload=False
-            )
 
     def _make_loader(self, path: str | Path, seed: int = 0) -> Any:
-        name = self.entries[self.current_idx].get("name", path)
-        base = self._datasets.get(name)
-        if base is None:
-            from hagi.data.dataloader import MemmapDataset
-            base = MemmapDataset(path, seq_len=self.seq_len, dtype=self.dtype, preload=True)
+        from hagi.data.dataloader import MemmapDataset
+        base = MemmapDataset(path, seq_len=self.seq_len, dtype=self.dtype, preload=True)
         if self.steps_per_cycle is not None and self.steps_per_cycle > 0:
             subset_size = self.steps_per_cycle * self.batch_size
             dataset = RandomSubsetDataset(base, subset_size, seed=seed)

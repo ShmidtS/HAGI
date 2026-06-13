@@ -38,7 +38,7 @@ class MemmapDataset(Dataset):  # type: ignore[type-arg, misc]
             raise ValueError("seq_len must be positive")
         # Pre-load memmap into RAM for faster access
         if preload:
-            self._preload = np.asarray(self.data, dtype=np.int64)
+            self._preload = np.asarray(self.data)
 
     @property
     def block_size(self) -> int:
@@ -61,7 +61,7 @@ class MemmapDataset(Dataset):  # type: ignore[type-arg, misc]
         if index < 0 or index >= len(self):
             raise IndexError(index)
         if self._preload is not None:
-            return self._preload[index : index + self.seq_len + 1]
+            return np.asarray(self._preload[index : index + self.seq_len + 1], dtype=np.int64)
         return np.asarray(self.data[index : index + self.seq_len + 1], dtype=np.int64)
 
     def __getstate__(self) -> dict[str, Any]:
