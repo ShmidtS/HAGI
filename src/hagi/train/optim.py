@@ -14,7 +14,7 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e
     """Approximate orthogonalization of a 2D matrix via quintic Newton-Schulz."""
     assert G.ndim == 2, "Muon orthogonalization expects a 2D matrix"
     a, b, c = (3.4445, -4.7750, 2.0315)
-    x = G.bfloat16()
+    x = G if G.dtype == torch.bfloat16 else G.bfloat16()
     transposed = G.size(0) > G.size(1)
     if transposed:
         x = x.T
@@ -25,7 +25,7 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e
         x = a * x + B @ x
     if transposed:
         x = x.T
-    return x.to(G.dtype)
+    return x if x.dtype == G.dtype else x.to(G.dtype)
 
 
 @torch.no_grad()
@@ -38,7 +38,7 @@ def zeropower_via_newtonschulz5_batched(G: torch.Tensor, steps: int = 5, eps: fl
     """
     assert G.ndim == 3, "batched Muon orthogonalization expects [B, M, N]"
     a, b, c = (3.4445, -4.7750, 2.0315)
-    x = G.bfloat16()
+    x = G if G.dtype == torch.bfloat16 else G.bfloat16()
     transposed = G.size(1) > G.size(2)
     if transposed:
         x = x.transpose(1, 2)
