@@ -119,10 +119,18 @@ class SequentialCyclingIterator:
         self.current_idx = 0
         self.current_cycle = 0
         self._current_iter: Any = None
+        self._dataset_cache: dict[str, Any] = {}
+        self._loader_cache: dict[tuple[int, int], Any] = {}
 
     def _make_loader(self, path: str | Path, seed: int = 0) -> Any:
         from hagi.data.dataloader import MemmapDataset
-        base = MemmapDataset(path, seq_len=self.seq_len, dtype=self.dtype, preload=True)
+        path_key = str(path)
+        if path_key not in self._dataset_cache:
+            self._dataset_cache[path_key] = MemmapDataset(path, seq_len=self.seq_len, dtype=self.dtype, preload=True)
+        base = self._dataset_cache[path_key]
+        cache_key = (self.current_idx, self.current_cycle)
+        if cache_key in self._loader_cache:
+            return self._loader_cache[cache_key]
         if self.steps_per_cycle is not None and self.steps_per_cycle > 0:
             subset_size = self.steps_per_cycle * self.batch_size
             dataset = RandomSubsetDataset(base, subset_size, seed=seed)
@@ -143,7 +151,9 @@ class SequentialCyclingIterator:
         if self.num_workers > 0:
             kwargs["prefetch_factor"] = 4
             kwargs["persistent_workers"] = True
-        return DataLoader(dataset, **kwargs)  # type: ignore[operator]
+        loader = DataLoader(dataset, **kwargs)  # type: ignore[operator]
+        self._loader_cache[cache_key] = loader
+        return loader
 
     def __iter__(self):
         return self

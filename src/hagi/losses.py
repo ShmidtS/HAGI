@@ -264,7 +264,7 @@ def compute_isomorphic_loss(
 
 
 def composite_loss(
-    logits: torch.Tensor,
+    logits: torch.Tensor | None,
     targets: torch.Tensor,
     auxiliary_output=None,
     model_output: torch.Tensor | dict[str, Any] | None = None,
@@ -277,9 +277,13 @@ def composite_loss(
     chunk_size: int = 0,
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
+    # Pick a reference tensor for device/dtype when logits is None (fused CE path)
+    ref_tensor = logits if logits is not None else (precomputed_loss if precomputed_loss is not None else targets)
+
     if (
         isinstance(auxiliary_output, torch.Tensor)
         and isinstance(model_output, torch.Tensor)
+        and logits is not None
         and auxiliary_output.shape == logits.shape
         and model_output.shape != logits.shape
     ):
@@ -306,6 +310,8 @@ def composite_loss(
     if precomputed_loss is not None:
         l_ce = precomputed_loss
     else:
+        if logits is None:
+            raise ValueError("logits is None and precomputed_loss is not provided")
         l_ce = cross_entropy_loss(logits, targets, chunk_size=chunk_size)
     l_total = merged_weights["w_ce"] * l_ce
     result = {"L_CE": l_ce}
@@ -314,19 +320,19 @@ def composite_loss(
         aux_payload = auxiliary_output
         if isinstance(auxiliary_output, dict) and "auxiliary_output" in auxiliary_output:
             aux_payload = auxiliary_output["auxiliary_output"]
-        l_aux = compute_auxiliary_loss(aux_payload).to(device=logits.device, dtype=logits.dtype)
+        l_aux = compute_auxiliary_loss(aux_payload).to(device=ref_tensor.device, dtype=ref_tensor.dtype)
         l_total = l_total + merged_weights["w_aux"] * l_aux
         result["L_aux"] = l_aux
     else:
         result["L_aux"] = l_ce.new_zeros(())
     if merged_weights.get("w_iso", 0.0) != 0.0 and (invariant_src is not None or invariant_tgt is not None):
-        l_iso = compute_isomorphic_loss(invariant_src, invariant_tgt).to(device=logits.device, dtype=logits.dtype)
+        l_iso = compute_isomorphic_loss(invariant_src, invariant_tgt).to(device=ref_tensor.device, dtype=ref_tensor.dtype)
         l_total = l_total + merged_weights["w_iso"] * l_iso
         result["L_iso"] = l_iso
     else:
         result["L_iso"] = l_ce.new_zeros(())
     if merged_weights.get("w_moe", 0.0) != 0.0 and moe_aux_loss is not None:
-        l_moe = moe_aux_loss.to(device=logits.device, dtype=logits.dtype)
+        l_moe = moe_aux_loss.to(device=ref_tensor.device, dtype=ref_tensor.dtype)
         if num_moe_layers is not None:
             if isinstance(num_moe_layers, torch.Tensor):
                 num_moe_layers = int(num_moe_layers.item())

@@ -326,6 +326,7 @@ class TransformerBlock(nn.Module):
             self.mlp = SwiGLU(cfg)
         self._use_repacked = hasattr(self.attn, "qkv_weight")
         self._mlp_repacked = hasattr(self.mlp, "gate_up_weight")
+        pass  # torch.compile intentionally disabled for this model
 
     def _apply_folded_norm(self, x: torch.Tensor, which: str) -> torch.Tensor:
         """Inline rsqrt-only normalization when the gamma weight has been folded."""

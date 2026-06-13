@@ -209,10 +209,7 @@ class HAGI(nn.Module):
         # Persisted step counter: the rotor schedule stays deterministic across
         # checkpoint save/resume. Old checkpoints without this key load fine
         # (see _load_from_state_dict).
-        self._step = torch.zeros((), dtype=torch.long)
-        _step = self._step
-        del self._step
-        self.register_buffer("_step", _step)
+        self._step: int = 0  # type: ignore[assignment]
 
         self.apply(self._init_weights)
 
@@ -242,6 +239,12 @@ class HAGI(nn.Module):
             if hasattr(module, "weight") and module.weight is not None:
                 torch.nn.init.ones_(module.weight)
 
+    def state_dict(self, *args, **kwargs):  # type: ignore[override]
+        prefix = kwargs.get("prefix", "")
+        state = super().state_dict(*args, **kwargs)
+        state[prefix + "_step"] = torch.tensor(self._step, dtype=torch.long)
+        return state
+
     def _load_from_state_dict(
         self,
         state_dict,
@@ -254,12 +257,13 @@ class HAGI(nn.Module):
     ):
         # Tolerant loading for checkpoints created before _step became a buffer.
         step_key = prefix + "_step"
-        if step_key not in state_dict:
-            state_dict[step_key] = self._step.detach().clone()
-        elif not isinstance(state_dict[step_key], torch.Tensor):
-            state_dict[step_key] = torch.tensor(
-                int(state_dict[step_key]), dtype=torch.long
-            )
+        if step_key in state_dict:
+            val = state_dict[step_key]
+            if isinstance(val, torch.Tensor):
+                self._step = int(val.item())  # type: ignore[assignment]
+            else:
+                self._step = int(val)  # type: ignore[assignment]
+            state_dict.pop(step_key)
         super()._load_from_state_dict(
             state_dict,
             prefix,
@@ -326,7 +330,7 @@ class HAGI(nn.Module):
             self.cfg.gradient_checkpointing and self.training and not use_cache
         )
         if self.training:
-            self._step.add_(1)
+            self._step += 1
         moe_aux_losses: list[torch.Tensor] = []
         collect_moe_aux = training_mode and (
             weights is None or weights.get("w_moe", 0.0) != 0.0
@@ -338,7 +342,10 @@ class HAGI(nn.Module):
             weights is None or weights.get("w_quality", 0.0) != 0.0
         )
 
-        def run_block(block, hidden, past=None, gc: bool = True) -> Any:
+        # Fast-path: skip MoE aux collection list when weights are zero
+        _moe_list = moe_aux_losses if collect_moe_aux else None
+
+        def _run_block(block, hidden, past=None, gc: bool = True) -> Any:
             if use_gradient_checkpointing and gc:
                 result = checkpoint(block, hidden, cos, sin, use_reentrant=False)
             elif use_cache:
@@ -347,16 +354,12 @@ class HAGI(nn.Module):
                 result = block(hidden, cos, sin)
             if not use_cache and isinstance(result, tuple) and len(result) == 2:
                 h_out, aux_loss = result
-                if (
-                    isinstance(aux_loss, torch.Tensor)
-                    and aux_loss.ndim == 0
-                    and collect_moe_aux
-                ):
-                    moe_aux_losses.append(aux_loss)
+                if _moe_list is not None and isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0:
+                    _moe_list.append(aux_loss)
                 return h_out
             return result
 
-        def run_stage(blocks, hidden):
+        def _run_stage(blocks, hidden):
             """Run a sequence of transformer blocks, threading the KV cache."""
             nonlocal layer_idx
             for block in blocks:
@@ -366,15 +369,15 @@ class HAGI(nn.Module):
                     else None
                 )
                 if use_cache:
-                    hidden, next_kv = run_block(block, hidden, past)  # type: ignore[assignment]
+                    hidden, next_kv = _run_block(block, hidden, past)  # type: ignore[assignment]
                     assert next_key_values is not None
                     next_key_values.append(next_kv)
                 else:
-                    hidden = run_block(block, hidden)  # type: ignore[assignment]
+                    hidden = _run_block(block, hidden)  # type: ignore[assignment]
                 layer_idx += 1
             return hidden
 
-        h = run_stage(self.perception, h)
+        h = _run_stage(self.perception, h)
 
         # Precompute rotor index and gdr dispatch type once
         tgt_idx = None
@@ -383,7 +386,7 @@ class HAGI(nn.Module):
             if training_mode and hasattr(self.gdr, "rotors"):
                 num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                 tgt_idx = _pick_rotor_idx(
-                    self.cfg.rotor_seed, int(self._step.item()), num_rotors
+                    self.cfg.rotor_seed, self._step, num_rotors  # type: ignore[arg-type]
                 )
             if (
                 training_mode
@@ -412,11 +415,18 @@ class HAGI(nn.Module):
                         nars_controller=self.nars_hrm,
                     )
                 elif gdr_type == "hdim":
-                    gdr_state = self.gdr(
-                        h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True
-                    )
-                    pre_gdr_h = h if need_iso else None
-                    h = gdr_state["fused"]
+                    if need_iso:
+                        gdr_state = self.gdr(
+                            h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=True
+                        )
+                        pre_gdr_h = h
+                        h = gdr_state["fused"]
+                    else:
+                        h = self.gdr(
+                            h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=False
+                        )
+                        gdr_state = None
+                        pre_gdr_h = None
                     h, _, _, _, _ = self.hrm(
                         h,
                         self.reasoning,
@@ -465,7 +475,7 @@ class HAGI(nn.Module):
                         )
                         pre_gdr_h = h if need_iso else None
                         h = gdr_state["fused"]
-                        h = run_stage((block,), h)
+                        h = _run_stage((block,), h)
                 else:
                     if self.gdr is not None:
                         if gdr_type == "hdim":
@@ -479,7 +489,7 @@ class HAGI(nn.Module):
                             h = gdr_state["fused"]
                         else:
                             h = self.gdr(h)
-                    h = run_stage(self.reasoning, h)
+                    h = _run_stage(self.reasoning, h)
                 if self.training and self.cfg.thinking_noise > 0.0:
                     h = h + torch.randn_like(h) * self.cfg.thinking_noise
                 h = h + self.iter_embed[i]
@@ -536,7 +546,7 @@ class HAGI(nn.Module):
             )
             h = h + msa_out
 
-        h = run_stage(self.expression, h)
+        h = _run_stage(self.expression, h)
 
         pre_logits_hidden = (
             h if need_quality and self.quality_head is not None else None

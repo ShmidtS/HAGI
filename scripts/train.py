@@ -308,7 +308,9 @@ def scheduled_weight(
 
 
 def autocast_ctx(precision: str, device: str):
-    if precision in ("fp32", "manual_fp16", "manual_bf16") or not device.startswith("cuda"):
+    if precision in ("fp32", "manual_fp16", "manual_bf16") or not device.startswith(
+        "cuda"
+    ):
         return nullcontext()
     dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     return torch.autocast(device_type="cuda", dtype=dtype)
@@ -453,11 +455,13 @@ def _resolve_sequential_entries(
         path = Path(entry["path"])
         if not path.is_absolute() and not path.exists():
             path = data_dir / path
-        entries.append({
-            "path": str(path),
-            "name": entry.get("name", "unknown"),
-            "weight": float(entry.get("weight", 1.0)),
-        })
+        entries.append(
+            {
+                "path": str(path),
+                "name": entry.get("name", "unknown"),
+                "weight": float(entry.get("weight", 1.0)),
+            }
+        )
     return entries
 
 
@@ -605,13 +609,15 @@ def unwrap_logits(output: Any) -> torch.Tensor:
 
 
 def compute_loss(
-    logits: torch.Tensor,
+    logits: torch.Tensor | None,
     targets: torch.Tensor,
     model_output: Any = None,
     weights: dict[str, float] | None = None,
     chunk_size: int = 0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if weights is None:
+        if logits is None:
+            raise ValueError("logits is None and weights is None; cannot compute loss")
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
             targets.reshape(-1),
@@ -777,14 +783,20 @@ def update_ema(
             ema_device = ema_params[0].device if ema_params else None
             if ema_device == params[0].device:
                 torch._foreach_mul_(cast(list[torch.Tensor], ema_params), decay)
-                torch._foreach_add_(cast(list[torch.Tensor], ema_params), [p.detach() for p in params], alpha=1.0 - decay)
+                torch._foreach_add_(
+                    cast(list[torch.Tensor], ema_params),
+                    [p.detach() for p in params],
+                    alpha=1.0 - decay,
+                )
             else:
                 for ema_param, param in zip(ema_params, params, strict=True):
                     ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
         else:
             for ema_param, param in zip(ema_params, params, strict=True):
                 ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
-        for ema_buffer, buffer in zip(model_ema.buffers(), model.buffers(), strict=True):
+        for ema_buffer, buffer in zip(
+            model_ema.buffers(), model.buffers(), strict=True
+        ):
             ema_buffer.copy_(buffer)
 
 
@@ -970,6 +982,7 @@ def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 
     model = HAGI(model_cfg).to(args.device)
     if hasattr(model.cfg, "gradient_checkpointing"):
@@ -1109,6 +1122,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 
     start_step = 0
     if args.resume is not None and args.resume.exists():
@@ -1124,6 +1138,16 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             train_cfg.get("gradient_checkpointing", model.cfg.gradient_checkpointing)
         )
     model_ema: torch.nn.Module | None = None
+    ema_cfg = train_cfg.get("ema", {})
+    ema_decay = float(ema_cfg.get("decay", train_cfg.get("ema_decay", 0.999)))
+    ema_start_step = int(
+        ema_cfg.get("start_step", train_cfg.get("ema_start_step", 1000))
+    )
+    # Eager EMA init: avoid expensive copy.deepcopy inside the hot loop
+    model_ema = copy.deepcopy(model).to(args.device)
+    model_ema.eval()
+    for param in model_ema.parameters():
+        param.requires_grad_(False)
     train_model = maybe_compile(model, args.device)
     train_model.train()
 
@@ -1161,11 +1185,6 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         train_cfg.get("moe_warmup_steps", train_cfg.get("moe_warmup", 2000))
     )
     loss_warmup_mode = str(train_cfg.get("loss_warmup_mode", "linear"))
-    ema_cfg = train_cfg.get("ema", {})
-    ema_decay = float(ema_cfg.get("decay", train_cfg.get("ema_decay", 0.999)))
-    ema_start_step = int(
-        ema_cfg.get("start_step", train_cfg.get("ema_start_step", 1000))
-    )
     optimizer_kind = str(train_cfg.get("optimizer", "adamw")).lower()
     magic_norm_max = float(train_cfg.get("magic_norm_max", 1.0))
     data_cfg = cfg.get("data", {})
@@ -1207,7 +1226,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         args.data_dir,
         use_prefix_lm,
         args.device,
-        eval_samples=eval_samples,
+        eval_samples=eval_samples if eval_interval > 0 else 0,
         dataset_mode=dataset_mode,
         sequential_cycles=sequential_cycles,
         steps_per_cycle=steps_per_cycle,
@@ -1381,11 +1400,17 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     components = {}
                 else:
                     loss, components = compute_loss(
-                        logits, targets, output, effective_weights, chunk_size=chunk_size
+                        logits,
+                        targets,
+                        output,
+                        effective_weights,
+                        chunk_size=chunk_size,
                     )
                 raw_loss = loss.detach().float()
                 loss = loss / grad_accum_steps
-            t_forward += time.perf_counter() - t_fwd_start
+                if args.device.startswith("cuda") and need_components:
+                    torch.cuda.synchronize()
+                t_forward += time.perf_counter() - t_fwd_start
             if not torch.isfinite(loss).all():
                 if log_interval > 0 and step % log_interval == 0:
                     print(
@@ -1437,6 +1462,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 last_log_time = now
             continue
 
+        if args.device.startswith("cuda") and need_components:
+            torch.cuda.synchronize()
         t_opt_start = time.perf_counter()
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
@@ -1483,12 +1510,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         t_unscale = t_unscale_end - t_opt_start
         t_clip = t_clip_end - t_unscale_end
         t_magic = t_magic_end - t_clip_end
-        if step >= ema_start_step:
-            if model_ema is None:
-                model_ema = copy.deepcopy(model).to(args.device)
-                model_ema.eval()
-                for param in model_ema.parameters():
-                    param.requires_grad_(False)
+        if step >= ema_start_step and model_ema is not None:
             update_ema(model, model_ema, ema_decay)
 
         last_loss = float("nan")
@@ -1515,7 +1537,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             weight_text = ""
             if effective_weights is not None:
                 weight_text = f" | w_aux {effective_weights['w_aux']:.4f} | w_iso {effective_weights['w_iso']:.4f}"
-            eval_model_tag = "ema" if (step >= ema_start_step and model_ema is not None) else "model"
+            eval_model_tag = (
+                "ema" if (step >= ema_start_step and model_ema is not None) else "model"
+            )
             mem_text = ""
             if args.device.startswith("cuda"):
                 allocated = torch.cuda.memory_allocated(args.device) / (1024**3)
@@ -1525,8 +1549,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
                 f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm_val:.2e} | "
                 f"magic_norm_max_grad {magic_norm_max_grad.item():.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text} | "
-                f"fwd {t_forward*1000:.1f}ms | bwd {t_backward*1000:.1f}ms | opt {t_opt*1000:.1f}ms | "
-                f"unscale {t_unscale*1000:.1f}ms | clip {t_clip*1000:.1f}ms | magic {t_magic*1000:.1f}ms | opt_step {t_opt_step*1000:.1f}ms"
+                f"fwd {t_forward*1000:.1f}ms | bwd {t_backward*1000:.1f}ms | opt {t_opt*1000:.1f}ms"
             )
             tokens_since_log = 0
             last_log_time = now
@@ -1537,7 +1560,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             and step > 0
             and step % eval_interval == 0
         ):
-            eval_model = model_ema if (step >= ema_start_step and model_ema is not None) else model
+            eval_model = (
+                model_ema
+                if (step >= ema_start_step and model_ema is not None)
+                else model
+            )
             metrics = run_eval(
                 eval_model,
                 eval_loader,
@@ -1605,9 +1632,17 @@ def main() -> None:
         default="auto",
         help="training mode (auto-detected from config)",
     )
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=None,
+        help="logging interval in steps (overrides config)",
+    )
     args = parser.parse_args()
 
     cfg = load_yaml(args.config)
+    if args.log_interval is not None:
+        cfg.setdefault("training", {})["log_interval"] = args.log_interval
     mode = args.mode if args.mode != "auto" else detect_mode(cfg)
     if args.dry_run and mode != "full":
         raise ValueError("--dry-run is only supported in full mode")
