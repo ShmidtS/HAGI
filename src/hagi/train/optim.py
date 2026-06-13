@@ -10,9 +10,7 @@ from torch import nn
 
 
 @torch.no_grad()
-def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
-    """Approximate orthogonalization of a 2D matrix via quintic Newton-Schulz."""
-    assert G.ndim == 2, "Muon orthogonalization expects a 2D matrix"
+def _zeropower_impl(G: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
     a, b, c = (3.4445, -4.7750, 2.0315)
     x = G if G.dtype == torch.bfloat16 else G.bfloat16()
     transposed = G.size(0) > G.size(1)
@@ -28,15 +26,21 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e
     return x if x.dtype == G.dtype else x.to(G.dtype)
 
 
-@torch.no_grad()
-def zeropower_via_newtonschulz5_batched(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
-    """Batched quintic Newton-Schulz over a [B, M, N] stack of matrices.
+try:
+    _zeropower_jit = torch.jit.script(_zeropower_impl)
+except Exception:
+    _zeropower_jit = None
 
-    Numerically equivalent to running zeropower_via_newtonschulz5 per matrix,
-    but executes one bmm chain instead of B sequential matmul chains — much
-    less kernel-launch overhead for many small same-shape parameters.
-    """
-    assert G.ndim == 3, "batched Muon orthogonalization expects [B, M, N]"
+
+def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
+    """Approximate orthogonalization of a 2D matrix via quintic Newton-Schulz."""
+    assert G.ndim == 2, "Muon orthogonalization expects a 2D matrix"
+    fn = _zeropower_jit if _zeropower_jit is not None else _zeropower_impl
+    return fn(G, steps, eps)
+
+
+@torch.no_grad()
+def _zeropower_batched_impl(G: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
     a, b, c = (3.4445, -4.7750, 2.0315)
     x = G if G.dtype == torch.bfloat16 else G.bfloat16()
     transposed = G.size(1) > G.size(2)
@@ -50,7 +54,25 @@ def zeropower_via_newtonschulz5_batched(G: torch.Tensor, steps: int = 5, eps: fl
         x = a * x + B @ x
     if transposed:
         x = x.transpose(1, 2)
-    return x.to(G.dtype)
+    return x if x.dtype == G.dtype else x.to(G.dtype)
+
+
+try:
+    _zeropower_batched_jit = torch.jit.script(_zeropower_batched_impl)
+except Exception:
+    _zeropower_batched_jit = None
+
+
+def zeropower_via_newtonschulz5_batched(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
+    """Batched quintic Newton-Schulz over a [B, M, N] stack of matrices.
+
+    Numerically equivalent to running zeropower_via_newtonschulz5 per matrix,
+    but executes one bmm chain instead of B sequential matmul chains — much
+    less kernel-launch overhead for many small same-shape parameters.
+    """
+    assert G.ndim == 3, "batched Muon orthogonalization expects [B, M, N]"
+    fn = _zeropower_batched_jit if _zeropower_batched_jit is not None else _zeropower_batched_impl
+    return fn(G, steps, eps)
 
 
 class Muon(torch.optim.Optimizer):
