@@ -78,7 +78,9 @@ class MoESwiGLU(nn.Module):
                     slice_tokens = sorted_tokens[offset:offset + count]
                     expert_out = expert(slice_tokens)
                     out_indices = sort_order[offset:offset + count]
-                    output.index_copy_(0, out_indices, expert_out.to(output.dtype))
+                    if expert_out.dtype != output.dtype:
+                        expert_out = expert_out.to(output.dtype)
+                    output.index_copy_(0, out_indices, expert_out)
                     offset += count
             else:
                 for e_idx, expert in enumerate(self.experts):
@@ -89,7 +91,9 @@ class MoESwiGLU(nn.Module):
                     tokens = flat.index_select(0, indices)
                     expert_out = expert(tokens)
                     idx = indices.unsqueeze(-1).expand(-1, expert_out.size(-1))
-                    output.scatter_add_(0, idx, expert_out.to(output.dtype) * probs.index_select(0, indices).unsqueeze(-1))
+                    if expert_out.dtype != output.dtype:
+                        expert_out = expert_out.to(output.dtype)
+                    output.scatter_add_(0, idx, expert_out * probs.index_select(0, indices).unsqueeze(-1))
 
         output = output.view(B, T, D)
 
