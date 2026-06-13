@@ -52,7 +52,8 @@ class MoESwiGLU(nn.Module):
         if self.training:
             noise = torch.randn_like(router_logits) * 0.01
             router_logits = router_logits + noise.detach()
-        router_logits = router_logits / self.router_temperature
+        if self.router_temperature != 1.0:
+            router_logits = router_logits / self.router_temperature
         # router_logits = router_logits.clamp(-10, 10)  # removed for speed
         router_probs = F.softmax(router_logits, dim=-1)
 
