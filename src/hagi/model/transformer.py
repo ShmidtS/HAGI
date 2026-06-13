@@ -336,6 +336,12 @@ class TransformerBlock(nn.Module):
             return self.attn_norm(x)
         return self.mlp_norm(x)
 
+    def _attn_checkpoint(self, h, cos, sin, attn_mask):
+        return self.attn(h, cos, sin, attn_mask=attn_mask)
+
+    def _mlp_checkpoint(self, h):
+        return self.mlp(h)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -351,10 +357,11 @@ class TransformerBlock(nn.Module):
         if use_checkpoint:
             h = self._apply_folded_norm(x, "attn")
             attn_out = checkpoint(
-                lambda h, c, s: self.attn(h, c, s, attn_mask=attn_mask),
+                self._attn_checkpoint,
                 h,
                 cos,
                 sin,
+                attn_mask,
                 use_reentrant=False,
             )
             next_key_value = None
@@ -372,7 +379,7 @@ class TransformerBlock(nn.Module):
         x = x + attn_out
         if use_checkpoint:
             h = self._apply_folded_norm(x, "mlp")
-            mlp_out = checkpoint(lambda h: self.mlp(h), h, use_reentrant=False)
+            mlp_out = checkpoint(self._mlp_checkpoint, h, use_reentrant=False)
         else:
             h = self._apply_folded_norm(x, "mlp")
             if use_repacked and getattr(self, "_mlp_repacked", False):
