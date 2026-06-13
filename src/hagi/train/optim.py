@@ -19,8 +19,8 @@ def _zeropower_impl(G: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
     x = x / (x.norm() + eps)
     for _ in range(steps):
         A = x @ x.T
-        B = b * A + c * (A @ A)
-        x = a * x + B @ x
+        B = torch.addmm(A, A, A, beta=b, alpha=c)
+        x = torch.addmm(x, B, x, beta=a, alpha=1.0)
     if transposed:
         x = x.T
     return x if x.dtype == G.dtype else x.to(G.dtype)
@@ -50,8 +50,8 @@ def _zeropower_batched_impl(G: torch.Tensor, steps: int, eps: float) -> torch.Te
     x = x / norms
     for _ in range(steps):
         A = x @ x.transpose(1, 2)
-        B = b * A + c * (A @ A)
-        x = a * x + B @ x
+        B = torch.baddbmm(A, A, A, beta=b, alpha=c)
+        x = torch.baddbmm(x, B, x, beta=a, alpha=1.0)
     if transposed:
         x = x.transpose(1, 2)
     return x if x.dtype == G.dtype else x.to(G.dtype)
