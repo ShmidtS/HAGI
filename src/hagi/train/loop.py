@@ -39,6 +39,13 @@ class LoopConfig:
     log_interval: int = 50
 
 
+# NARS re-applies its resolved HRM control policy (mutating model.hrm
+# h_cycles/l_cycles) on this step interval. observe_train_step still runs every
+# step to keep truth/budget statistics fresh; only the cycle-mutating apply is
+# throttled. See loop body for rationale.
+NARS_POLICY_INTERVAL = 200
+
+
 def _lr_at(step: int, cfg: LoopConfig) -> float:
     if step < cfg.warmup_steps:
         return cfg.learning_rate * (step + 1) / max(1, cfg.warmup_steps)
@@ -138,28 +145,33 @@ def train(
 
         last_loss = accum_loss
 
-        # NARS HRM control: observe and adapt
+        # NARS HRM control: observe every step (cheap stat accumulation), but
+        # only re-apply the resolved policy (which mutates model.hrm cycles and
+        # thereby changes the model's math) on a coarse interval. Per-step
+        # cycle churn destabilises training (grad spikes, loss plateau) and
+        # makes forward depth unpredictable. cycles: observe=always, apply=200.
         if nars_hrm is not None:
             if grad_norm is None:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf")).item()
             nars_hrm.observe_train_step(last_loss, grad_norm)
-            policy = nars_hrm.resolve_policy()
-            if hasattr(model, "hrm") and model.hrm is not None:
-                nars_hrm.apply_policy(policy, model.hrm)
+            if step % NARS_POLICY_INTERVAL == 0:
+                policy = nars_hrm.resolve_policy()
+                if hasattr(model, "hrm") and model.hrm is not None:
+                    nars_hrm.apply_policy(policy, model.hrm)
 
         if step % cfg.log_interval == 0:
             metrics = {"step": step, "loss": accum_loss, "lr": lr}
-            if nars_hrm is not None:
-                policy = nars_hrm.resolve_policy()
-                metrics["h_cycles"] = policy.h_cycles
-                metrics["l_cycles"] = policy.l_cycles
+            # Log the ACTUAL HRM cycles in effect (config-driven, not the NARS
+            # proposed policy — apply_policy no longer mutates cycles).
+            if hasattr(model, "hrm") and model.hrm is not None:
+                metrics["h_cycles"] = getattr(model.hrm, "h_cycles", None)
+                metrics["l_cycles"] = getattr(model.hrm, "l_cycles", None)
             if on_log:
                 on_log(metrics)
             else:
                 extras = ""
-                if nars_hrm is not None:
-                    policy = nars_hrm.resolve_policy()
-                    extras = f" | h={policy.h_cycles} l={policy.l_cycles}"
+                if hasattr(model, "hrm") and model.hrm is not None:
+                    extras = f" | h={getattr(model.hrm, 'h_cycles', '?')} l={getattr(model.hrm, 'l_cycles', '?')}"
                 print(f"step {step:6d} | loss {accum_loss:.4f} | lr {lr:.2e}{extras}")
 
         if eval_get_batch is not None and cfg.eval_interval > 0 and step > 0 \

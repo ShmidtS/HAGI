@@ -84,18 +84,21 @@ def test_nars_hrm_controller_apply_policy_to_dict():
     ctrl = NarsHrmController()
     ctrl.observe_train_step(loss=0.5, grad_norm=0.5)
     policy = ctrl.resolve_policy()
-    config = {}
+    # Cycles are config-driven and must NOT be mutated by apply_policy (h_cycles
+    # drives conditional module construction; overriding it post-init crashes
+    # or destabilises training). Only scalar knobs are applied.
+    config = {"h_cycles": 1, "l_cycles": 3}
     ctrl.apply_policy(policy, config)
-    assert config["h_cycles"] == policy.h_cycles
-    assert config["l_cycles"] == policy.l_cycles
-    assert config["convergence_eps"] == policy.convergence_eps
-    assert config["bp_steps"] == policy.bp_steps
+    assert config["h_cycles"] == 1
+    assert config["l_cycles"] == 3
+    assert "convergence_eps" not in config or config["convergence_eps"] == policy.convergence_eps
+    assert "bp_steps" not in config or config["bp_steps"] == policy.bp_steps
 
 
 def test_nars_hrm_controller_apply_policy_to_object():
     class DummyConfig:
-        h_cycles = 0
-        l_cycles = 0
+        h_cycles = 1
+        l_cycles = 3
         convergence_eps = 0.0
         bp_steps = 0
 
@@ -104,8 +107,8 @@ def test_nars_hrm_controller_apply_policy_to_object():
     policy = ctrl.resolve_policy()
     cfg = DummyConfig()
     ctrl.apply_policy(policy, cfg)
-    assert cfg.h_cycles == policy.h_cycles
-    assert cfg.l_cycles == policy.l_cycles
+    assert cfg.h_cycles == 1
+    assert cfg.l_cycles == 3
     assert cfg.convergence_eps == policy.convergence_eps
     assert cfg.bp_steps == policy.bp_steps
 

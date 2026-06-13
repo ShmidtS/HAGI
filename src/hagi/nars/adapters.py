@@ -173,16 +173,21 @@ class NarsHrmController:
         }
 
     def apply_policy(self, policy: HrmControlPolicy, hrm_config: Any) -> None:
-        """Apply a resolved policy to an HRM config (object or dict)."""
+        """Apply a resolved policy to an HRM config (object or dict).
+
+        Only adapts runtime-safe scalar knobs (convergence_eps, bp_steps). The
+        HRM cycle counts (h_cycles/l_cycles) are deliberately NOT mutated here:
+        h_cycles drives conditional module construction (h_transition exists
+        only when h_cycles>1 at init), so overriding it post-init either crashes
+        the forward pass or changes the model's math per-step and destabilises
+        training. Cycles stay at their config values; NARS still adapts via the
+        scalar knobs and via compute_gating.
+        """
         if isinstance(hrm_config, dict):
-            hrm_config["h_cycles"] = policy.h_cycles
-            hrm_config["l_cycles"] = policy.l_cycles
             hrm_config["convergence_eps"] = policy.convergence_eps
             hrm_config["bp_steps"] = policy.bp_steps
         else:
             for attr, value in (
-                ("h_cycles", policy.h_cycles),
-                ("l_cycles", policy.l_cycles),
                 ("convergence_eps", policy.convergence_eps),
                 ("bp_steps", policy.bp_steps),
             ):

@@ -60,6 +60,15 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                     gate = gate * gamma.view(1, -1)
                     up = up * gamma.view(1, -1)
                     module.mlp.gate_up_weight.data = torch.cat([gate, up], dim=0).contiguous()
+                elif hasattr(module.mlp, "experts"):
+                    # Mixture-of-Experts SwiGLU: fold gamma into each expert's
+                    # gate/up projections (the first ops after mlp_norm).
+                    experts = cast(Any, module.mlp).experts
+                    with torch.no_grad():
+                        for expert in experts:
+                            for proj in (expert.gate, expert.up):
+                                if isinstance(proj, nn.Linear):
+                                    proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
                 else:
                     for proj in (module.mlp.gate, module.mlp.up):
                         if isinstance(proj, nn.Linear):

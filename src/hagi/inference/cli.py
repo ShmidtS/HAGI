@@ -15,11 +15,29 @@ from hagi.train.config import config_from_dict
 from hagi.utils import _load_yaml
 
 
+def _load_state_dict(checkpoint: Path, device: str) -> tuple[dict, dict]:
+    """Load (model_state_dict, aux_state) from a flat file or sharded dir.
+
+    Sharded layout: ``<dir>/{model.pt,meta.pt,...}``. The model weights always
+    come from ``model.pt`` (never ``ema.pt`` — EMA in this checkpoint is stale).
+    """
+    model_pt = checkpoint / "model.pt" if checkpoint.is_dir() else checkpoint
+    state = torch.load(model_pt, map_location=device, weights_only=True)
+    # Flat checkpoints wrap weights under {"model": ...}; sharded dirs store
+    # a raw state_dict at the top level.
+    if isinstance(state, dict) and "model" in state and isinstance(state["model"], dict):
+        aux = state
+        state_dict = state["model"]
+    else:
+        aux = state if isinstance(state, dict) else {}
+        state_dict = state
+    return state_dict, aux
+
+
 def _load_model(checkpoint: Path, config: Path, device: str) -> HAGI:
     cfg = _load_yaml(config)
     model = HAGI(config_from_dict(cfg.get("model", cfg)))
-    state = torch.load(checkpoint, map_location=device, weights_only=True)
-    state_dict = state.get("model", state) if isinstance(state, dict) else state
+    state_dict, state = _load_state_dict(checkpoint, device)
     model.load_state_dict(state_dict)
     # Load MSA and NARS states if present
     if hasattr(model, "msa_registry") and model.msa_registry is not None and "msa_registry" in state:
@@ -37,7 +55,7 @@ def _load_model(checkpoint: Path, config: Path, device: str) -> HAGI:
 
 def run(checkpoint: Path, config: Path, device: str = "cpu") -> None:
     model = _load_model(checkpoint, config, device)
-    tokenizer = TokenizerWrapper()
+    tokenizer = TokenizerWrapper.smollm2()
     session = ChatSession(model, tokenizer)
     print("HAGI chat. Type /quit to exit.")
     while True:

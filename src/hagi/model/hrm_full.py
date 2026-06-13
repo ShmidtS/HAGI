@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Sequence
+from typing import cast
 
 import torch
 from torch import nn
@@ -149,12 +150,20 @@ class HRMCore(nn.Module):
             z_H = self.h_init(pooled)
         if z_L is None:
             z_L = self.l_init(pooled)
+        # Past the branches above z_H/z_L are always tensors, but the
+        # parameter is typed Tensor|HState|None, so narrow with cast for the
+        # dtype/device access and the gate scaling below.
+        z_H = cast(torch.Tensor, z_H)
+        z_L = cast(torch.Tensor, z_L)
 
         # NARS truth-weighted gating — active controller
         if nars_controller is not None:
             h_gate, l_gate = nars_controller.compute_gating(z_H, z_L)
-            z_H = z_H * h_gate
-            z_L = z_L * l_gate
+            # Cast scalar gates to the state dtype so z_H/z_L stay bf16 (a
+            # plain `tensor * python_float` would promote to float32 and force
+            # the non-fused rms_norm fallback downstream).
+            z_H = z_H * torch.as_tensor(h_gate, dtype=z_H.dtype, device=z_H.device)
+            z_L = z_L * torch.as_tensor(l_gate, dtype=z_L.dtype, device=z_L.device)
 
         gdr_state = None
         pre_gdr_h = None
