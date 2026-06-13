@@ -121,10 +121,13 @@ def geometric_product_triton(x: torch.Tensor, y: torch.Tensor, table: torch.Tens
     assert x.shape[-1] == y.shape[-1] == table.shape[0]
     blade_count = x.shape[-1]
     orig_shape = x.shape
+    batch = math.prod(x.shape[:-1])
+    # Fallback to PyTorch einsum for small batches where kernel launch overhead dominates.
+    if batch < 128:
+        return _geometric_product_torch(x, y, table)
+
     # table must be on CUDA and contiguous
     table = _contiguous(_upcast_table(table, x.dtype))
-
-    batch = math.prod(x.shape[:-1])
     x = _contiguous(x).view(batch, blade_count)
     y = _contiguous(y).view(batch, blade_count)
     out = torch.empty_like(x)
