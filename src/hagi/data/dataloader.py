@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - torch is required for DataLoader use
 
     class Dataset:  # type: ignore[no-redef]
         pass
+
 else:
     Dataset = cast(Any, _TorchDataset)
 
@@ -29,7 +30,11 @@ class MemmapDataset(Dataset):  # type: ignore[type-arg, misc]
         preload: bool = True,
     ) -> None:
         self.path = Path(path)
-        self.seq_len = int(seq_len if seq_len is not None else block_size if block_size is not None else 0)
+        self.seq_len = int(
+            seq_len
+            if seq_len is not None
+            else block_size if block_size is not None else 0
+        )
         self.dtype = dtype
         self.mode = mode
         self._data: np.memmap[Any, Any] | None = None
@@ -61,7 +66,9 @@ class MemmapDataset(Dataset):  # type: ignore[type-arg, misc]
         if index < 0 or index >= len(self):
             raise IndexError(index)
         if self._preload is not None:
-            return np.asarray(self._preload[index : index + self.seq_len + 1], dtype=np.int64)
+            return np.asarray(
+                self._preload[index : index + self.seq_len + 1], dtype=np.int64
+            )
         return np.asarray(self.data[index : index + self.seq_len + 1], dtype=np.int64)
 
     def __getstate__(self) -> dict[str, Any]:

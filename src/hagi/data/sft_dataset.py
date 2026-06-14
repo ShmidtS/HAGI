@@ -34,7 +34,9 @@ def _encode_conversation(
     pad_token_id: int = 0,
 ) -> SFTExample:
     """Tokenize a conversation and build assistant-only loss mask."""
-    has_chat_template = getattr(tokenizer, "chat_template", None) is not None and hasattr(tokenizer, "apply_chat_template")
+    has_chat_template = getattr(
+        tokenizer, "chat_template", None
+    ) is not None and hasattr(tokenizer, "apply_chat_template")
 
     def _format_turn(msg: dict[str, str]) -> str:
         if has_chat_template:
@@ -131,7 +133,9 @@ class SFTDataset(Dataset):  # type: ignore[type-arg, misc]
 
 
 def _sft_collate(batch: list[dict[str, Any]]) -> tuple[Any, Any]:
-    input_ids = np.stack([np.asarray(item["input_ids"], dtype=np.int64) for item in batch])
+    input_ids = np.stack(
+        [np.asarray(item["input_ids"], dtype=np.int64) for item in batch]
+    )
     labels = np.stack([np.asarray(item["labels"], dtype=np.int64) for item in batch])
     return _as_long_tensor(input_ids), _as_long_tensor(labels)
 
@@ -156,14 +160,18 @@ def get_sft_dataloader(
     try:
         from datasets import load_dataset
     except ImportError as exc:
-        raise ImportError("install datasets for SFT data loading: pip install datasets") from exc
+        raise ImportError(
+            "install datasets for SFT data loading: pip install datasets"
+        ) from exc
 
     if local_path is not None and Path(local_path).exists():
         suffix = Path(local_path).suffix.lower()
         if suffix == ".jsonl":
             hf_dataset = load_dataset("json", data_files=str(local_path), split=split)
         else:
-            hf_dataset = load_dataset("parquet", data_files=str(local_path), split=split)
+            hf_dataset = load_dataset(
+                "parquet", data_files=str(local_path), split=split
+            )
     else:
         hf_dataset = load_dataset(dataset_name, split=split, streaming=streaming)
 

@@ -360,7 +360,11 @@ class HAGI(nn.Module):
                 result = block(hidden, cos, sin)
             if not use_cache and isinstance(result, tuple) and len(result) == 2:
                 h_out, aux_loss = result
-                if _moe_list is not None and isinstance(aux_loss, torch.Tensor) and aux_loss.ndim == 0:
+                if (
+                    _moe_list is not None
+                    and isinstance(aux_loss, torch.Tensor)
+                    and aux_loss.ndim == 0
+                ):
                     _moe_list.append(aux_loss)
                 return h_out
             return result
@@ -429,7 +433,10 @@ class HAGI(nn.Module):
                         h = gdr_state["fused"]
                     else:
                         h = self.gdr(
-                            h, src_rotor_idx=0, tgt_rotor_idx=tgt_idx, return_state=False
+                            h,
+                            src_rotor_idx=0,
+                            tgt_rotor_idx=tgt_idx,
+                            return_state=False,
                         )
                         gdr_state = None
                         pre_gdr_h = None

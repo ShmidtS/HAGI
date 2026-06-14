@@ -27,21 +27,27 @@ class StaticLayerCache:
         device=None,
         dtype=None,
     ):
-        self.k_buf = torch.zeros(batch_size, num_kv_heads, max_seq_len, head_dim, device=device, dtype=dtype)
+        self.k_buf = torch.zeros(
+            batch_size, num_kv_heads, max_seq_len, head_dim, device=device, dtype=dtype
+        )
         self.v_buf = torch.zeros_like(self.k_buf)
         self.seq_len = 0
 
-    def update(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def update(
+        self, k: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Write new K/V at the current position; return views over valid range."""
         t = k.size(2)
         end = self.seq_len + t
         if end > self.k_buf.size(2):
-            raise RuntimeError(f"static KV cache overflow: {end} > {self.k_buf.size(2)}")
+            raise RuntimeError(
+                f"static KV cache overflow: {end} > {self.k_buf.size(2)}"
+            )
         if k.dtype != self.k_buf.dtype or k.device != self.k_buf.device:
             self.k_buf = self.k_buf.to(device=k.device, dtype=k.dtype)
             self.v_buf = self.v_buf.to(device=v.device, dtype=v.dtype)
-        self.k_buf[:, :, self.seq_len:end] = k
-        self.v_buf[:, :, self.seq_len:end] = v
+        self.k_buf[:, :, self.seq_len : end] = k
+        self.v_buf[:, :, self.seq_len : end] = v
         self.seq_len = end
         return self.k_buf[:, :, :end], self.v_buf[:, :, :end]
 
@@ -53,7 +59,9 @@ class StaticLayerCache:
         self.seq_len = 0
 
 
-def make_static_cache(model, batch_size: int, max_seq_len: int) -> list[StaticLayerCache] | None:
+def make_static_cache(
+    model, batch_size: int, max_seq_len: int
+) -> list[StaticLayerCache] | None:
     """Build per-executed-block static caches from a HAGI model config.
 
     Returns None when the model config is unavailable or uses the HRM path
@@ -71,10 +79,19 @@ def make_static_cache(model, batch_size: int, max_seq_len: int) -> list[StaticLa
     except (AttributeError, StopIteration):
         device, dtype = None, None
     loops = cfg.loop_count if cfg.use_loop else 1
-    n_blocks = cfg.perception_layers + loops * cfg.reasoning_layers + cfg.expression_layers
+    n_blocks = (
+        cfg.perception_layers + loops * cfg.reasoning_layers + cfg.expression_layers
+    )
     head_dim = tcfg.hidden_size // tcfg.num_query_heads
     max_seq_len = min(max_seq_len, tcfg.max_seq_len)
     return [
-        StaticLayerCache(batch_size, tcfg.num_kv_heads, max_seq_len, head_dim, device=device, dtype=dtype)
+        StaticLayerCache(
+            batch_size,
+            tcfg.num_kv_heads,
+            max_seq_len,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
         for _ in range(n_blocks)
     ]

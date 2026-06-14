@@ -69,7 +69,10 @@ class ChatSession:
 
     def _prompt_ids(self) -> list[int]:
         prompt_ids = self.tokenizer.encode(self._render_prompt())
-        if self.max_context_length is not None and len(prompt_ids) > self.max_context_length:
+        if (
+            self.max_context_length is not None
+            and len(prompt_ids) > self.max_context_length
+        ):
             prompt_ids = prompt_ids[-self.max_context_length :]
         return prompt_ids
 
@@ -101,7 +104,7 @@ class ChatSession:
                 use_cache=True,
                 compile_model=self.compile_model,
             )
-        new_ids = generated_ids[0, len(prompt_ids):].tolist()
+        new_ids = generated_ids[0, len(prompt_ids) :].tolist()
         text = self.tokenizer.decode(new_ids)
         self.add_assistant_message(text)
         self._maybe_clear_cuda_cache()

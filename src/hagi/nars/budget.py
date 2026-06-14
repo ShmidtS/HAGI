@@ -31,4 +31,6 @@ def merge_budgets(left: BudgetValue, right: BudgetValue) -> BudgetValue:
 
 def budget_decay(budget: BudgetValue, factor: float) -> BudgetValue:
     factor = _clamp01(factor)
-    return BudgetValue(budget.priority * factor, budget.durability * factor, budget.quality)
+    return BudgetValue(
+        budget.priority * factor, budget.durability * factor, budget.quality
+    )

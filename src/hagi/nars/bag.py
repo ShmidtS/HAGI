@@ -34,7 +34,10 @@ class Bag(Generic[T]):
     def take(self) -> T | None:
         if not self.items:
             return None
-        key = min(self.items, key=lambda name: (-self._priorities[name], self._sequence[name], name))
+        key = min(
+            self.items,
+            key=lambda name: (-self._priorities[name], self._sequence[name], name),
+        )
         item = self.items.pop(key)
         self._priorities.pop(key, None)
         self._sequence.pop(key, None)

@@ -80,11 +80,15 @@ class LTransition(nn.Module):
         self.gate = nn.Linear(in_dim, l_dim)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         if h_cycles > 1:
-            self.reset_l = ResetL(h_dim if h_dim is not None else hidden_size, l_dim, mult, dropout)
+            self.reset_l = ResetL(
+                h_dim if h_dim is not None else hidden_size, l_dim, mult, dropout
+            )
         else:
             self.reset_l = None
 
-    def forward(self, z_L_prev: torch.Tensor, transformer_output: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, z_L_prev: torch.Tensor, transformer_output: torch.Tensor
+    ) -> torch.Tensor:
         pooled = transformer_output.mean(dim=1)
         x = torch.cat([z_L_prev, pooled], dim=-1)
         x = self.norm(x)
@@ -117,8 +121,19 @@ class HRMCore(nn.Module):
 
         self.h_init = nn.Linear(hidden_size, h_dim)
         self.l_init = nn.Linear(hidden_size, l_dim)
-        self.h_transition = HTransition(h_dim, l_dim, transition_mult, transition_dropout) if h_cycles > 1 else None
-        self.l_transition = LTransition(l_dim, hidden_size, h_dim, transition_mult, transition_dropout, h_cycles=h_cycles)
+        self.h_transition = (
+            HTransition(h_dim, l_dim, transition_mult, transition_dropout)
+            if h_cycles > 1
+            else None
+        )
+        self.l_transition = LTransition(
+            l_dim,
+            hidden_size,
+            h_dim,
+            transition_mult,
+            transition_dropout,
+            h_cycles=h_cycles,
+        )
         self.z_l_to_hidden = nn.Linear(l_dim, hidden_size)
         self.z_h_to_hidden = nn.Linear(h_dim, hidden_size)
 
@@ -177,10 +192,22 @@ class HRMCore(nn.Module):
                 for block in reasoning_blocks:
                     h_in = h + bias
                     if gradient_checkpointing:
-                        result = checkpoint(block, h_in, cos, sin, attn_mask=attn_mask, use_reentrant=False)
+                        result = checkpoint(
+                            block,
+                            h_in,
+                            cos,
+                            sin,
+                            attn_mask=attn_mask,
+                            use_reentrant=False,
+                        )
                     else:
                         result = block(h_in, cos, sin, attn_mask=attn_mask)
-                    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], torch.Tensor) and result[1].ndim == 0:
+                    if (
+                        isinstance(result, tuple)
+                        and len(result) == 2
+                        and isinstance(result[1], torch.Tensor)
+                        and result[1].ndim == 0
+                    ):
                         h = result[0]
                         if moe_aux_losses is not None:
                             moe_aux_losses.append(result[1])

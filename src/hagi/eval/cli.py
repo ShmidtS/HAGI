@@ -74,6 +74,7 @@ def run(
 
 def main() -> None:
     if typer is not None:
+
         def cli(
             checkpoint: Path = typer.Option(..., "--checkpoint"),
             config: Path | None = typer.Option(None, "--config"),

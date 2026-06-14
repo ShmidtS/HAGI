@@ -27,7 +27,9 @@ class HiddenToMultivector(nn.Module):
 class DomainRotor(nn.Module):
     """Learnable unit even multivectors used for domain rotor sandwiches."""
 
-    def __init__(self, num_rotors: int = 4, heads: int = 4, blade_count: int = BLADE_COUNT):
+    def __init__(
+        self, num_rotors: int = 4, heads: int = 4, blade_count: int = BLADE_COUNT
+    ):
         super().__init__()
         self.num_rotors = num_rotors
         self.heads = heads
@@ -49,7 +51,9 @@ class DomainRotor(nn.Module):
     def _normalized_rotors(self) -> torch.Tensor:
         assert isinstance(self.even_mask, torch.Tensor)
         rotors = self.rotor_params * self.even_mask
-        norm_sq = geometric_product(rotors, reverse(rotors))[..., :1].abs().clamp_min(1e-8)
+        norm_sq = (
+            geometric_product(rotors, reverse(rotors))[..., :1].abs().clamp_min(1e-8)
+        )
         return rotors / torch.sqrt(norm_sq)
 
     def value(self, rotor_idx: int | torch.Tensor = 0) -> torch.Tensor:
@@ -68,22 +72,30 @@ class DomainRotor(nn.Module):
             return selected.reshape(*idx.shape, self.heads, self.blade_count)
         return reverse(rotors[int(rotor_idx)])
 
-    def _expand_like(self, rotor: torch.Tensor, multivector: torch.Tensor) -> torch.Tensor:
+    def _expand_like(
+        self, rotor: torch.Tensor, multivector: torch.Tensor
+    ) -> torch.Tensor:
         while rotor.dim() < multivector.dim():
             rotor = rotor.unsqueeze(-3)
         return rotor.expand_as(multivector)
 
-    def sandwich(self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0) -> torch.Tensor:
+    def sandwich(
+        self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0
+    ) -> torch.Tensor:
         rotor = self._expand_like(self.value(rotor_idx), multivector)
         rotor_inv = self._expand_like(self.inverse(rotor_idx), multivector)
         return geometric_product(geometric_product(rotor, multivector), rotor_inv)
 
-    def inverse_sandwich(self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0) -> torch.Tensor:
+    def inverse_sandwich(
+        self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0
+    ) -> torch.Tensor:
         rotor = self._expand_like(self.value(rotor_idx), multivector)
         rotor_inv = self._expand_like(self.inverse(rotor_idx), multivector)
         return geometric_product(geometric_product(rotor_inv, multivector), rotor)
 
-    def forward(self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0) -> torch.Tensor:
+    def forward(
+        self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0
+    ) -> torch.Tensor:
         return self.sandwich(multivector, rotor_idx)
 
 
@@ -132,7 +144,9 @@ class GatedFusion(nn.Module):
         return_gate: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         B, T, _, _ = transformed.shape
-        mv_hidden = self.mv_to_hidden(transformed.reshape(B, T, self.heads * self.blade_count))
+        mv_hidden = self.mv_to_hidden(
+            transformed.reshape(B, T, self.heads * self.blade_count)
+        )
         gate = torch.sigmoid(self.gate_hidden(hidden_states) + self.gate_mv(mv_hidden))
         fused = hidden_states + mv_hidden
         output = gate * fused + (1.0 - gate) * hidden_states
@@ -224,7 +238,14 @@ class DelayedHDIM(HDIMFull):
         use_hdim_cross_domain: bool = True,
         grades: GradeConfig | None = None,
     ):
-        super().__init__(hidden_size, heads, num_rotors, blade_count, use_hdim_cross_domain=use_hdim_cross_domain, grades=grades)
+        super().__init__(
+            hidden_size,
+            heads,
+            num_rotors,
+            blade_count,
+            use_hdim_cross_domain=use_hdim_cross_domain,
+            grades=grades,
+        )
         self.delay_steps = delay_steps
         self._buffer_sum: torch.Tensor | None = None
         self._buffer_count: int = 0
@@ -247,7 +268,9 @@ class DelayedHDIM(HDIMFull):
         total_steps: int | None = None,
     ) -> torch.Tensor | dict[str, torch.Tensor | None]:
         if not self.training or self.delay_steps <= 1 or delay_step is None:
-            return super().forward(hidden_states, src_rotor_idx, tgt_rotor_idx, return_state)
+            return super().forward(
+                hidden_states, src_rotor_idx, tgt_rotor_idx, return_state
+            )
 
         if delay_step == 0:
             self.reset_buffer(total_steps)

@@ -92,7 +92,9 @@ def _get_struct(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     return _STRUCT_CACHE[key]
 
 
-def _get_grade_mask(device: torch.device, dtype: torch.dtype, grade: int) -> torch.Tensor:
+def _get_grade_mask(
+    device: torch.device, dtype: torch.dtype, grade: int
+) -> torch.Tensor:
     key = (device, dtype, grade)
     if key not in _GRADE_MASK_CACHE:
         _GRADE_MASK_CACHE[key] = torch.tensor(
@@ -148,10 +150,15 @@ def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
     Triton kernel when CUDA is available; fused einsum fallback otherwise.
     """
-    assert x.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
-    assert y.shape[-1] == BLADE_COUNT, f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
+    assert (
+        x.shape[-1] == BLADE_COUNT
+    ), f"expected last dim {BLADE_COUNT}, got {x.shape[-1]}"
+    assert (
+        y.shape[-1] == BLADE_COUNT
+    ), f"expected last dim {BLADE_COUNT}, got {y.shape[-1]}"
 
     from .triton_kernels import geometric_product_triton
+
     c = _get_struct(x.device, x.dtype)
     return geometric_product_triton(x, y, c)
 

@@ -4,6 +4,7 @@ Supports Windows (triton-windows 3.0+), CUDA-only execution, and
 fp16 / bf16 / fp32. All kernels fall back to pure PyTorch when Triton
 is unavailable or the device is not CUDA.
 """
+
 # pyright: reportInvalidTypeForm=false, reportOptionalMemberAccess=false
 
 from __future__ import annotations
@@ -98,13 +99,21 @@ if _triton_available:
             tl.store(out_ptr + c, out_c.to(out_dtype))
 
 
-def _geometric_product_torch(x: torch.Tensor, y: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+def _geometric_product_torch(
+    x: torch.Tensor, y: torch.Tensor, table: torch.Tensor
+) -> torch.Tensor:
     """Reference PyTorch implementation."""
-    table = table if table.device == x.device and table.dtype == x.dtype else table.to(x.device, x.dtype)
+    table = (
+        table
+        if table.device == x.device and table.dtype == x.dtype
+        else table.to(x.device, x.dtype)
+    )
     return torch.einsum("cab,...a,...b->...c", table, x, y)
 
 
-def geometric_product_triton(x: torch.Tensor, y: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+def geometric_product_triton(
+    x: torch.Tensor, y: torch.Tensor, table: torch.Tensor
+) -> torch.Tensor:
     """Geometric product via Triton (Clifford algebra).
 
     Args:
@@ -135,7 +144,10 @@ def geometric_product_triton(x: torch.Tensor, y: torch.Tensor, table: torch.Tens
     block = max(_triton.next_power_of_2(blade_count), 16)
     grid = (batch,)
     _geometric_product_kernel[grid](
-        x, y, table, out,
+        x,
+        y,
+        table,
+        out,
         x.stride(0),
         BLOCK=block,
         BLADE_COUNT=blade_count,
@@ -147,6 +159,7 @@ def geometric_product_triton(x: torch.Tensor, y: torch.Tensor, table: torch.Tens
 # 2. Sparse Attention kernel (flash-attention-like)
 # ---------------------------------------------------------------------------
 if _triton_available:
+
     @_triton.jit
     def _sparse_attention_fwd_kernel(  # type: ignore
         q_ptr,
@@ -305,9 +318,13 @@ def _sparse_attention_torch(
                 attn_mask = causal[None, :, :] & mask[:, None, :, :]
             elif mask.dim() == 4:
                 attn_mask = causal[None, None, :, :] & mask
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, is_causal=False
+        )
     else:
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=is_causal)
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, is_causal=is_causal
+        )
     return out
 
 
@@ -423,6 +440,7 @@ def sparse_attention_triton(
 # 3. RMSNorm kernel
 # ---------------------------------------------------------------------------
 if _triton_available:
+
     @_triton.jit
     def _rmsnorm_kernel(  # type: ignore
         x_ptr,
@@ -455,7 +473,9 @@ def _rmsnorm_torch(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.T
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight
 
 
-def rmsnorm_triton(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def rmsnorm_triton(
+    x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
     """Fused RMSNorm via Triton.
 
     Args:

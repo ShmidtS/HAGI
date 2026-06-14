@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 try:
     import typer
 except ImportError:  # pragma: no cover - dependency fallback
@@ -25,7 +26,11 @@ def _load_state_dict(checkpoint: Path, device: str) -> tuple[dict, dict]:
     state = torch.load(model_pt, map_location=device, weights_only=True)
     # Flat checkpoints wrap weights under {"model": ...}; sharded dirs store
     # a raw state_dict at the top level.
-    if isinstance(state, dict) and "model" in state and isinstance(state["model"], dict):
+    if (
+        isinstance(state, dict)
+        and "model" in state
+        and isinstance(state["model"], dict)
+    ):
         aux = state
         state_dict = state["model"]
     else:
@@ -40,13 +45,29 @@ def _load_model(checkpoint: Path, config: Path, device: str) -> HAGI:
     state_dict, state = _load_state_dict(checkpoint, device)
     model.load_state_dict(state_dict)
     # Load MSA and NARS states if present
-    if hasattr(model, "msa_registry") and model.msa_registry is not None and "msa_registry" in state:
+    if (
+        hasattr(model, "msa_registry")
+        and model.msa_registry is not None
+        and "msa_registry" in state
+    ):
         model.msa_registry.load_state_dict(state["msa_registry"])
-    if hasattr(model, "nars_hrm") and model.nars_hrm is not None and "nars_hrm" in state:
+    if (
+        hasattr(model, "nars_hrm")
+        and model.nars_hrm is not None
+        and "nars_hrm" in state
+    ):
         model.nars_hrm.load_state_dict(state["nars_hrm"])
-    if hasattr(model, "nars_hdim") and model.nars_hdim is not None and "nars_hdim" in state:
+    if (
+        hasattr(model, "nars_hdim")
+        and model.nars_hdim is not None
+        and "nars_hdim" in state
+    ):
         model.nars_hdim.load_state_dict(state["nars_hdim"])
-    if hasattr(model, "nars_msa") and model.nars_msa is not None and "nars_msa" in state:
+    if (
+        hasattr(model, "nars_msa")
+        and model.nars_msa is not None
+        and "nars_msa" in state
+    ):
         model.nars_msa.load_state_dict(state["nars_msa"])
     model.to(device)
     model.eval()

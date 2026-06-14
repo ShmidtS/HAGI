@@ -32,7 +32,9 @@ except Exception:
     _zeropower_jit = None
 
 
-def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
+def zeropower_via_newtonschulz5(
+    G: torch.Tensor, steps: int = 5, eps: float = 1e-7
+) -> torch.Tensor:
     """Approximate orthogonalization of a 2D matrix via quintic Newton-Schulz."""
     assert G.ndim == 2, "Muon orthogonalization expects a 2D matrix"
     fn = _zeropower_jit if _zeropower_jit is not None else _zeropower_impl
@@ -63,7 +65,9 @@ except Exception:
     _zeropower_batched_jit = None
 
 
-def zeropower_via_newtonschulz5_batched(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
+def zeropower_via_newtonschulz5_batched(
+    G: torch.Tensor, steps: int = 5, eps: float = 1e-7
+) -> torch.Tensor:
     """Batched quintic Newton-Schulz over a [B, M, N] stack of matrices.
 
     Numerically equivalent to running zeropower_via_newtonschulz5 per matrix,
@@ -71,15 +75,25 @@ def zeropower_via_newtonschulz5_batched(G: torch.Tensor, steps: int = 5, eps: fl
     less kernel-launch overhead for many small same-shape parameters.
     """
     assert G.ndim == 3, "batched Muon orthogonalization expects [B, M, N]"
-    fn = _zeropower_batched_jit if _zeropower_batched_jit is not None else _zeropower_batched_impl
+    fn = (
+        _zeropower_batched_jit
+        if _zeropower_batched_jit is not None
+        else _zeropower_batched_impl
+    )
     return fn(G, steps, eps)
 
 
 class Muon(torch.optim.Optimizer):
     """Momentum SGD with per-step orthogonalization of 2D updates."""
 
-    def __init__(self, params, lr: float = 0.02, momentum: float = 0.95,
-                 nesterov: bool = True, ns_steps: int = 5):
+    def __init__(
+        self,
+        params,
+        lr: float = 0.02,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_steps: int = 5,
+    ):
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
         super().__init__(params, defaults)
 
@@ -119,7 +133,9 @@ class Muon(torch.optim.Optimizer):
                     ortho = zeropower_via_newtonschulz5_batched(stacked, ns_steps)
                     p0 = params[0]
                     scale = min(max(1.0, p0.size(0) / p0.size(1)) ** 0.5, 2.0)
-                    torch._foreach_add_(params, list(ortho.type_as(p0).unbind(0)), alpha=-lr * scale)
+                    torch._foreach_add_(
+                        params, list(ortho.type_as(p0).unbind(0)), alpha=-lr * scale
+                    )
                 else:
                     for p, update in zip(params, updates):
                         update = zeropower_via_newtonschulz5(update, ns_steps)
@@ -154,7 +170,9 @@ class ScheduleFreeAdamW(torch.optim.Optimizer):
         weight_decay: float = 0.1,
         avg_decay: float = 0.999,
     ):
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, avg_decay=avg_decay)
+        defaults = dict(
+            lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, avg_decay=avg_decay
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -191,8 +209,8 @@ class ScheduleFreeAdamW(torch.optim.Optimizer):
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                bias_correction1 = 1 - beta1 ** step
-                bias_correction2 = 1 - beta2 ** step
+                bias_correction1 = 1 - beta1**step
+                bias_correction2 = 1 - beta2**step
                 denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
                 step_size = lr / bias_correction1
                 p.addcdiv_(exp_avg, denom, value=-step_size)
@@ -230,7 +248,13 @@ class AdamMini(torch.optim.Optimizer):
         weight_decay: float = 0.0,
         block_size: int = 128,
     ):
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, block_size=block_size)
+        defaults = dict(
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+            block_size=block_size,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -265,8 +289,8 @@ class AdamMini(torch.optim.Optimizer):
                     m.mul_(beta1).add_(g, alpha=1 - beta1)
                     v.mul_(beta2).addcmul_(g, g, value=1 - beta2)
 
-                    bias_corr1 = 1 - beta1 ** step
-                    bias_corr2 = 1 - beta2 ** step
+                    bias_corr1 = 1 - beta1**step
+                    bias_corr2 = 1 - beta2**step
                     m_hat = m / bias_corr1
                     v_hat = v / bias_corr2
                     p.add_(m_hat / (v_hat.sqrt() + eps), alpha=-lr)
@@ -279,8 +303,12 @@ class AdamMini(torch.optim.Optimizer):
 
                     if len(state) == 0:
                         state["step"] = 0
-                        state["m"] = torch.zeros(num_blocks, in_dim, dtype=p.dtype, device=p.device)
-                        state["v"] = torch.zeros(num_blocks, in_dim, dtype=p.dtype, device=p.device)
+                        state["m"] = torch.zeros(
+                            num_blocks, in_dim, dtype=p.dtype, device=p.device
+                        )
+                        state["v"] = torch.zeros(
+                            num_blocks, in_dim, dtype=p.dtype, device=p.device
+                        )
 
                     m = state["m"]
                     v = state["v"]
@@ -288,7 +316,9 @@ class AdamMini(torch.optim.Optimizer):
                     step = state["step"]
 
                     # Per-block mean gradient
-                    g_mean = torch.zeros(num_blocks, in_dim, dtype=g2d.dtype, device=g2d.device)
+                    g_mean = torch.zeros(
+                        num_blocks, in_dim, dtype=g2d.dtype, device=g2d.device
+                    )
                     for b in range(num_blocks):
                         start = b * block_size
                         end = min((b + 1) * block_size, out_dim)
@@ -300,8 +330,8 @@ class AdamMini(torch.optim.Optimizer):
                     m.mul_(beta1).add_(g_mean, alpha=1 - beta1)
                     v.mul_(beta2).addcmul_(g_mean, g_mean, value=1 - beta2)
 
-                    bias_corr1 = 1 - beta1 ** step
-                    bias_corr2 = 1 - beta2 ** step
+                    bias_corr1 = 1 - beta1**step
+                    bias_corr2 = 1 - beta2**step
                     m_hat = m / bias_corr1
                     v_hat = v / bias_corr2
 
@@ -335,7 +365,9 @@ class AdEMAMix(torch.optim.Optimizer):
         eps: float = 1e-8,
         weight_decay: float = 0.1,
     ):
-        defaults = dict(lr=lr, betas=betas, alpha=alpha, eps=eps, weight_decay=weight_decay)
+        defaults = dict(
+            lr=lr, betas=betas, alpha=alpha, eps=eps, weight_decay=weight_decay
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -372,8 +404,8 @@ class AdEMAMix(torch.optim.Optimizer):
                 v.mul_(beta2).addcmul_(g, g, value=1 - beta2)
 
                 m_mix = alpha * m_fast + (1 - alpha) * m_slow
-                bias_corr1 = 1 - beta1 ** step
-                bias_corr2 = 1 - beta2 ** step
+                bias_corr1 = 1 - beta1**step
+                bias_corr2 = 1 - beta2**step
                 m_hat = m_mix / bias_corr1
                 v_hat = v / bias_corr2
                 p.add_(m_hat / (v_hat.sqrt() + eps), alpha=-lr)
@@ -406,20 +438,34 @@ class CombinedOptimizer(torch.optim.Optimizer):
         for i, opt in enumerate(self.optimizers):
             key = f"opt_{i}"
             if key not in state_dict:
-                raise KeyError(f"CombinedOptimizer.load_state_dict: missing key {key!r}")
+                raise KeyError(
+                    f"CombinedOptimizer.load_state_dict: missing key {key!r}"
+                )
             opt.load_state_dict(state_dict[key])
 
 
-def _build_muon_ademamix(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]) -> "CombinedOptimizer":
+def _build_muon_ademamix(
+    named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]
+) -> "CombinedOptimizer":
     """Muon on 2D hidden weights + AdEMAMix on 1D/embed/head (replaces AdamW + separate EMA)."""
     adamw_lr = float(cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
     wd = float(cfg.get("weight_decay", 0.1))
-    betas_cfg = cast(tuple[float, float, float], tuple(cfg.get("betas", (0.9, 0.999, 0.9999))))
+    betas_cfg = cast(
+        tuple[float, float, float], tuple(cfg.get("betas", (0.9, 0.999, 0.9999)))
+    )
     eps = float(cfg.get("eps", 1e-8))
     alpha = float(cfg.get("ademamix_alpha", 0.5))
     muon_params = [p for n, p in named if _is_muon_param(n, p)]
-    adam_decay = [p for n, p in named if not _is_muon_param(n, p) and p.ndim >= 2 and "norm" not in n.lower()]
-    adam_no_decay = [p for n, p in named if not _is_muon_param(n, p) and not (p.ndim >= 2 and "norm" not in n.lower())]
+    adam_decay = [
+        p
+        for n, p in named
+        if not _is_muon_param(n, p) and p.ndim >= 2 and "norm" not in n.lower()
+    ]
+    adam_no_decay = [
+        p
+        for n, p in named
+        if not _is_muon_param(n, p) and not (p.ndim >= 2 and "norm" not in n.lower())
+    ]
     muon = Muon(
         muon_params,
         lr=float(cfg.get("muon_lr", 0.02)),
@@ -439,15 +485,25 @@ def _build_muon_ademamix(named: list[tuple[str, nn.Parameter]], cfg: dict[str, A
     return CombinedOptimizer([muon, ademamix])
 
 
-def _build_muon_adamw(named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]) -> "CombinedOptimizer":
+def _build_muon_adamw(
+    named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]
+) -> "CombinedOptimizer":
     """Muon on 2D hidden weights + AdamW on 1D/embed/head. arch_decision §Optimizer."""
     adamw_lr = float(cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
     wd = float(cfg.get("weight_decay", 0.1))
     betas_cfg = cast(tuple[float, float], tuple(cfg.get("betas", (0.9, 0.95))))
     eps = float(cfg.get("eps", 1e-8))
     muon_params = [p for n, p in named if _is_muon_param(n, p)]
-    adam_decay = [p for n, p in named if not _is_muon_param(n, p) and p.ndim >= 2 and "norm" not in n.lower()]
-    adam_no_decay = [p for n, p in named if not _is_muon_param(n, p) and not (p.ndim >= 2 and "norm" not in n.lower())]
+    adam_decay = [
+        p
+        for n, p in named
+        if not _is_muon_param(n, p) and p.ndim >= 2 and "norm" not in n.lower()
+    ]
+    adam_no_decay = [
+        p
+        for n, p in named
+        if not _is_muon_param(n, p) and not (p.ndim >= 2 and "norm" not in n.lower())
+    ]
     muon = Muon(
         muon_params,
         lr=float(cfg.get("muon_lr", 0.02)),
@@ -486,38 +542,50 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
 
     if kind == "adamw":
         decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
-        no_decay = [p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())]
+        no_decay = [
+            p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())
+        ]
         return torch.optim.AdamW(
             [
                 {"params": decay, "weight_decay": wd},
                 {"params": no_decay, "weight_decay": 0.0},
             ],
-            lr=lr, betas=betas_cfg, eps=eps,
+            lr=lr,
+            betas=betas_cfg,
+            eps=eps,
             fused=True,
             capturable=True,
         )
 
     if kind == "schedule-free-adamw":
         decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
-        no_decay = [p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())]
+        no_decay = [
+            p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())
+        ]
         return ScheduleFreeAdamW(
             [
                 {"params": decay, "weight_decay": wd},
                 {"params": no_decay, "weight_decay": 0.0},
             ],
-            lr=lr, betas=betas_cfg, eps=eps,
+            lr=lr,
+            betas=betas_cfg,
+            eps=eps,
             avg_decay=cfg.get("schedule_free_avg_decay", 0.999),
         )
 
     if kind == "adam-mini":
         decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
-        no_decay = [p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())]
+        no_decay = [
+            p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())
+        ]
         return AdamMini(
             [
                 {"params": decay, "weight_decay": wd},
                 {"params": no_decay, "weight_decay": 0.0},
             ],
-            lr=lr, betas=betas_cfg, eps=eps,
+            lr=lr,
+            betas=betas_cfg,
+            eps=eps,
             block_size=cfg.get("adam_mini_block_size", 128),
         )
 
@@ -527,12 +595,22 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
         except ImportError:
             raise ImportError("bitsandbytes not installed. `pip install bitsandbytes`.")
         decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
-        no_decay = [p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())]
-        cls = bnb.optim.PagedAdamW8bit if kind.startswith("paged") else bnb.optim.AdamW8bit
+        no_decay = [
+            p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())
+        ]
+        cls = (
+            bnb.optim.PagedAdamW8bit
+            if kind.startswith("paged")
+            else bnb.optim.AdamW8bit
+        )
         return cls(
-            [{"params": decay, "weight_decay": wd},
-             {"params": no_decay, "weight_decay": 0.0}],
-            lr=lr, betas=betas_cfg, eps=eps,
+            [
+                {"params": decay, "weight_decay": wd},
+                {"params": no_decay, "weight_decay": 0.0},
+            ],
+            lr=lr,
+            betas=betas_cfg,
+            eps=eps,
         )
 
     raise ValueError(

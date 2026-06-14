@@ -24,6 +24,7 @@ import torch.nn.functional as F
 try:
     from lm_eval.api.model import LM
     from lm_eval.api.registry import register_model
+
     _LM_EVAL_AVAILABLE = True
 except ImportError:  # allow import without lm-eval installed
     _LM_EVAL_AVAILABLE = False
@@ -50,8 +51,14 @@ def load_tokenizer(name: str):
 
 @register_model("hagi")
 class HAGILMEval(LM):  # type: ignore[misc]
-    def __init__(self, ckpt: str, tokenizer: str = DEFAULT_TOKENIZER,
-                 device: str = "cuda", max_length: int = 4096, **kwargs):
+    def __init__(
+        self,
+        ckpt: str,
+        tokenizer: str = DEFAULT_TOKENIZER,
+        device: str = "cuda",
+        max_length: int = 4096,
+        **kwargs,
+    ):
         super().__init__()
         if not _LM_EVAL_AVAILABLE:
             raise ImportError("lm-eval not installed. `pip install lm-eval`.")
@@ -74,7 +81,7 @@ class HAGILMEval(LM):  # type: ignore[misc]
             context, continuation = req.args
             ctx_ids = self.tok_encode(context)
             cont_ids = self.tok_encode(continuation)
-            full = (ctx_ids + cont_ids)[-self.max_length:]
+            full = (ctx_ids + cont_ids)[-self.max_length :]
             x = torch.tensor([full[:-1]], device=self.device)
             logits = self.model(x)  # [1, T, V]
             logprobs = F.log_softmax(logits.float(), dim=-1)[0]
@@ -112,11 +119,15 @@ class HAGILMEval(LM):  # type: ignore[misc]
         for req in requests:
             context, gen_kwargs = req.args
             stops = gen_kwargs.get("until", []) if isinstance(gen_kwargs, dict) else []
-            max_gen = gen_kwargs.get("max_gen_toks", 256) if isinstance(gen_kwargs, dict) else 256
-            ids = self.tok_encode(context)[-self.max_length:]
+            max_gen = (
+                gen_kwargs.get("max_gen_toks", 256)
+                if isinstance(gen_kwargs, dict)
+                else 256
+            )
+            ids = self.tok_encode(context)[-self.max_length :]
             generated = []
             for _ in range(max_gen):
-                x = torch.tensor([ids[-self.max_length:]], device=self.device)
+                x = torch.tensor([ids[-self.max_length :]], device=self.device)
                 logits = self.model(x)
                 nxt = int(logits[0, -1].argmax().item())
                 ids.append(nxt)

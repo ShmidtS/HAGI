@@ -21,6 +21,7 @@ def _as_long_tensor(values: Any) -> Any:
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     import yaml
+
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):

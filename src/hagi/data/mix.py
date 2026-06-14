@@ -7,13 +7,17 @@ import numpy as np
 
 try:
     import torch
-    from torch.utils.data import DataLoader as _TorchDataLoader, Dataset as _TorchDataset
+    from torch.utils.data import (
+        DataLoader as _TorchDataLoader,
+        Dataset as _TorchDataset,
+    )
 except ImportError:  # pragma: no cover - torch is required for DataLoader use
     torch = None  # type: ignore[assignment]
     DataLoader = None  # type: ignore[assignment]
 
     class Dataset:  # type: ignore[no-redef]
         pass
+
 else:
     DataLoader = cast(Any, _TorchDataLoader)
     Dataset = cast(Any, _TorchDataset)
@@ -58,7 +62,9 @@ class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
             arrays.append(array)
             weights.append(weight)
         total = sum(weights)
-        self.weights = np.asarray([weight / total for weight in weights], dtype=np.float64)
+        self.weights = np.asarray(
+            [weight / total for weight in weights], dtype=np.float64
+        )
         self._total_length = sum(length - self.seq_len for length in self._lengths)
         self._arrays = arrays
 
@@ -74,7 +80,9 @@ class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
     def __len__(self) -> int:
         return self._total_length
 
-    def __getitem__(self, index: int) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    def __getitem__(
+        self, index: int
+    ) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
         if index < 0 or index >= len(self):
             raise IndexError(index)
         rng = np.random.default_rng(self.seed + int(index))
@@ -112,7 +120,9 @@ def get_mixed_memmap_dataloader(
 ) -> Any:
     if torch is None or DataLoader is None:
         raise ImportError("torch is required for get_mixed_memmap_dataloader")
-    dataset = WeightedMemmapDataset(mix, seq_len=seq_len, dtype=dtype, seed=seed, preload=preload)
+    dataset = WeightedMemmapDataset(
+        mix, seq_len=seq_len, dtype=dtype, seed=seed, preload=preload
+    )
     kwargs: dict[str, Any] = {
         "batch_size": batch_size,
         "shuffle": False,

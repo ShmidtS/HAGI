@@ -25,7 +25,9 @@ def save_sharded_checkpoint(
     torch.save(model.state_dict(), path / "model.pt")
     torch.save(optimizer.state_dict(), path / "optimizer.pt")
     if ema is not None:
-        ema_state = {name: value.detach().cpu() for name, value in ema.state_dict().items()}
+        ema_state = {
+            name: value.detach().cpu() for name, value in ema.state_dict().items()
+        }
         torch.save(ema_state, path / "ema.pt")
     meta: dict[str, Any] = {}
     if step is not None:

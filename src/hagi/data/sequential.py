@@ -8,7 +8,12 @@ from typing import Any, cast
 import numpy as np
 
 try:
-    from torch.utils.data import DataLoader, Dataset as _TorchDataset, Sampler as _TorchSampler
+    from torch.utils.data import (
+        DataLoader,
+        Dataset as _TorchDataset,
+        Sampler as _TorchSampler,
+    )
+
     Dataset = cast(Any, _TorchDataset)
     Sampler = cast(Any, _TorchSampler)
 except ImportError:
@@ -26,6 +31,7 @@ def _shift_collate(batch: list[Any]) -> tuple[Any, Any]:
     x = array[:, :-1]
     y = array[:, 1:]
     from hagi.utils import _as_long_tensor
+
     return _as_long_tensor(x), _as_long_tensor(y)
 
 
@@ -124,9 +130,12 @@ class SequentialCyclingIterator:
 
     def _make_loader(self, path: str | Path, seed: int = 0) -> Any:
         from hagi.data.dataloader import MemmapDataset
+
         path_key = str(path)
         if path_key not in self._dataset_cache:
-            self._dataset_cache[path_key] = MemmapDataset(path, seq_len=self.seq_len, dtype=self.dtype, preload=True)
+            self._dataset_cache[path_key] = MemmapDataset(
+                path, seq_len=self.seq_len, dtype=self.dtype, preload=True
+            )
         base = self._dataset_cache[path_key]
         cache_key = (self.current_idx, self.current_cycle)
         if cache_key in self._loader_cache:
@@ -177,4 +186,6 @@ class SequentialCyclingIterator:
         name = entry.get("name", f"dataset_{self.current_idx}")
         seed = self.current_idx * 1000 + self.current_cycle
         self._current_iter = iter(self._make_loader(path, seed))
-        print(f"[SequentialCycling] {name} (cycle {self.current_cycle + 1}/{self.cycles_per_dataset})")
+        print(
+            f"[SequentialCycling] {name} (cycle {self.current_cycle + 1}/{self.cycles_per_dataset})"
+        )

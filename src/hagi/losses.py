@@ -37,7 +37,9 @@ def _cross_entropy_impl(
     for i in range(0, logits.size(0), chunk_size):
         lg = logits[i : i + chunk_size]
         tg = targets[i : i + chunk_size]
-        total = total + F.cross_entropy(lg, tg, ignore_index=ignore_index, reduction="sum")
+        total = total + F.cross_entropy(
+            lg, tg, ignore_index=ignore_index, reduction="sum"
+        )
     return total / valid
 
 
@@ -54,7 +56,11 @@ def cross_entropy_loss(
     ignore_index: int = -100,
     chunk_size: int = 0,
 ) -> torch.Tensor:
-    fn = _cross_entropy_compiled if logits.is_cuda and _cross_entropy_compiled is not None else _cross_entropy_impl
+    fn = (
+        _cross_entropy_compiled
+        if logits.is_cuda and _cross_entropy_compiled is not None
+        else _cross_entropy_impl
+    )
     return fn(logits, targets, ignore_index, chunk_size)
 
 
@@ -84,9 +90,13 @@ def fused_linear_cross_entropy(
 
     def _chunk_loss(h_chunk: torch.Tensor, t_chunk: torch.Tensor) -> torch.Tensor:
         logits = F.linear(h_chunk, weight)
-        return F.cross_entropy(logits.float(), t_chunk, ignore_index=ignore_index, reduction="sum")
+        return F.cross_entropy(
+            logits.float(), t_chunk, ignore_index=ignore_index, reduction="sum"
+        )
 
-    needs_grad = torch.is_grad_enabled() and (flat_h.requires_grad or weight.requires_grad)
+    needs_grad = torch.is_grad_enabled() and (
+        flat_h.requires_grad or weight.requires_grad
+    )
     total = flat_h.new_zeros((), dtype=torch.float32)
     for i in range(0, flat_h.size(0), chunk_size):
         h_c = flat_h[i : i + chunk_size]
@@ -174,7 +184,9 @@ def _as_logits(output: torch.Tensor | tuple[Any, ...] | dict[str, Any]) -> torch
     raise TypeError("model output must be a tensor, tuple, or dict")
 
 
-def _model_output_tensor(model_output: torch.Tensor | dict[str, Any] | None) -> torch.Tensor | None:
+def _model_output_tensor(
+    model_output: torch.Tensor | dict[str, Any] | None,
+) -> torch.Tensor | None:
     if model_output is None:
         return None
     if isinstance(model_output, torch.Tensor):
@@ -219,7 +231,9 @@ def compute_isomorphic_loss(
             return F.mse_loss(src, tgt)
         return torch.tensor(0.0)
 
-    if isinstance(invariant_src, torch.Tensor) and isinstance(invariant_tgt, torch.Tensor):
+    if isinstance(invariant_src, torch.Tensor) and isinstance(
+        invariant_tgt, torch.Tensor
+    ):
         return F.mse_loss(invariant_src, invariant_tgt)
     if isinstance(invariant_src, torch.Tensor):
         return invariant_src.new_zeros(())
@@ -241,7 +255,11 @@ def composite_loss(
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
     # Pick a reference tensor for device/dtype when logits is None (fused CE path)
-    ref_tensor = logits if logits is not None else (precomputed_loss if precomputed_loss is not None else targets)
+    ref_tensor = (
+        logits
+        if logits is not None
+        else (precomputed_loss if precomputed_loss is not None else targets)
+    )
 
     if (
         isinstance(auxiliary_output, torch.Tensor)
@@ -281,15 +299,24 @@ def composite_loss(
     if merged_weights.get("w_aux", 0.0) != 0.0 and auxiliary_output is not None:
         # If auxiliary_output is a dict containing nested "auxiliary_output", unwrap it
         aux_payload = auxiliary_output
-        if isinstance(auxiliary_output, dict) and "auxiliary_output" in auxiliary_output:
+        if (
+            isinstance(auxiliary_output, dict)
+            and "auxiliary_output" in auxiliary_output
+        ):
             aux_payload = auxiliary_output["auxiliary_output"]
-        l_aux = compute_auxiliary_loss(aux_payload).to(device=ref_tensor.device, dtype=ref_tensor.dtype)
+        l_aux = compute_auxiliary_loss(aux_payload).to(
+            device=ref_tensor.device, dtype=ref_tensor.dtype
+        )
         l_total = l_total + merged_weights["w_aux"] * l_aux
         result["L_aux"] = l_aux
     else:
         result["L_aux"] = l_ce.new_zeros(())
-    if merged_weights.get("w_iso", 0.0) != 0.0 and (invariant_src is not None or invariant_tgt is not None):
-        l_iso = compute_isomorphic_loss(invariant_src, invariant_tgt).to(device=ref_tensor.device, dtype=ref_tensor.dtype)
+    if merged_weights.get("w_iso", 0.0) != 0.0 and (
+        invariant_src is not None or invariant_tgt is not None
+    ):
+        l_iso = compute_isomorphic_loss(invariant_src, invariant_tgt).to(
+            device=ref_tensor.device, dtype=ref_tensor.dtype
+        )
         l_total = l_total + merged_weights["w_iso"] * l_iso
         result["L_iso"] = l_iso
     else:

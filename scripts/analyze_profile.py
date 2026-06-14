@@ -1,4 +1,5 @@
 """Analyze PyTorch profiler trace and print top ops by GPU time."""
+
 import json
 import sys
 from pathlib import Path
@@ -54,16 +55,24 @@ def analyze_trace(path: Path):
     sorted_cuda = sorted(cuda_ops.items(), key=lambda x: x[1]["total_us"], reverse=True)
     for name, stats in sorted_cuda[:20]:
         pct = 100 * stats["total_us"] / max(total_cuda_us, 1)
-        print(f"  {stats['total_us']/1000:.1f}ms ({pct:.1f}%) {stats['count']}x | {name[:80]}")
+        print(
+            f"  {stats['total_us']/1000:.1f}ms ({pct:.1f}%) {stats['count']}x | {name[:80]}"
+        )
 
     print("\n--- Top 20 CPU ops by time ---")
     sorted_cpu = sorted(cpu_ops.items(), key=lambda x: x[1]["total_us"], reverse=True)
     for name, stats in sorted_cpu[:20]:
         pct = 100 * stats["total_us"] / max(total_cpu_us, 1)
-        print(f"  {stats['total_us']/1000:.1f}ms ({pct:.1f}%) {stats['count']}x | {name[:80]}")
+        print(
+            f"  {stats['total_us']/1000:.1f}ms ({pct:.1f}%) {stats['count']}x | {name[:80]}"
+        )
 
     # Memory stats if available
-    mem_events = [e for e in trace_events if e.get("ph") == "i" and "memory" in e.get("name", "").lower()]
+    mem_events = [
+        e
+        for e in trace_events
+        if e.get("ph") == "i" and "memory" in e.get("name", "").lower()
+    ]
     if mem_events:
         print(f"\nMemory events: {len(mem_events)}")
 
@@ -76,4 +85,4 @@ if __name__ == "__main__":
         sys.exit(1)
     for trace in traces:
         analyze_trace(trace)
-        print("\n" + "="*60 + "\n")
+        print("\n" + "=" * 60 + "\n")

@@ -45,7 +45,9 @@ class GradeConfig:
 
     @property
     def hidden_size(self) -> int:
-        return self.scalar + self.vector + self.bivector + self.trivector + self.residual
+        return (
+            self.scalar + self.vector + self.bivector + self.trivector + self.residual
+        )
 
     @property
     def bounds(self) -> list[int]:
@@ -104,7 +106,9 @@ class GradeDecomposedRecurrence(nn.Module):
         del self.gate_scalar, self.gate_bivector
 
         def _mk(out_dim: int) -> nn.Sequential:
-            return nn.Sequential(nn.Linear(ctx, ctx), nn.SiLU(), nn.Linear(ctx, out_dim)).to(device=device, dtype=dtype)
+            return nn.Sequential(
+                nn.Linear(ctx, ctx), nn.SiLU(), nn.Linear(ctx, out_dim)
+            ).to(device=device, dtype=dtype)
 
         self.mlp_scalar = _mk(cfg.scalar)
         self.mlp_vector = _mk(cfg.vector)
@@ -115,20 +119,37 @@ class GradeDecomposedRecurrence(nn.Module):
         self.gate_scalar = gate_s
         self.gate_bivector = gate_b
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
         legacy = any(key.startswith(prefix + "mlp_") for key in state_dict)
         if legacy and not hasattr(self, "mlp_scalar"):
             self._build_legacy_mlps()
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def split(self, h: torch.Tensor):
         b = self.cfg.bounds
         return (
-            h[..., b[0]:b[1]],  # scalar
-            h[..., b[1]:b[2]],  # vector
-            h[..., b[2]:b[3]],  # bivector
-            h[..., b[3]:b[4]],  # trivector
-            h[..., b[4]:b[5]],  # residual
+            h[..., b[0] : b[1]],  # scalar
+            h[..., b[1] : b[2]],  # vector
+            h[..., b[2] : b[3]],  # bivector
+            h[..., b[3] : b[4]],  # trivector
+            h[..., b[4] : b[5]],  # residual
         )
 
     def geometric_interaction(self, vector: torch.Tensor):
@@ -145,7 +166,7 @@ class GradeDecomposedRecurrence(nn.Module):
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         scalar, vector, bivector, trivector, residual = self.split(h)
-        graded_ctx = h[..., :self.cfg.bounds[4]]
+        graded_ctx = h[..., : self.cfg.bounds[4]]
 
         if hasattr(self, "mlp_scalar"):
             # Legacy layout (resumed from a pre-fusion checkpoint).
@@ -157,7 +178,12 @@ class GradeDecomposedRecurrence(nn.Module):
             graded = self.grade_head(self.grade_trunk(graded_ctx))
             s_upd, v_upd, b_upd, t_upd = torch.split(
                 graded,
-                [self.cfg.scalar, self.cfg.vector, self.cfg.bivector, self.cfg.trivector],
+                [
+                    self.cfg.scalar,
+                    self.cfg.vector,
+                    self.cfg.bivector,
+                    self.cfg.trivector,
+                ],
                 dim=-1,
             )
 
@@ -171,4 +197,6 @@ class GradeDecomposedRecurrence(nn.Module):
         scalar_new = scalar_new + geo_scalar
         bivector_new = bivector_new + geo_bivector
 
-        return torch.cat([scalar_new, vector_new, bivector_new, trivector_new, residual], dim=-1)
+        return torch.cat(
+            [scalar_new, vector_new, bivector_new, trivector_new, residual], dim=-1
+        )

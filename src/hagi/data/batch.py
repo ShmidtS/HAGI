@@ -29,7 +29,9 @@ def get_batch_memmap(dataset: Any, batch_size: int, seq_len: int) -> tuple[Any, 
     ys = []
     for index in indices:
         if hasattr(dataset, "data"):
-            chunk = np.asarray(dataset.data[index : index + seq_len + 1], dtype=np.int64)
+            chunk = np.asarray(
+                dataset.data[index : index + seq_len + 1], dtype=np.int64
+            )
             xs.append(chunk[:-1])
             ys.append(chunk[1:])
         else:
@@ -71,7 +73,9 @@ def get_memmap_dataloader(
     return DataLoader(cast(Any, dataset), **kwargs)
 
 
-def get_batch_synthetic(vocab_size: int, batch_size: int, seq_len: int) -> tuple[Any, Any]:
+def get_batch_synthetic(
+    vocab_size: int, batch_size: int, seq_len: int
+) -> tuple[Any, Any]:
     if torch is None:
         x = np.random.randint(0, vocab_size, size=(batch_size, seq_len), dtype=np.int64)
         y = np.random.randint(0, vocab_size, size=(batch_size, seq_len), dtype=np.int64)
@@ -79,5 +83,3 @@ def get_batch_synthetic(vocab_size: int, batch_size: int, seq_len: int) -> tuple
     x = torch.randint(vocab_size, (batch_size, seq_len), dtype=torch.long)
     y = torch.randint(vocab_size, (batch_size, seq_len), dtype=torch.long)
     return x, y
-
-

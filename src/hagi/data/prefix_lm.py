@@ -42,7 +42,9 @@ def prefix_lm_mask(prefix_lengths: list[int], total_len: int) -> torch.Tensor:
     return mask
 
 
-def _sample_prefix_lm_mask(sample_len: int, prefix_len: int, max_seq_len: int) -> torch.Tensor:
+def _sample_prefix_lm_mask(
+    sample_len: int, prefix_len: int, max_seq_len: int
+) -> torch.Tensor:
     mask = torch.zeros((max_seq_len, max_seq_len), dtype=torch.bool)
     if sample_len <= 0:
         return mask
@@ -70,7 +72,9 @@ def create_prefix_lm_batch(samples: list[list[int]], max_seq_len: int) -> Prefix
         if sample_len == 0:
             continue
         prefix_len = max(1, sample_len // 2)
-        tokens[index, :sample_len] = torch.as_tensor(sample[:sample_len], dtype=torch.long)
+        tokens[index, :sample_len] = torch.as_tensor(
+            sample[:sample_len], dtype=torch.long
+        )
         mask[index] = _sample_prefix_lm_mask(sample_len, prefix_len, max_seq_len)
         partition[index] = prefix_len
 

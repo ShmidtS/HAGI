@@ -39,7 +39,9 @@ class _DummyTokenizer:
 
 
 class TokenizerWrapper:
-    def __init__(self, model_name: str | None = None, tokenizer: Any | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self, model_name: str | None = None, tokenizer: Any | None = None, **kwargs: Any
+    ) -> None:
         if model_name is not None:
             try:
                 from transformers import AutoTokenizer
@@ -58,7 +60,9 @@ class TokenizerWrapper:
         self.tokenizer = _DummyTokenizer()
 
     @classmethod
-    def smollm2(cls, model_name: str = SMOLLM2_TOKENIZER, **kwargs: Any) -> "TokenizerWrapper":
+    def smollm2(
+        cls, model_name: str = SMOLLM2_TOKENIZER, **kwargs: Any
+    ) -> "TokenizerWrapper":
         return cls(model_name=model_name, **kwargs)
 
     @property
@@ -70,7 +74,10 @@ class TokenizerWrapper:
         return getattr(self.tokenizer, "eos_token_id", None)
 
     def _ensure_padding_token(self) -> None:
-        if getattr(self.tokenizer, "pad_token", None) is None and getattr(self.tokenizer, "eos_token", None) is not None:
+        if (
+            getattr(self.tokenizer, "pad_token", None) is None
+            and getattr(self.tokenizer, "eos_token", None) is not None
+        ):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def __call__(self, texts, **kwargs: Any) -> Any:
@@ -92,7 +99,15 @@ class TokenizerWrapper:
         # FastTokenizer backend (PreTrainedTokenizerFast) exposes ._tokenizer
         fast = getattr(self.tokenizer, "_tokenizer", None)
         if fast is not None:
-            return [enc.ids for enc in fast.encode_batch(texts, add_special_tokens=False)]
+            return [
+                enc.ids for enc in fast.encode_batch(texts, add_special_tokens=False)
+            ]
         # Fallback to slow path
-        out = self.tokenizer(texts, add_special_tokens=False, truncation=True, max_length=8192, padding=False)
+        out = self.tokenizer(
+            texts,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=8192,
+            padding=False,
+        )
         return out["input_ids"]

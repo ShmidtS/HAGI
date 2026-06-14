@@ -57,7 +57,9 @@ def _filter_top_p(logits: Any, top_p: float | None) -> Any:
         sorted_indices_to_remove = cumulative_probs > top_p
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
         sorted_indices_to_remove[..., 0] = False
-        indices_to_remove = sorted_indices_to_remove.scatter(-1, sorted_indices, sorted_indices_to_remove)
+        indices_to_remove = sorted_indices_to_remove.scatter(
+            -1, sorted_indices, sorted_indices_to_remove
+        )
         return logits.masked_fill(indices_to_remove, float("-inf"))
 
     sorted_indices = np.argsort(-logits, axis=-1)
@@ -67,7 +69,12 @@ def _filter_top_p(logits: Any, top_p: float | None) -> Any:
     sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1]
     sorted_indices_to_remove[..., 0] = False
     filtered = np.array(logits, copy=True)
-    np.put_along_axis(filtered, sorted_indices, np.where(sorted_indices_to_remove, -np.inf, sorted_logits), axis=-1)
+    np.put_along_axis(
+        filtered,
+        sorted_indices,
+        np.where(sorted_indices_to_remove, -np.inf, sorted_logits),
+        axis=-1,
+    )
     return filtered
 
 
@@ -112,7 +119,9 @@ def sample_next_token(
         logits = logits[..., -1, :] if logits.ndim == 3 else logits
     if temperature <= 0:
         return np.argmax(logits, axis=-1)
-    probs = _softmax_np(_filter_top_p(_filter_top_k(logits / temperature, top_k), top_p))
+    probs = _softmax_np(
+        _filter_top_p(_filter_top_k(logits / temperature, top_k), top_p)
+    )
     if probs.ndim == 1:
         return np.array(np.random.choice(probs.shape[-1], p=probs))
     return np.array([np.random.choice(probs.shape[-1], p=row) for row in probs])
@@ -129,6 +138,7 @@ def _maybe_compile(model: Any, compile_model: bool) -> Any:
     if not compile_model or torch is None or not hasattr(torch, "compile"):
         return model
     import sys
+
     if sys.platform == "win32":
         return model
     device = _model_device(model)
@@ -153,7 +163,14 @@ def _cache_is_empty(cache: Any) -> bool:
     return getattr(layers[0], "seq_len", None) == 0
 
 
-def _maybe_static_cache(model: Any, generated: Any, max_new_tokens: int, cache: Any, use_cache: bool, use_static_cache: bool) -> Any:
+def _maybe_static_cache(
+    model: Any,
+    generated: Any,
+    max_new_tokens: int,
+    cache: Any,
+    use_cache: bool,
+    use_static_cache: bool,
+) -> Any:
     """Preallocate a static KV cache (write-by-index, no per-step torch.cat)."""
     if cache is not None or not use_static_cache or not use_cache or torch is None:
         return cache
@@ -161,16 +178,24 @@ def _maybe_static_cache(model: Any, generated: Any, max_new_tokens: int, cache: 
         from hagi.model.kv_cache import make_static_cache
     except ImportError:
         return cache
-    layers = make_static_cache(model, generated.size(0), generated.size(1) + max_new_tokens)
+    layers = make_static_cache(
+        model, generated.size(0), generated.size(1) + max_new_tokens
+    )
     if layers is None:
         return cache
     return CacheKeyValues(layers)
 
 
-def _forward(model: Any, input_ids: Any, cache: CacheKeyValues | None, use_cache: bool) -> tuple[Any, CacheKeyValues | None]:
+def _forward(
+    model: Any, input_ids: Any, cache: CacheKeyValues | None, use_cache: bool
+) -> tuple[Any, CacheKeyValues | None]:
     if use_cache:
         try:
-            output = model(input_ids, past_key_values=cache.to_model_cache() if cache is not None else None, use_cache=True)
+            output = model(
+                input_ids,
+                past_key_values=cache.to_model_cache() if cache is not None else None,
+                use_cache=True,
+            )
             return _split_output(output)
         except TypeError:
             pass
@@ -207,6 +232,7 @@ def generate(
 
     if pin_memory and torch is not None:
         from hagi.model.inference_opt import pin_model_weights
+
         pin_model_weights(model)
 
     model = _maybe_compile(model, compile_model)
@@ -221,7 +247,9 @@ def generate(
         if device is not None:
             generated = generated.to(device)
 
-        cache = _maybe_static_cache(model, generated, max_new_tokens, cache, use_cache, use_static_cache)
+        cache = _maybe_static_cache(
+            model, generated, max_new_tokens, cache, use_cache, use_static_cache
+        )
         # An empty (fresh static) cache still needs the full prompt for prefill.
         next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
         active_cache = cache
@@ -245,7 +273,9 @@ def generate(
         for _ in range(max_new_tokens):
             output = model(generated)
             logits = output[0] if isinstance(output, tuple) else output
-            next_token = np.asarray(sample_next_token(logits, temperature, top_k, top_p), dtype=np.int64)
+            next_token = np.asarray(
+                sample_next_token(logits, temperature, top_k, top_p), dtype=np.int64
+            )
             if next_token.ndim == 0:
                 next_token = next_token[None]
             generated = np.concatenate([generated, next_token[:, None]], axis=-1)
@@ -280,7 +310,9 @@ def stream_generate(
         for _ in range(max_new_tokens):
             output = model(generated)
             logits = output[0] if isinstance(output, tuple) else output
-            next_token = np.asarray(sample_next_token(logits, temperature, top_k, top_p), dtype=np.int64)
+            next_token = np.asarray(
+                sample_next_token(logits, temperature, top_k, top_p), dtype=np.int64
+            )
             if next_token.ndim == 0:
                 next_token = next_token[None]
             yield next_token
@@ -298,16 +330,23 @@ def stream_generate(
 
     if pin_memory and torch is not None:
         from hagi.model.inference_opt import pin_model_weights
+
         pin_model_weights(model)
 
     model = _maybe_compile(model, compile_model)
-    generated = prompt_ids if torch.is_tensor(prompt_ids) else torch.tensor(prompt_ids, dtype=torch.long)
+    generated = (
+        prompt_ids
+        if torch.is_tensor(prompt_ids)
+        else torch.tensor(prompt_ids, dtype=torch.long)
+    )
     if generated.dim() == 1:
         generated = generated.unsqueeze(0)
     device = _model_device(model)
     if device is not None:
         generated = generated.to(device)
-    cache = _maybe_static_cache(model, generated, max_new_tokens, cache, use_cache, use_static_cache)
+    cache = _maybe_static_cache(
+        model, generated, max_new_tokens, cache, use_cache, use_static_cache
+    )
     # An empty (fresh static) cache still needs the full prompt for prefill.
     next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
     active_cache = cache
@@ -341,8 +380,15 @@ def generate_with_rollouts(
     """Generate with multiple noisy rollouts, select best by confidence (PTRM idea)."""
     if rollouts <= 1 or noise_sigma <= 0.0:
         return generate(
-            model, prompt_ids, max_new_tokens, temperature, top_k, top_p,
-            eos_token_id, use_cache=use_cache, compile_model=compile_model,
+            model,
+            prompt_ids,
+            max_new_tokens,
+            temperature,
+            top_k,
+            top_p,
+            eos_token_id,
+            use_cache=use_cache,
+            compile_model=compile_model,
         )
 
     best_generated = None
@@ -356,8 +402,16 @@ def generate_with_rollouts(
             model.cfg.thinking_noise = noise_sigma
         try:
             result = generate(
-                compiled_model, prompt_ids, max_new_tokens, temperature, top_k, top_p,
-                eos_token_id, use_cache=use_cache, compile_model=False, training_mode=True,
+                compiled_model,
+                prompt_ids,
+                max_new_tokens,
+                temperature,
+                top_k,
+                top_p,
+                eos_token_id,
+                use_cache=use_cache,
+                compile_model=False,
+                training_mode=True,
             )
         finally:
             if hasattr(model, "cfg") and hasattr(model.cfg, "thinking_noise"):
@@ -365,7 +419,11 @@ def generate_with_rollouts(
         # Confidence score from last-position logits
         if torch is not None and torch.is_tensor(result):
             with torch.no_grad():
-                last_logits = compiled_model(result[:, -1:]) if hasattr(compiled_model, "forward") else None
+                last_logits = (
+                    compiled_model(result[:, -1:])
+                    if hasattr(compiled_model, "forward")
+                    else None
+                )
                 if last_logits is not None:
                     if isinstance(last_logits, tuple):
                         last_logits = last_logits[0]

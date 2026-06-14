@@ -38,12 +38,12 @@ class TransformerConfig:
     moe_alpha: float = 0.01
 
     def __post_init__(self):
-        assert self.hidden_size % self.num_query_heads == 0, (
-            f"hidden_size {self.hidden_size} not divisible by num_query_heads {self.num_query_heads}"
-        )
-        assert self.num_query_heads % self.num_kv_heads == 0, (
-            f"num_query_heads {self.num_query_heads} not divisible by num_kv_heads {self.num_kv_heads}"
-        )
+        assert (
+            self.hidden_size % self.num_query_heads == 0
+        ), f"hidden_size {self.hidden_size} not divisible by num_query_heads {self.num_query_heads}"
+        assert (
+            self.num_query_heads % self.num_kv_heads == 0
+        ), f"num_query_heads {self.num_query_heads} not divisible by num_kv_heads {self.num_kv_heads}"
         head_dim = self.hidden_size // self.num_query_heads
         assert head_dim % 2 == 0, f"head_dim {head_dim} must be even for RoPE"
         if self.use_moe and self.moe_intermediate_size is None:
@@ -61,7 +61,10 @@ class RMSNorm(nn.Module):
 
 
 def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):
-    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim))
+    inv_freq = 1.0 / (
+        theta
+        ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim)
+    )
     t = torch.arange(end=seq_len, device=device, dtype=torch.float32)
     freqs = torch.outer(t, inv_freq)
     cos = freqs.cos().to(dtype)
@@ -69,7 +72,9 @@ def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):
     return cos, sin
 
 
-def _apply_rope_impl(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+def _apply_rope_impl(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
     x1, x2 = x[..., 0::2], x[..., 1::2]
     cos = cos[None, None, :, :]
     sin = sin[None, None, :, :]
@@ -86,11 +91,17 @@ _apply_rope_compiled = (
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    fn = _apply_rope_compiled if x.is_cuda and _apply_rope_compiled is not None else _apply_rope_impl
+    fn = (
+        _apply_rope_compiled
+        if x.is_cuda and _apply_rope_compiled is not None
+        else _apply_rope_impl
+    )
     return fn(x, cos, sin)
 
 
-_TORCH_MAJOR_MINOR = tuple(int(p) for p in torch.__version__.split("+")[0].split(".")[:2])
+_TORCH_MAJOR_MINOR = tuple(
+    int(p) for p in torch.__version__.split("+")[0].split(".")[:2]
+)
 _SDPA_SUPPORTS_GQA = _TORCH_MAJOR_MINOR >= (2, 5)
 _FLASH_AVAILABLE: bool | None = None
 
@@ -128,7 +139,12 @@ def _update_kv(k, v, past_key_value, use_cache: bool, attn_mask):
     if hasattr(past_key_value, "update"):
         prior_len = past_key_value.seq_len
         k, v = past_key_value.update(k, v)
-        return k, v, (past_key_value if use_cache else None), (attn_mask is None and prior_len == 0)
+        return (
+            k,
+            v,
+            (past_key_value if use_cache else None),
+            (attn_mask is None and prior_len == 0),
+        )
     past_key, past_value = past_key_value
     k = torch.cat([past_key, k], dim=2)
     v = torch.cat([past_value, v], dim=2)
@@ -144,19 +160,29 @@ def _sdpa_gqa(q, k, v, attn_mask, is_causal: bool, nq: int, nkv: int):
     enable_gqa avoids entirely.
     """
     if nq == nkv:
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, is_causal=is_causal
+        )
     if _use_enable_gqa(q):
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=is_causal, enable_gqa=True)
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, is_causal=is_causal, enable_gqa=True
+        )
     rep = nq // nkv
     B, _, T, D = k.shape
     attn_k = k.unsqueeze(2).expand(B, nkv, rep, T, D).reshape(B, nq, T, D)
     attn_v = v.unsqueeze(2).expand(B, nkv, rep, T, D).reshape(B, nq, T, D)
-    return F.scaled_dot_product_attention(q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal)
+    return F.scaled_dot_product_attention(
+        q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal
+    )
 
 
-def _make_linear(in_features: int, out_features: int, cfg: TransformerConfig) -> nn.Module:
+def _make_linear(
+    in_features: int, out_features: int, cfg: TransformerConfig
+) -> nn.Module:
     if cfg.use_binary_factorized:
-        return BinaryFactorizedLinear(in_features, out_features, cfg.binary_factorized_rank)
+        return BinaryFactorizedLinear(
+            in_features, out_features, cfg.binary_factorized_rank
+        )
     return nn.Linear(in_features, out_features, bias=False)
 
 
@@ -176,14 +202,22 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, cfg.norm_eps)
             self.k_norm = RMSNorm(self.head_dim, cfg.norm_eps)
         if getattr(cfg, "fuse_qkv", False) and not cfg.use_binary_factorized:
-            if isinstance(self.q_proj, nn.Linear) and isinstance(self.k_proj, nn.Linear) and isinstance(self.v_proj, nn.Linear):
+            if (
+                isinstance(self.q_proj, nn.Linear)
+                and isinstance(self.k_proj, nn.Linear)
+                and isinstance(self.v_proj, nn.Linear)
+            ):
                 self._fuse_qkv()
 
     def _fuse_qkv(self):
         wq = self.q_proj.weight.data
         wk = self.k_proj.weight.data
         wv = self.v_proj.weight.data
-        assert isinstance(wq, torch.Tensor) and isinstance(wk, torch.Tensor) and isinstance(wv, torch.Tensor)
+        assert (
+            isinstance(wq, torch.Tensor)
+            and isinstance(wk, torch.Tensor)
+            and isinstance(wv, torch.Tensor)
+        )
         self.qkv_weight = nn.Parameter(torch.cat([wq, wk, wv], dim=0).contiguous())
         self._qkv_splits = [wq.size(0), wk.size(0), wv.size(0)]
         del self.q_proj, self.k_proj, self.v_proj
@@ -200,20 +234,47 @@ class GroupedQueryAttention(nn.Module):
             state.pop(f"{prefix}_qkv_splits", None)
         return state
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
         qkv_key = prefix + "qkv_weight"
         q_key = prefix + "q_proj.weight"
         k_key = prefix + "k_proj.weight"
         v_key = prefix + "v_proj.weight"
-        if qkv_key not in state_dict and all(k in state_dict for k in (q_key, k_key, v_key)):
+        if qkv_key not in state_dict and all(
+            k in state_dict for k in (q_key, k_key, v_key)
+        ):
             q = state_dict[q_key]
             k = state_dict[k_key]
             v = state_dict[v_key]
             state_dict[qkv_key] = torch.cat([q, k, v], dim=0)
             del state_dict[q_key], state_dict[k_key], state_dict[v_key]
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
-    def forward(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos,
+        sin,
+        past_key_value=None,
+        use_cache: bool = False,
+        attn_mask=None,
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         B, T, _ = x.shape
         if hasattr(self, "qkv_weight"):
             qkv = F.linear(x, self.qkv_weight)
@@ -230,13 +291,23 @@ class GroupedQueryAttention(nn.Module):
         if self.qk_norm_enabled:
             q = self.q_norm(q)
             k = self.k_norm(k)
-        k, v, next_key_value, is_causal = _update_kv(k, v, past_key_value, use_cache, attn_mask)
+        k, v, next_key_value, is_causal = _update_kv(
+            k, v, past_key_value, use_cache, attn_mask
+        )
         out = _sdpa_gqa(q, k, v, attn_mask, is_causal, self.nq, self.nkv)
         out = out.transpose(1, 2).reshape(B, out.shape[2], -1)
         out = self.o_proj(out)
         return (out, next_key_value) if use_cache else out
 
-    def forward_repacked(self, x: torch.Tensor, cos, sin, past_key_value=None, use_cache: bool = False, attn_mask=None):
+    def forward_repacked(
+        self,
+        x: torch.Tensor,
+        cos,
+        sin,
+        past_key_value=None,
+        use_cache: bool = False,
+        attn_mask=None,
+    ):
         """Fused QKV projection for contiguous memory access during inference."""
         B, T, _ = x.shape
         assert isinstance(self.qkv_weight, torch.Tensor)
@@ -247,7 +318,9 @@ class GroupedQueryAttention(nn.Module):
         v = v.view(B, T, self.nkv, self.head_dim).transpose(1, 2)
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
-        k, v, next_key_value, is_causal = _update_kv(k, v, past_key_value, use_cache, attn_mask)
+        k, v, next_key_value, is_causal = _update_kv(
+            k, v, past_key_value, use_cache, attn_mask
+        )
         out = _sdpa_gqa(q, k, v, attn_mask, is_causal, self.nq, self.nkv)
         out = out.transpose(1, 2).reshape(B, out.shape[2], -1)
         out = self.o_proj(out)
@@ -281,7 +354,16 @@ class SwiGLU(nn.Module):
             state.pop(f"{prefix}gate_up_weight", None)
         return state
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
         gate_up_key = prefix + "gate_up_weight"
         gate_key = prefix + "gate.weight"
         up_key = prefix + "up.weight"
@@ -293,7 +375,15 @@ class SwiGLU(nn.Module):
             up = state_dict[up_key]
             state_dict[gate_up_key] = torch.cat([gate, up], dim=0)
             del state_dict[gate_key], state_dict[up_key]
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if hasattr(self, "gate_up_weight"):
@@ -320,6 +410,7 @@ class TransformerBlock(nn.Module):
         self.mlp_norm = RMSNorm(cfg.hidden_size, cfg.norm_eps)
         if cfg.use_moe:
             from .moe import MoESwiGLU
+
             self.mlp = MoESwiGLU(cfg)
         else:
             self.mlp = SwiGLU(cfg)
@@ -368,7 +459,9 @@ class TransformerBlock(nn.Module):
         else:
             h = self._apply_folded_norm(x, "attn")
             if use_repacked:
-                attn_out = self.attn.forward_repacked(h, cos, sin, past_key_value, use_cache, attn_mask)
+                attn_out = self.attn.forward_repacked(
+                    h, cos, sin, past_key_value, use_cache, attn_mask
+                )
             else:
                 attn_out = self.attn(h, cos, sin, past_key_value, use_cache, attn_mask)
             if use_cache:

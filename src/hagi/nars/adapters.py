@@ -58,8 +58,8 @@ class NarsHrmController:
         self.observed_losses.append(loss)
         self.observed_grad_norms.append(grad_norm)
         if len(self.observed_losses) > self._max_obs:
-            self.observed_losses = self.observed_losses[-self._max_obs:]
-            self.observed_grad_norms = self.observed_grad_norms[-self._max_obs:]
+            self.observed_losses = self.observed_losses[-self._max_obs :]
+            self.observed_grad_norms = self.observed_grad_norms[-self._max_obs :]
 
         # Loss concept: lower loss → higher frequency
         loss_freq = 1.0 / (1.0 + loss)
@@ -150,7 +150,11 @@ class NarsHrmController:
             "observed_losses": self.observed_losses,
             "observed_grad_norms": self.observed_grad_norms,
             "control_budgets": {
-                k: {"priority": v.priority, "durability": v.durability, "quality": v.quality}
+                k: {
+                    "priority": v.priority,
+                    "durability": v.durability,
+                    "quality": v.quality,
+                }
                 for k, v in self.control_budgets.items()
             },
             "control_truths": {
@@ -194,7 +198,9 @@ class NarsHrmController:
                 if hasattr(hrm_config, attr):
                     setattr(hrm_config, attr, value)
 
-    def compute_gating(self, z_H: torch.Tensor, z_L: torch.Tensor) -> tuple[float, float]:
+    def compute_gating(
+        self, z_H: torch.Tensor, z_L: torch.Tensor
+    ) -> tuple[float, float]:
         """Return truth-weighted gating coefficients for z_H and z_L.
 
         Default gate 1.0 — HRM always contributes fully. NARS observation
@@ -219,7 +225,9 @@ class NarsHdimReasoner:
         self.domain_concepts: Dict[DomainId, TruthValue] = {}
         self.transfer_beliefs: Dict[Tuple[DomainId, DomainId], TruthValue] = {}
 
-    def recommend_transfer(self, source: DomainId, known_targets: List[DomainId]) -> DomainId:
+    def recommend_transfer(
+        self, source: DomainId, known_targets: List[DomainId]
+    ) -> DomainId:
         """Return the target domain with the strongest transfer belief."""
         if not known_targets:
             raise ValueError("known_targets must not be empty")
@@ -329,7 +337,11 @@ class NarsMsaReasoner:
         if not hasattr(registry, "slot_ids"):
             raise TypeError("registry must have a slot_ids() method")
 
-        query_t = query if isinstance(query, torch.Tensor) else torch.tensor(query, dtype=torch.float32)
+        query_t = (
+            query
+            if isinstance(query, torch.Tensor)
+            else torch.tensor(query, dtype=torch.float32)
+        )
         if query_t.dim() > 1:
             query_t = query_t.view(-1)
         device = str(query_t.device) if query_t.device.type != "cpu" else None
@@ -337,7 +349,9 @@ class NarsMsaReasoner:
         slot_ids = registry.slot_ids()  # [N]
 
         if query_t.shape[-1] != keys.shape[-1]:
-            raise ValueError(f"Query dim {query_t.shape[-1]} != key dim {keys.shape[-1]}")
+            raise ValueError(
+                f"Query dim {query_t.shape[-1]} != key dim {keys.shape[-1]}"
+            )
 
         if keys.device != query_t.device or keys.dtype != query_t.dtype:
             keys = keys.to(device=query_t.device, dtype=query_t.dtype)
@@ -350,10 +364,14 @@ class NarsMsaReasoner:
 
         # Vectorized: build tensors for frequency, recency, and dot scores
         N = len(slot_ids)
-        freq_list = [self.slot_beliefs.get(sid, _DEFAULT_TV_00).frequency for sid in slot_ids]
+        freq_list = [
+            self.slot_beliefs.get(sid, _DEFAULT_TV_00).frequency for sid in slot_ids
+        ]
         recency_list = [self.recency_weights.get(sid, 0.0) for sid in slot_ids]
         freq_tensor = torch.as_tensor(freq_list, dtype=torch.float32).to(query_t.device)
-        recency_tensor = torch.as_tensor(recency_list, dtype=torch.float32).to(query_t.device)
+        recency_tensor = torch.as_tensor(recency_list, dtype=torch.float32).to(
+            query_t.device
+        )
         blended_tensor = (
             nars_weight * freq_tensor
             + recency_weight * recency_tensor
@@ -382,8 +400,7 @@ class NarsMsaReasoner:
             return None
         ids_list = slot_ids.flatten().tolist()
         weights = [
-            self.slot_beliefs.get(sid, _DEFAULT_TV_00).frequency
-            for sid in ids_list
+            self.slot_beliefs.get(sid, _DEFAULT_TV_00).frequency for sid in ids_list
         ]
         return torch.as_tensor(
             weights, dtype=torch.float32, device=slot_ids.device
@@ -412,7 +429,11 @@ class NarsMsaReasoner:
                 for k, v in self.slot_beliefs.items()
             },
             "slot_budgets": {
-                k: {"priority": v.priority, "durability": v.durability, "quality": v.quality}
+                k: {
+                    "priority": v.priority,
+                    "durability": v.durability,
+                    "quality": v.quality,
+                }
                 for k, v in self.slot_budgets.items()
             },
             "recency_weights": self.recency_weights,
@@ -429,6 +450,5 @@ class NarsMsaReasoner:
             for k, v in state.get("slot_budgets", {}).items()
         }
         self.recency_weights = {
-            int(k): float(v)
-            for k, v in state.get("recency_weights", {}).items()
+            int(k): float(v) for k, v in state.get("recency_weights", {}).items()
         }

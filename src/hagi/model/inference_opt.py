@@ -13,7 +13,13 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from .transformer import GroupedQueryAttention, RMSNorm, SwiGLU, TransformerBlock, build_rope_cache
+from .transformer import (
+    GroupedQueryAttention,
+    RMSNorm,
+    SwiGLU,
+    TransformerBlock,
+    build_rope_cache,
+)
 
 
 def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
@@ -35,7 +41,9 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
             if isinstance(module.attn_norm, RMSNorm):
                 assert isinstance(module.attn_norm, RMSNorm)
                 gamma = module.attn_norm.weight.data
-                if isinstance(module.attn, GroupedQueryAttention) and hasattr(module.attn, "qkv_weight"):
+                if isinstance(module.attn, GroupedQueryAttention) and hasattr(
+                    module.attn, "qkv_weight"
+                ):
                     qkv = module.attn.qkv_weight
                     q, k, v = qkv.split(module.attn._qkv_splits, dim=0)
                     q = q * gamma.view(1, -1)
@@ -43,7 +51,11 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                     v = v * gamma.view(1, -1)
                     qkv.data = torch.cat([q, k, v], dim=0).contiguous()
                 else:
-                    for proj in (module.attn.q_proj, module.attn.k_proj, module.attn.v_proj):
+                    for proj in (
+                        module.attn.q_proj,
+                        module.attn.k_proj,
+                        module.attn.v_proj,
+                    ):
                         if isinstance(proj, nn.Linear):
                             with torch.no_grad():
                                 proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
@@ -59,7 +71,9 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                     gate, up = module.mlp.gate_up_weight.chunk(2, dim=0)
                     gate = gate * gamma.view(1, -1)
                     up = up * gamma.view(1, -1)
-                    module.mlp.gate_up_weight.data = torch.cat([gate, up], dim=0).contiguous()
+                    module.mlp.gate_up_weight.data = torch.cat(
+                        [gate, up], dim=0
+                    ).contiguous()
                 elif hasattr(module.mlp, "experts"):
                     # Mixture-of-Experts SwiGLU: fold gamma into each expert's
                     # gate/up projections (the first ops after mlp_norm).
@@ -79,12 +93,19 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                 folded_any = True
 
     # Fold final_norm into lm_head ONLY if weights are NOT tied.
-    if hasattr(model, "lm_head") and hasattr(model, "final_norm") and hasattr(model, "embed"):
+    if (
+        hasattr(model, "lm_head")
+        and hasattr(model, "final_norm")
+        and hasattr(model, "embed")
+    ):
         lm_head_obj = model.lm_head
         embed_obj = model.embed
         assert isinstance(lm_head_obj, nn.Linear)
         assert isinstance(embed_obj, nn.Embedding)
-        if isinstance(model.final_norm, RMSNorm) and lm_head_obj.weight is not embed_obj.weight:
+        if (
+            isinstance(model.final_norm, RMSNorm)
+            and lm_head_obj.weight is not embed_obj.weight
+        ):
             gamma = model.final_norm.weight.data  # type: ignore
             with torch.no_grad():
                 lm_head_obj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
@@ -92,7 +113,9 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
             folded_any = True
 
     if not folded_any:
-        raise RuntimeError("fold_rmsnorm_into_weights: no RMSNorm layers found to fold.")
+        raise RuntimeError(
+            "fold_rmsnorm_into_weights: no RMSNorm layers found to fold."
+        )
     return model
 
 
@@ -110,14 +133,26 @@ def repack_qkv_for_contiguous(model: nn.Module) -> nn.Module:
             attn = module.attn
             if isinstance(attn, GroupedQueryAttention):
                 if not hasattr(attn, "qkv_weight"):
-                    if hasattr(attn, "q_proj") and hasattr(attn, "k_proj") and hasattr(attn, "v_proj"):
-                        if isinstance(attn.q_proj, nn.Linear) and isinstance(attn.k_proj, nn.Linear) and isinstance(attn.v_proj, nn.Linear):
+                    if (
+                        hasattr(attn, "q_proj")
+                        and hasattr(attn, "k_proj")
+                        and hasattr(attn, "v_proj")
+                    ):
+                        if (
+                            isinstance(attn.q_proj, nn.Linear)
+                            and isinstance(attn.k_proj, nn.Linear)
+                            and isinstance(attn.v_proj, nn.Linear)
+                        ):
                             wq = attn.q_proj.weight.data
                             wk = attn.k_proj.weight.data
                             wv = attn.v_proj.weight.data
                             qkv = torch.cat([wq, wk, wv], dim=0).contiguous()
                             attn.register_buffer("qkv_weight", qkv)
-                            object.__setattr__(attn, "_qkv_splits", [wq.size(0), wk.size(0), wv.size(0)])
+                            object.__setattr__(
+                                attn,
+                                "_qkv_splits",
+                                [wq.size(0), wk.size(0), wv.size(0)],
+                            )
                             repacked_any = True
                 else:
                     repacked_any = True
@@ -126,7 +161,9 @@ def repack_qkv_for_contiguous(model: nn.Module) -> nn.Module:
             if isinstance(mlp, SwiGLU):
                 if not hasattr(mlp, "gate_up_weight"):
                     if hasattr(mlp, "gate") and hasattr(mlp, "up"):
-                        if isinstance(mlp.gate, nn.Linear) and isinstance(mlp.up, nn.Linear):
+                        if isinstance(mlp.gate, nn.Linear) and isinstance(
+                            mlp.up, nn.Linear
+                        ):
                             w1 = mlp.gate.weight.data
                             w3 = mlp.up.weight.data
                             gate_up = torch.cat([w1, w3], dim=0).contiguous()
@@ -136,7 +173,9 @@ def repack_qkv_for_contiguous(model: nn.Module) -> nn.Module:
                     repacked_any = True
 
     if not repacked_any:
-        raise RuntimeError("repack_qkv_for_contiguous: no eligible attention/MLP blocks found.")
+        raise RuntimeError(
+            "repack_qkv_for_contiguous: no eligible attention/MLP blocks found."
+        )
     return model
 
 
@@ -151,9 +190,15 @@ def precompute_rope_tables(model: nn.Module, max_seq_len: int) -> nn.Module:
     if not isinstance(model, HAGI):
         raise TypeError("precompute_rope_tables expects a HAGI model")
 
-    head_dim = model.cfg.transformer.hidden_size // model.cfg.transformer.num_query_heads
+    head_dim = (
+        model.cfg.transformer.hidden_size // model.cfg.transformer.num_query_heads
+    )
     cos, sin = build_rope_cache(
-        max_seq_len, head_dim, model.cfg.transformer.rope_theta, torch.device("cpu"), torch.float32
+        max_seq_len,
+        head_dim,
+        model.cfg.transformer.rope_theta,
+        torch.device("cpu"),
+        torch.float32,
     )
     model.register_buffer("_rope_cos", cos)
     model.register_buffer("_rope_sin", sin)

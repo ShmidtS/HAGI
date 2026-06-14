@@ -64,7 +64,9 @@ def _autocast_ctx(precision: str, device: str):
 
 
 @torch.no_grad()
-def estimate_loss(model: HAGI, get_batch: Callable[..., Any], iters: int, device: str, precision: str) -> float:
+def estimate_loss(
+    model: HAGI, get_batch: Callable[..., Any], iters: int, device: str, precision: str
+) -> float:
     model.eval()
     losses = []
     for _ in range(iters):
@@ -99,11 +101,13 @@ def train(
     # `run_model`; checkpoints keep using `model` so state_dict keys never get
     # the `_orig_mod.` prefix.
     run_model = model
-    if getattr(getattr(model, "cfg", None), "compile", False) and device.startswith("cuda"):
+    if getattr(getattr(model, "cfg", None), "compile", False) and device.startswith(
+        "cuda"
+    ):
         if hasattr(torch, "compile"):
             run_model = torch.compile(model)
     use_scaler = cfg.precision == "fp16" and device.startswith("cuda")
-    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     # NARS HRM controller setup
     nars_hrm = None
@@ -111,7 +115,11 @@ def train(
         nars_hrm = model.nars_hrm
 
     last_loss = float("nan")
-    end = cfg.max_steps if session_steps is None else min(cfg.max_steps, start_step + session_steps)
+    end = (
+        cfg.max_steps
+        if session_steps is None
+        else min(cfg.max_steps, start_step + session_steps)
+    )
     for step in range(start_step, end):
         lr = _lr_at(step, cfg)
         base_lr = max(cfg.learning_rate, 1e-12)
@@ -128,14 +136,22 @@ def train(
                 loss = result["loss"] if isinstance(result, dict) else result[1]
                 loss = loss / cfg.grad_accum_steps
             scaler.scale(loss).backward() if use_scaler else loss.backward()
-            accum_loss_tensor = loss.detach() if accum_loss_tensor is None else accum_loss_tensor + loss.detach()
-        accum_loss = accum_loss_tensor.item() if accum_loss_tensor is not None else float("nan")
+            accum_loss_tensor = (
+                loss.detach()
+                if accum_loss_tensor is None
+                else accum_loss_tensor + loss.detach()
+            )
+        accum_loss = (
+            accum_loss_tensor.item() if accum_loss_tensor is not None else float("nan")
+        )
 
         if use_scaler:
             scaler.unscale_(optimizer)
         grad_norm: float | None = None
         if cfg.grad_clip > 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip).item()
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), cfg.grad_clip
+            ).item()
 
         if use_scaler:
             scaler.step(optimizer)
@@ -152,7 +168,9 @@ def train(
         # makes forward depth unpredictable. cycles: observe=always, apply=200.
         if nars_hrm is not None:
             if grad_norm is None:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf")).item()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), float("inf")
+                ).item()
             nars_hrm.observe_train_step(last_loss, grad_norm)
             if step % NARS_POLICY_INTERVAL == 0:
                 policy = nars_hrm.resolve_policy()
@@ -174,21 +192,38 @@ def train(
                     extras = f" | h={getattr(model.hrm, 'h_cycles', '?')} l={getattr(model.hrm, 'l_cycles', '?')}"
                 print(f"step {step:6d} | loss {accum_loss:.4f} | lr {lr:.2e}{extras}")
 
-        if eval_get_batch is not None and cfg.eval_interval > 0 and step > 0 \
-                and step % cfg.eval_interval == 0:
-            val = estimate_loss(model, eval_get_batch, cfg.eval_iters, device, cfg.precision)
+        if (
+            eval_get_batch is not None
+            and cfg.eval_interval > 0
+            and step > 0
+            and step % cfg.eval_interval == 0
+        ):
+            val = estimate_loss(
+                model, eval_get_batch, cfg.eval_iters, device, cfg.precision
+            )
             print(f"step {step:6d} | val_loss {val:.4f}")
 
         if cfg.ckpt_interval > 0 and step > 0 and step % cfg.ckpt_interval == 0:
-            save_checkpoint(model, optimizer, step, cfg.ckpt_dir, on_checkpoint=on_checkpoint)
+            save_checkpoint(
+                model, optimizer, step, cfg.ckpt_dir, on_checkpoint=on_checkpoint
+            )
 
     if session_steps is not None and on_checkpoint is not None:
-        save_checkpoint(model, optimizer, end, cfg.ckpt_dir, on_checkpoint=on_checkpoint)
+        save_checkpoint(
+            model, optimizer, end, cfg.ckpt_dir, on_checkpoint=on_checkpoint
+        )
 
     return last_loss
 
 
-def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str, ema_state: dict[str, Any] | None = None, on_checkpoint: Callable[[str], None] | None = None):
+def save_checkpoint(
+    model: HAGI,
+    optimizer,
+    step: int,
+    ckpt_dir: str,
+    ema_state: dict[str, Any] | None = None,
+    on_checkpoint: Callable[[str], None] | None = None,
+):
     """Write a checkpoint with config, optimizer, and optional EMA state."""
     out = Path(ckpt_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -217,7 +252,13 @@ def save_checkpoint(model: HAGI, optimizer, step: int, ckpt_dir: str, ema_state:
         on_checkpoint(str(path))
 
 
-def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bool = False, use_ema: bool = False) -> tuple[HAGI, int, dict[str, Any] | None]:
+def load_checkpoint(
+    path: str,
+    device: str = "cpu",
+    optimizer=None,
+    load_ema: bool = False,
+    use_ema: bool = False,
+) -> tuple[HAGI, int, dict[str, Any] | None]:
     """Rebuild a HAGI model from a checkpoint.
 
     Args:
@@ -236,13 +277,19 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
     p = Path(path)
     # Handle sharded checkpoint directories (model.pt, optimizer.pt, ema.pt, meta.pt)
     if p.is_dir() and (p / "model.pt").exists():
-        meta = torch.load(p / "meta.pt", map_location=device, weights_only=True) if (p / "meta.pt").exists() else {}
+        meta = (
+            torch.load(p / "meta.pt", map_location=device, weights_only=True)
+            if (p / "meta.pt").exists()
+            else {}
+        )
         cfg = config_from_dict(meta["config"])
         model = HAGI(cfg)
         state_dict = torch.load(p / "model.pt", map_location=device, weights_only=True)
         # Normalize keys saved from a torch.compiled model
         if any(k.startswith("hrm._orig_mod.") for k in state_dict):
-            state_dict = {k.replace("hrm._orig_mod.", "hrm.", 1): v for k, v in state_dict.items()}
+            state_dict = {
+                k.replace("hrm._orig_mod.", "hrm.", 1): v for k, v in state_dict.items()
+            }
         # Strip orphaned fused-projection keys emitted at top level by old state_dict
         for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
             state_dict.pop(key, None)
@@ -269,6 +316,7 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
             precompute_rope_tables,
             repack_qkv_for_contiguous,
         )
+
         max_seq_len = state.get("_rope_max_seq_len", cfg.transformer.max_seq_len)
         fold_rmsnorm_into_weights(model)
         repack_qkv_for_contiguous(model)
@@ -282,15 +330,31 @@ def load_checkpoint(path: str, device: str = "cpu", optimizer=None, load_ema: bo
         optimizer.load_state_dict(state["optimizer"])
 
     # Load MSA registry if present
-    if hasattr(model, "msa_registry") and model.msa_registry is not None and "msa_registry" in state:
+    if (
+        hasattr(model, "msa_registry")
+        and model.msa_registry is not None
+        and "msa_registry" in state
+    ):
         model.msa_registry.load_state_dict(state["msa_registry"])
 
     # Load NARS adapter states if present
-    if hasattr(model, "nars_hrm") and model.nars_hrm is not None and "nars_hrm" in state:
+    if (
+        hasattr(model, "nars_hrm")
+        and model.nars_hrm is not None
+        and "nars_hrm" in state
+    ):
         model.nars_hrm.load_state_dict(state["nars_hrm"])
-    if hasattr(model, "nars_hdim") and model.nars_hdim is not None and "nars_hdim" in state:
+    if (
+        hasattr(model, "nars_hdim")
+        and model.nars_hdim is not None
+        and "nars_hdim" in state
+    ):
         model.nars_hdim.load_state_dict(state["nars_hdim"])
-    if hasattr(model, "nars_msa") and model.nars_msa is not None and "nars_msa" in state:
+    if (
+        hasattr(model, "nars_msa")
+        and model.nars_msa is not None
+        and "nars_msa" in state
+    ):
         model.nars_msa.load_state_dict(state["nars_msa"])
 
     ema_state = state.get("model_ema") if (use_ema or load_ema) else None
