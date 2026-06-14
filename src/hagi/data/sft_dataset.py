@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from hagi.utils import _as_long_tensor
+
 Dataset: Any
 try:
     import torch
@@ -17,8 +19,6 @@ except ImportError:  # pragma: no cover
     Dataset = object  # type: ignore[misc,assignment]
 else:
     Dataset = _TorchDataset
-
-from hagi.utils import _as_long_tensor
 
 
 @dataclass

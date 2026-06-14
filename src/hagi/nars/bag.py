@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
+from hagi.utils import _clamp01
+
 
 T = TypeVar("T")
-
-from hagi.utils import _clamp01
 
 
 def _item_key(item: Any) -> str:

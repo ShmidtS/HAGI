@@ -231,7 +231,7 @@ if _triton_available:
 
         # Online softmax accumulators
         m = tl.full((BLOCK_M,), value=float("-inf"), dtype=tl.float32)
-        l = tl.full((BLOCK_M,), value=0.0, dtype=tl.float32)
+        lse = tl.full((BLOCK_M,), value=0.0, dtype=tl.float32)
         acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
 
         # Dynamic loop end
@@ -280,13 +280,13 @@ if _triton_available:
             # Online softmax
             m_new = tl.maximum(m, tl.max(qk, axis=1))
             p = tl.exp(qk - m_new[:, None])
-            l = l * tl.exp(m - m_new) + tl.sum(p, axis=1)
+            lse = lse * tl.exp(m - m_new) + tl.sum(p, axis=1)
             acc = acc * tl.exp(m - m_new)[:, None] + tl.dot(p, v)
             m = m_new
 
         # Normalize — avoid NaN when a query has no valid keys
-        acc = acc / tl.where(l[:, None] > 0, l[:, None], 1.0)
-        acc = tl.where(l[:, None] > 0, acc, 0.0)
+        acc = acc / tl.where(lse[:, None] > 0, lse[:, None], 1.0)
+        acc = tl.where(lse[:, None] > 0, acc, 0.0)
 
         # Store output
         tl.store(
