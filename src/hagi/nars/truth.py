@@ -25,22 +25,3 @@ def truth_revision(t1: TruthValue, t2: TruthValue) -> TruthValue:
         (t1.frequency * w1 + t2.frequency * w2) / total_weight,
         total_weight / (1.0 + total_weight),
     )
-
-
-def truth_deduction(t1: TruthValue, t2: TruthValue) -> TruthValue:
-    return TruthValue(t1.frequency * t2.frequency, t1.confidence * t2.confidence)
-
-
-def truth_induction(t1: TruthValue, t2: TruthValue) -> TruthValue:
-    return TruthValue(t1.frequency, t1.confidence * t2.confidence * t2.frequency)
-
-
-def truth_abduction(t1: TruthValue, t2: TruthValue) -> TruthValue:
-    return TruthValue(t2.frequency, t1.confidence * t2.confidence * t1.frequency)
-
-
-def truth_intersection(t1: TruthValue, t2: TruthValue) -> TruthValue:
-    return TruthValue(
-        t1.frequency * t2.frequency,
-        t1.confidence + t2.confidence - t1.confidence * t2.confidence,
-    )

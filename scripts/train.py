@@ -1517,7 +1517,6 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         t_opt_start = time.perf_counter()
         if use_scaler:
             scaler.unscale_(optimizer)  # type: ignore[arg-type]
-        t_unscale_end = time.perf_counter()
 
         if grad_clip > 0:
             full_grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -1545,10 +1544,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 print(
                     f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}"
                 )
-        t_clip_end = time.perf_counter()
 
         magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
-        t_magic_end = time.perf_counter()
         if use_scaler:
             scaler.step(optimizer)  # type: ignore[arg-type]
             scaler.update()
@@ -1556,10 +1553,6 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             optimizer.step()  # type: ignore[arg-type]
         t_opt_end = time.perf_counter()
         t_opt = t_opt_end - t_opt_start
-        t_opt_step = t_opt_end - t_magic_end
-        t_unscale = t_unscale_end - t_opt_start
-        t_clip = t_clip_end - t_unscale_end
-        t_magic = t_magic_end - t_clip_end
         if step >= ema_start_step and model_ema is not None:
             update_ema(model, model_ema, ema_decay)
 

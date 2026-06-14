@@ -13,20 +13,6 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _reordering_sign(a: int, b: int) -> int:
-    """Sign from reordering the product of two basis blades into canonical order.
-
-    Counts transpositions needed to sort the concatenated basis vectors.
-    Metric is Euclidean (+1) so shared indices contribute no extra sign.
-    """
-    a >>= 1
-    swaps = 0
-    while a:
-        swaps += bin(a & b).count("1")
-        a >>= 1
-    return -1 if (swaps & 1) else 1
-
-
 def _as_long_tensor(values: Any) -> Any:
     if torch is None:
         return np.asarray(values, dtype=np.int64)

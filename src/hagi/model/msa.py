@@ -304,7 +304,7 @@ class DocumentWiseRoPE(nn.Module):
         key = (seq_len, dtype, device)
         if key not in self._cache:
             inv_freq = 1.0 / (self.theta ** (torch.arange(0, self.head_dim, 2, device=device).float() / self.head_dim))
-            t = torch.arange(seq_len, device=device).float()
+            t = torch.arange(end=seq_len, device=device).float()
             freqs = torch.outer(t, inv_freq)
             cos = freqs.cos().to(dtype)
             sin = freqs.sin().to(dtype)
@@ -343,7 +343,7 @@ class DocumentWiseRoPE(nn.Module):
             raise ValueError(f"slot_offsets must be [B, T], got {slot_offsets.shape}")
 
         positions = slot_offsets.unsqueeze(1)  # [B, 1, T]
-        positions = positions + torch.arange(T, device=x.device).view(1, 1, T)
+        positions = positions + torch.arange(end=T, device=x.device).view(1, 1, T)
         pos_indices = positions.long().clamp(0, seq_len - 1)
         pos_indices = pos_indices.expand(B, H, T)  # [B, H, T]
 
@@ -441,11 +441,10 @@ class MSAAttention(nn.Module):
         self.head_dim = head_dim if head_dim is not None else hidden_size // num_query_heads
         assert num_query_heads % num_kv_heads == 0, "query heads must be divisible by kv heads"
 
-        _make = (
-            lambda i, o: BinaryFactorizedLinear(i, o, binary_factorized_rank)
-            if use_binary_factorized
-            else nn.Linear(i, o, bias=False)
-        )
+        def _make(i: int, o: int) -> nn.Module:
+            if use_binary_factorized:
+                return BinaryFactorizedLinear(i, o, binary_factorized_rank)
+            return nn.Linear(i, o, bias=False)
         self.q_proj = _make(hidden_size, num_query_heads * self.head_dim)
         if not use_binary_factorized:
             self.kv_proj = nn.Linear(hidden_size, 2 * num_kv_heads * self.head_dim, bias=False)

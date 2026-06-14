@@ -14,7 +14,6 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .binary_factorized import BinaryFactorizedLinear
-from .triton_kernels import rmsnorm_triton, _rmsnorm_torch
 
 
 @dataclass
@@ -63,7 +62,7 @@ class RMSNorm(nn.Module):
 
 def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):
     inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim))
-    t = torch.arange(seq_len, device=device, dtype=torch.float32)
+    t = torch.arange(end=seq_len, device=device, dtype=torch.float32)
     freqs = torch.outer(t, inv_freq)
     cos = freqs.cos().to(dtype)
     sin = freqs.sin().to(dtype)

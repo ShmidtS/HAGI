@@ -24,7 +24,7 @@ def _golden_eval(model: HAGI) -> dict[str, Any]:
     model.eval()
     device = next(model.parameters()).device
     seq_len = min(model.cfg.transformer.max_seq_len, 16)
-    x = torch.arange(seq_len, device=device).unsqueeze(0) % model.cfg.vocab_size
+    x = torch.arange(end=seq_len, device=device).unsqueeze(0) % model.cfg.vocab_size
     y = torch.roll(x, shifts=-1, dims=1)
     logits, loss = model(x, targets=y)
     return {

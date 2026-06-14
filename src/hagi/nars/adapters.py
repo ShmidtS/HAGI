@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Tuple
 import torch
 
 from hagi.nars.bag import Bag
-from hagi.nars.budget import BudgetValue, budget_decay, merge_budgets
+from hagi.nars.budget import BudgetValue, budget_decay
 from hagi.nars.truth import TruthValue, truth_revision
 
 DomainId = int

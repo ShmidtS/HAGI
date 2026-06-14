@@ -432,12 +432,12 @@ def tokenize_source_parallel(
 
 
 def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:
+    import importlib.util
+
+    if importlib.util.find_spec("datasets") is None:
         raise ImportError(
             "install datasets to download mixed data: pip install datasets"
-        ) from exc
+        )
 
     target_tokens = parse_token_count(args.subset)
     paths: dict[str, Path] = {}

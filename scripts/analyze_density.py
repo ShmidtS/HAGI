@@ -9,6 +9,7 @@ Loads a trained checkpoint and reports per-submodule:
 Identifies where params are dense vs wasted so architecture can be reshaped
 for quality at equal-or-lower compute.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,7 +43,9 @@ def weight_stats(name: str, t: torch.Tensor) -> dict:
             stats["density"] = eff_rank / min(t2.shape)
             # tail energy: fraction of spectral energy in bottom half of singular values
             half = len(s) // 2
-            stats["tail_energy"] = float((s[half:] ** 2).sum().item() / (s ** 2).sum().item())
+            stats["tail_energy"] = float(
+                (s[half:] ** 2).sum().item() / (s**2).sum().item()
+            )
         except Exception:
             pass
     return stats
@@ -50,13 +53,22 @@ def weight_stats(name: str, t: torch.Tensor) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=Path, default=Path("checkpoints/rtx3070/step-00102000/model.pt"))
+    parser.add_argument(
+        "--ckpt", type=Path, default=Path("checkpoints/rtx3070/step-00102000/model.pt")
+    )
     args = parser.parse_args()
 
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=True)
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     # Normalize compiled prefixes
-    state = {(k.replace("hrm._orig_mod.", "hrm.", 1) if k.startswith("hrm._orig_mod.") else k): v for k, v in state.items()}
+    state = {
+        (
+            k.replace("hrm._orig_mod.", "hrm.", 1)
+            if k.startswith("hrm._orig_mod.")
+            else k
+        ): v
+        for k, v in state.items()
+    }
 
     rows = []
     total_n = 0
@@ -83,7 +95,9 @@ def main() -> None:
             groups[prefix]["params"].append(r)
 
     print(f"=== SUBMODULE PARAM UTILIZATION (ckpt {args.ckpt.name}) ===")
-    print(f"{'submodule':14s} {'params':>12s} {'near_zero%':>11s} {'low-density 2D params':>22s}")
+    print(
+        f"{'submodule':14s} {'params':>12s} {'near_zero%':>11s} {'low-density 2D params':>22s}"
+    )
     for prefix in sorted(groups, key=lambda k: -groups[k]["n"]):
         g = groups[prefix]
         nz = g["near"] / g["n"] * 100 if g["n"] else 0
@@ -91,19 +105,29 @@ def main() -> None:
         ratio = f"{low_den}/{len(g['params'])}"
         print(f"{prefix:14s} {g['n']:>12,} {nz:>10.1f}% {ratio:>22s}")
 
-    print(f"\n{'TOTAL params':14s} {total_n:>12,}  near-zero {total_near/total_n*100:.1f}%")
+    print(
+        f"\n{'TOTAL params':14s} {total_n:>12,}  near-zero {total_near/total_n*100:.1f}%"
+    )
 
-    print(f"\n=== LOWEST-DENSITY 2D WEIGHTS (eff_rank/min_dim < 0.6 => redundant capacity) ===")
+    print(
+        "\n=== LOWEST-DENSITY 2D WEIGHTS (eff_rank/min_dim < 0.6 => redundant capacity) ==="
+    )
     dens = sorted([r for r in rows if "density" in r], key=lambda r: r["density"])
-    print(f"{'param':50s} {'shape':16s} {'eff_rank':>9s} {'density':>8s} {'tail_E':>8s}")
+    print(
+        f"{'param':50s} {'shape':16s} {'eff_rank':>9s} {'density':>8s} {'tail_E':>8s}"
+    )
     for r in dens[:25]:
-        print(f"{r['name'][:50]:50s} {str(r['shape']):16s} {r.get('eff_rank',0):>9.1f} {r.get('density',0):>8.2f} {r.get('tail_energy',0):>8.2%}")
+        print(
+            f"{r['name'][:50]:50s} {str(r['shape']):16s} {r.get('eff_rank',0):>9.1f} {r.get('density',0):>8.2f} {r.get('tail_energy',0):>8.2%}"
+        )
 
-    print(f"\n=== HIGHEST near_zero_frac (dead/redundant weights) ===")
+    print("\n=== HIGHEST near_zero_frac (dead/redundant weights) ===")
     dead = sorted(rows, key=lambda r: -r["near_zero_frac"])
     print(f"{'param':50s} {'near_zero':>10s} {'mean_abs':>9s} {'std':>8s}")
     for r in dead[:15]:
-        print(f"{r['name'][:50]:50s} {r['near_zero_frac']:>9.1%} {r['mean_abs']:>9.4f} {r['std']:>8.4f}")
+        print(
+            f"{r['name'][:50]:50s} {r['near_zero_frac']:>9.1%} {r['mean_abs']:>9.4f} {r['std']:>8.4f}"
+        )
 
 
 if __name__ == "__main__":
