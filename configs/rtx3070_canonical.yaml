@@ -2,9 +2,9 @@ data:
   dataset_mode: memmap_packed
   max_seq_len: 1024
   mix:
-    edu: 0.40
+    edu: 0.4
     slimpajama: 0.25
-    wikipedia_en: 0.10
+    wikipedia_en: 0.1
     wikipedia_ru: 0.08
     oscar_ru: 0.07
     openwebmath: 0.03
@@ -14,13 +14,13 @@ data:
   mix_paths:
   - name: edu
     path: v4_3b/edu.bin
-    weight: 0.40
+    weight: 0.4
   - name: slimpajama
     path: v4_3b/slimpajama.bin
     weight: 0.25
   - name: wikipedia_en
     path: v4_3b/wikipedia_en.bin
-    weight: 0.10
+    weight: 0.1
   - name: wikipedia_ru
     path: v4_3b/wikipedia_ru.bin
     weight: 0.08
@@ -56,6 +56,7 @@ eval:
 model:
   ce_chunk_size: 0
   compile: false
+  use_fused_ce: false
   expression_layers: 4
   grades:
     bivector: 192

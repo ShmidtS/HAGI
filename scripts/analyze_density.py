@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -69,7 +70,11 @@ def main() -> None:
 
     # Group by submodule prefix
     from collections import defaultdict
-    groups = defaultdict(lambda: {"n": 0, "near": 0, "params": []})
+
+    def _new_group() -> dict[str, Any]:
+        return {"n": 0, "near": 0, "params": []}
+
+    groups: dict[str, dict[str, Any]] = defaultdict(_new_group)
     for r in rows:
         prefix = r["name"].split(".")[0]
         groups[prefix]["n"] += r["n"]

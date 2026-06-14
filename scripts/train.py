@@ -324,6 +324,7 @@ def maybe_disable_gradient_checkpointing(
     target_batch: int = 8,
     safety: float = 1.0,
     headroom: float = 0.85,
+    explicit: bool = False,
 ) -> None:
     """Disable gradient checkpointing if a dry-run shows enough memory headroom.
 
@@ -331,11 +332,24 @@ def maybe_disable_gradient_checkpointing(
     with a half-size batch, extrapolates to the target training batch size,
     and disables checkpointing only when the estimated peak stays below
     ``headroom * total_memory``.
+
+    Skipped entirely when ``explicit=True`` (the user set
+    ``training.gradient_checkpointing`` in config) — the probe builds a full
+    second model in VRAM, and probing the no-checkpoint path on a model that
+    needs checkpointing OOMs and leaves CUDA fragmented for the real run.
     """
     if not device.startswith("cuda") or not torch.cuda.is_available():
         return
     if not getattr(model.cfg, "gradient_checkpointing", False):
         return
+    if explicit:
+        total = torch.cuda.get_device_properties(device).total_memory
+        print(
+            f"Kept gradient checkpointing (explicit config; {total / 1024**3:.1f}GB GPU)"
+        )
+        return
+
+    total = torch.cuda.get_device_properties(device).total_memory
     test_model = HAGI(model.cfg).to(device)
     param_dtype = next(model.parameters()).dtype
     if param_dtype != torch.float32:
@@ -354,7 +368,6 @@ def maybe_disable_gradient_checkpointing(
             loss.backward()
             torch.cuda.synchronize()
             peak = torch.cuda.max_memory_allocated()
-            total = torch.cuda.get_device_properties(device).total_memory
         scale = target_batch / batch_size * safety
         est_peak = peak * scale
         if est_peak > total * headroom:
@@ -1188,7 +1201,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     optimizer_kind = str(train_cfg.get("optimizer", "adamw")).lower()
     magic_norm_max = float(train_cfg.get("magic_norm_max", 1.0))
     data_cfg = cfg.get("data", {})
-    dataset_mode = getattr(args, "dataset_mode", None) or str(data_cfg.get("dataset_mode", "memmap"))
+    dataset_mode = getattr(args, "dataset_mode", None) or str(
+        data_cfg.get("dataset_mode", "memmap")
+    )
     train_path = (
         resolve_train_path(cfg, args.train_path, args.data_dir)
         if args.train_path is not None or not resolve_mix_paths(data_cfg, args.data_dir)
@@ -1196,9 +1211,10 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     )
     eval_interval = int(train_cfg.get("eval_interval", 0))
     eval_samples = int(train_cfg.get("eval_samples", 500))
+    dataset_cycles = getattr(args, "dataset_cycles", None)
     sequential_cycles = int(
-        getattr(args, "dataset_cycles", None)
-        if getattr(args, "dataset_cycles", None) is not None
+        dataset_cycles
+        if dataset_cycles is not None
         else data_cfg.get("sequential_cycles", 0)
     )
     # Compute max_steps early so we can derive steps_per_cycle for sequential mode
@@ -1253,7 +1269,11 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if model_ema is not None:
             model_ema = model_ema.to(torch.bfloat16)
         print("Using manual BF16: model converted to bfloat16, no autocast")
-    maybe_disable_gradient_checkpointing(model, args.device)
+    maybe_disable_gradient_checkpointing(
+        model,
+        args.device,
+        explicit="gradient_checkpointing" in cfg.get("training", {}),
+    )
 
     print_model_summary(
         model, model_cfg, args.device, use_prefix_lm, composite_weights is not None
