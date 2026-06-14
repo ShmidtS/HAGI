@@ -41,12 +41,11 @@ def run_lm_eval(ckpt: str, tokenizer: str, benchmarks: list[str], device: str):
     # Importing the wrapper registers the "hagi" model with the harness.
     from hagi.eval import lm_eval_wrapper  # noqa: F401
 
-    results = simple_evaluate(
+    return simple_evaluate(
         model="hagi",
         model_args=f"ckpt={ckpt},tokenizer={tokenizer},device={device}",
         tasks=benchmarks,
     )
-    return results
 
 
 def main():

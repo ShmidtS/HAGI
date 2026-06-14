@@ -53,7 +53,7 @@ class MoESwiGLU(nn.Module):
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         B, T, D = x.shape
-        assert D == self.hidden_size
+        assert self.hidden_size == D
 
         flat = x.view(B * T, D)
         router_logits = self.router(flat)

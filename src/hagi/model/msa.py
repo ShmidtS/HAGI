@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -39,14 +39,14 @@ class SlotRegistry:
     """
 
     def __init__(self, max_slots: int = 10000) -> None:
-        self._slot_ids: List[int] = []
-        self._id_to_idx: Dict[int, int] = {}
+        self._slot_ids: list[int] = []
+        self._id_to_idx: dict[int, int] = {}
         self._routing_keys: torch.Tensor | None = None
         self._k_caches: torch.Tensor | None = None
         self._v_caches: torch.Tensor | None = None
         self._slot_ids_tensor: torch.Tensor | None = None
         self._max_slots = max_slots
-        self._slots_compat: Dict[int, MemorySlot] = {}
+        self._slots_compat: dict[int, MemorySlot] = {}
         self._id_to_idx_tensor = torch.full((max_slots * 1000,), -1, dtype=torch.long)
 
     def _evict_oldest(self, n: int) -> None:
@@ -140,10 +140,6 @@ class SlotRegistry:
             v_cache=self._v_caches[idx] if self._v_caches is not None else torch.tensor([]),
         )
 
-    def set_routing_keys(self, keys: torch.Tensor) -> None:
-        """Set the precomputed routing-keys tensor."""
-        self._routing_keys = keys
-
     def get_indices(self, slot_ids: torch.Tensor) -> torch.Tensor:
         """Return indices [N] into batched tensors for the given slot IDs."""
         flat = slot_ids.long().flatten()
@@ -162,7 +158,7 @@ class SlotRegistry:
             return self._routing_keys.to(device)
         return self._routing_keys
 
-    def slot_ids(self) -> List[int]:
+    def slot_ids(self) -> list[int]:
         """Return registered slot IDs in registration order."""
         return list(self._slot_ids)
 
@@ -186,7 +182,7 @@ class SlotRegistry:
     def __len__(self) -> int:
         return len(self._slot_ids)
 
-    def get_kv(self, indices: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_kv(self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return K and V caches for the given indices.
 
         Args:
@@ -249,7 +245,7 @@ class SparseRouter(nn.Module):
         query_hidden: torch.Tensor,
         registry: SlotRegistry,
         top_k: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return top-k slot IDs, scores, and weights.
 
         Args:
@@ -298,9 +294,9 @@ class DocumentWiseRoPE(nn.Module):
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
         self.theta = theta
-        self._cache: OrderedDict[tuple[int, torch.dtype, torch.device], Tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
+        self._cache: OrderedDict[tuple[int, torch.dtype, torch.device], tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
 
-    def _get_cache(self, seq_len: int, dtype: torch.dtype, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_cache(self, seq_len: int, dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         key = (seq_len, dtype, device)
         if key not in self._cache:
             inv_freq = 1.0 / (self.theta ** (torch.arange(0, self.head_dim, 2, device=device).float() / self.head_dim))
@@ -392,10 +388,6 @@ class HostKvCache:
     def v(self) -> torch.Tensor:
         return self._v[..., : self._len, :]
 
-    @property
-    def cache_len(self) -> int:
-        return self._len
-
     def append(self, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
         """Append new K/V tokens to the slot cache.
 
@@ -481,7 +473,7 @@ class MSAAttention(nn.Module):
         self,
         slot_ids: torch.Tensor,
         registry: SlotRegistry,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fetch K, V, and offsets for the selected slots.
 
         Deduplicates unique slot IDs to avoid O(B*T*top_k) redundant copies.

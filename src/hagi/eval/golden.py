@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Number
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 
 @dataclass

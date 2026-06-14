@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterator, List
+from typing import Any
+from collections.abc import Iterator
 
 import numpy as np
 
@@ -24,7 +25,7 @@ class CacheKeyValues:
         return self.layers[index]
 
     @classmethod
-    def from_model_cache(cls, cache: Any) -> "CacheKeyValues":
+    def from_model_cache(cls, cache: Any) -> CacheKeyValues:
         if isinstance(cache, cls):
             return cache
         return cls(list(cache or []))
@@ -253,7 +254,7 @@ def generate(
         # An empty (fresh static) cache still needs the full prompt for prefill.
         next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
         active_cache = cache
-        generated_tokens: List[Any] = []
+        generated_tokens: list[Any] = []
         for _ in range(max_new_tokens):
             logits, active_cache = _forward(model, next_input, active_cache, use_cache)
             next_token = sample_next_token(logits, temperature, top_k, top_p)

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, cast
+from collections.abc import Sequence
 
 import numpy as np
 

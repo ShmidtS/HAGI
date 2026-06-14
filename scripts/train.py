@@ -875,21 +875,6 @@ def save_training_checkpoint(
     torch.save(state, path)
 
 
-def save_inference_only_checkpoint(
-    model: HAGI,
-    model_ema: torch.nn.Module | None,
-    path: Path,
-) -> None:
-    """Save only model state_dict and optional EMA state_dict for inference."""
-    path.mkdir(parents=True, exist_ok=True)
-    state: dict[str, Any] = {"model": model.state_dict()}
-    if model_ema is not None:
-        state["ema"] = {
-            name: value.detach().cpu() for name, value in model_ema.state_dict().items()
-        }
-    torch.save(state, path / "inference.pt")
-
-
 def print_model_summary(
     model: HAGI, cfg: Any, device: str, use_prefix_lm: bool, use_composite_loss: bool
 ) -> None:

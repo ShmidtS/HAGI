@@ -184,21 +184,6 @@ def _as_logits(output: torch.Tensor | tuple[Any, ...] | dict[str, Any]) -> torch
     raise TypeError("model output must be a tensor, tuple, or dict")
 
 
-def _model_output_tensor(
-    model_output: torch.Tensor | dict[str, Any] | None,
-) -> torch.Tensor | None:
-    if model_output is None:
-        return None
-    if isinstance(model_output, torch.Tensor):
-        return model_output
-    if isinstance(model_output, dict):
-        for key in ("hidden_states", "output", "logits"):
-            value = model_output.get(key)
-            if isinstance(value, torch.Tensor):
-                return value
-    return None
-
-
 def compute_isomorphic_loss(
     invariant_src,
     invariant_tgt=None,

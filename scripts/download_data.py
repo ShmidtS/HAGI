@@ -265,33 +265,6 @@ def flush_shard(tokens: list[int], output_dir: Path, shard_idx: int) -> Path:
     return path
 
 
-def materialize_token_bins(
-    output_dir: Path, tokens_by_source: dict[str, list[int]]
-) -> dict[str, Path]:
-    import json
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    paths: dict[str, Path] = {}
-    manifest: dict[str, Any] = {"version": 1, "sources": {}}
-    for name, tokens in tokens_by_source.items():
-        path = output_dir / f"{name}.bin"
-        array = np.asarray(tokens, dtype=np.uint16)
-        memmap = np.memmap(path, dtype=np.uint16, mode="w+", shape=array.shape)
-        memmap[:] = array[:]
-        memmap.flush()
-        paths[name] = path
-        manifest["sources"][name] = {
-            "path": path.name,
-            "tokens": int(array.size),
-            "dtype": "uint16",
-        }
-    (output_dir / "download_manifest.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    return paths
-
-
 def _row_text(source: str, row: dict[str, Any]) -> str:
     if source == "smoltalk":
         messages = row.get("messages", [])

@@ -62,7 +62,7 @@ class TokenizerWrapper:
     @classmethod
     def smollm2(
         cls, model_name: str = SMOLLM2_TOKENIZER, **kwargs: Any
-    ) -> "TokenizerWrapper":
+    ) -> TokenizerWrapper:
         return cls(model_name=model_name, **kwargs)
 
     @property

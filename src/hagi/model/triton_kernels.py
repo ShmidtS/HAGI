@@ -68,8 +68,8 @@ if _triton_available:
         table_ptr,
         out_ptr,
         stride_batch,
-        BLOCK: "tl.constexpr",
-        BLADE_COUNT: "tl.constexpr",
+        BLOCK: tl.constexpr,
+        BLADE_COUNT: tl.constexpr,
     ):
         pid = tl.program_id(0)
         x_ptr += pid * stride_batch
@@ -193,11 +193,11 @@ if _triton_available:
         kv_len,
         head_dim,
         scale,
-        BLOCK_M: "tl.constexpr",
-        BLOCK_N: "tl.constexpr",
-        BLOCK_D: "tl.constexpr",
-        IS_CAUSAL: "tl.constexpr",
-        USE_MASK: "tl.constexpr",
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        IS_CAUSAL: tl.constexpr,
+        USE_MASK: tl.constexpr,
     ):
         # Each block handles one tile of queries
         pid_m = tl.program_id(0)
@@ -449,7 +449,7 @@ if _triton_available:
         stride_row,
         n_cols,
         eps,
-        BLOCK_SIZE: "tl.constexpr",
+        BLOCK_SIZE: tl.constexpr,
     ):
         row = tl.program_id(0)
         x_ptr += row * stride_row

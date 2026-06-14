@@ -362,22 +362,3 @@ def load_checkpoint(
         model.load_state_dict(ema_state)
         ema_state = None
     return model, int(state.get("step", 0)), ema_state
-
-
-def latest_checkpoint(ckpt_dir: str) -> Path | None:
-    """Newest `step-*.pt` in ckpt_dir, or None if there are none."""
-    cks = sorted(Path(ckpt_dir).glob("step-*.pt"))
-    return cks[-1] if cks else None
-
-
-def resume_into(model: HAGI, optimizer, path: str, device: str = "cpu") -> int:
-    """Load weights and optimizer state into an existing model + optimizer.
-
-    Returns the step to resume from. Used for cloud/time-limited training
-    where sessions die mid-run.
-    """
-    state = torch.load(path, map_location=device, weights_only=True)
-    model.load_state_dict(state["model"])
-    if optimizer is not None and "optimizer" in state:
-        optimizer.load_state_dict(state["optimizer"])
-    return int(state.get("step", 0))

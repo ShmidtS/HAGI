@@ -7,7 +7,7 @@ from collections import defaultdict
 
 
 def analyze_trace(path: Path):
-    with open(path, "r") as f:
+    with open(path) as f:
         data = json.load(f)
 
     trace_events = data.get("traceEvents", [])

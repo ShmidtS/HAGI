@@ -8,7 +8,7 @@ routing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import torch
 
@@ -20,7 +20,6 @@ DomainId = int
 
 # Singleton defaults to avoid repeated dataclass construction overhead
 _DEFAULT_TV_00 = TruthValue(0.5, 0.0)
-_DEFAULT_TV_01 = TruthValue(0.5, 0.1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,10 +39,10 @@ class NarsHrmController:
     """
 
     def __init__(self, policy_capacity: int = 10, max_observations: int = 1000) -> None:
-        self.observed_losses: List[float] = []
-        self.observed_grad_norms: List[float] = []
-        self.control_budgets: Dict[str, BudgetValue] = {}
-        self.control_truths: Dict[str, TruthValue] = {}
+        self.observed_losses: list[float] = []
+        self.observed_grad_norms: list[float] = []
+        self.control_budgets: dict[str, BudgetValue] = {}
+        self.control_truths: dict[str, TruthValue] = {}
         self._policy_capacity = policy_capacity
         self._policy_bag: Bag[HrmControlPolicy] = Bag()
         self._policy_counter: int = 0
@@ -222,62 +221,8 @@ class NarsHdimReasoner:
     """
 
     def __init__(self) -> None:
-        self.domain_concepts: Dict[DomainId, TruthValue] = {}
-        self.transfer_beliefs: Dict[Tuple[DomainId, DomainId], TruthValue] = {}
-
-    def recommend_transfer(
-        self, source: DomainId, known_targets: List[DomainId]
-    ) -> DomainId:
-        """Return the target domain with the strongest transfer belief."""
-        if not known_targets:
-            raise ValueError("known_targets must not be empty")
-
-        best_target = known_targets[0]
-        best_score = -1.0
-        for tgt in known_targets:
-            belief = self.transfer_beliefs.get((source, tgt), _DEFAULT_TV_01)
-            score = belief.frequency * belief.confidence
-            if score > best_score:
-                best_score = score
-                best_target = tgt
-        return best_target
-
-    def observe_transfer_feedback(
-        self, source: DomainId, target: DomainId, fidelity: float
-    ) -> None:
-        """Revise the transfer belief for ``(source, target)`` with observed fidelity."""
-        new_truth = TruthValue(fidelity, 0.9)
-        key = (source, target)
-        existing = self.transfer_beliefs.get(key, _DEFAULT_TV_00)
-        self.transfer_beliefs[key] = truth_revision(existing, new_truth)
-
-    def transfer_domain_reasoned_or_fallback(
-        self,
-        registry: Any,
-        source: DomainId,
-        target_hint: DomainId,
-    ) -> Tuple[DomainId, Any]:
-        """Return a target domain and its rotor.
-
-        If the reasoned target has a strong belief, it is preferred; otherwise the
-        ``target_hint`` is used as a fallback.
-        """
-        if hasattr(registry, "num_rotors"):
-            known_targets = list(range(registry.num_rotors))
-        else:
-            known_targets = [target_hint]
-
-        reasoned = self.recommend_transfer(source, known_targets)
-        belief = self.transfer_beliefs.get((source, reasoned), _DEFAULT_TV_00)
-
-        target = (
-            reasoned
-            if belief.confidence >= 0.3 and belief.frequency >= 0.3
-            else target_hint
-        )
-
-        rotor = registry.value(target) if hasattr(registry, "value") else None
-        return target, rotor
+        self.domain_concepts: dict[DomainId, TruthValue] = {}
+        self.transfer_beliefs: dict[tuple[DomainId, DomainId], TruthValue] = {}
 
     def state_dict(self) -> dict[str, Any]:
         """Return serializable state."""
@@ -314,9 +259,9 @@ class NarsMsaReasoner:
     """
 
     def __init__(self) -> None:
-        self.slot_beliefs: Dict[int, TruthValue] = {}
-        self.slot_budgets: Dict[int, BudgetValue] = {}
-        self.recency_weights: Dict[int, float] = {}
+        self.slot_beliefs: dict[int, TruthValue] = {}
+        self.slot_budgets: dict[int, BudgetValue] = {}
+        self.recency_weights: dict[int, float] = {}
 
     def route_top_k_with_nars(
         self,
@@ -326,7 +271,7 @@ class NarsMsaReasoner:
         nars_weight: float = 0.6,
         recency_weight: float = 0.3,
         dot_weight: float = 0.1,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Blend NARS belief, recency, and dot-product to route a query.
 
         Returns:
@@ -405,21 +350,6 @@ class NarsMsaReasoner:
         return torch.as_tensor(
             weights, dtype=torch.float32, device=slot_ids.device
         ).view_as(slot_ids)
-
-    def observe_route_feedback(self, slot_id: int, usefulness: float) -> None:
-        """Revise slot truth, bump its budget, and update recency weights."""
-        new_truth = TruthValue(usefulness, 0.9)
-        existing = self.slot_beliefs.get(slot_id, _DEFAULT_TV_00)
-        self.slot_beliefs[slot_id] = truth_revision(existing, new_truth)
-        # Update slot budget with usefulness as priority
-        self.slot_budgets[slot_id] = BudgetValue(
-            priority=usefulness, durability=0.9, quality=0.5
-        )
-        # Decay all recency weights
-        for sid in self.recency_weights:
-            self.recency_weights[sid] *= 0.99
-        # Bump the accessed slot to 1.0
-        self.recency_weights[slot_id] = 1.0
 
     def state_dict(self) -> dict[str, Any]:
         """Return serializable state."""

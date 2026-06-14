@@ -446,7 +446,7 @@ class CombinedOptimizer(torch.optim.Optimizer):
 
 def _build_muon_ademamix(
     named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]
-) -> "CombinedOptimizer":
+) -> CombinedOptimizer:
     """Muon on 2D hidden weights + AdEMAMix on 1D/embed/head (replaces AdamW + separate EMA)."""
     adamw_lr = float(cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
     wd = float(cfg.get("weight_decay", 0.1))
@@ -487,7 +487,7 @@ def _build_muon_ademamix(
 
 def _build_muon_adamw(
     named: list[tuple[str, nn.Parameter]], cfg: dict[str, Any]
-) -> "CombinedOptimizer":
+) -> CombinedOptimizer:
     """Muon on 2D hidden weights + AdamW on 1D/embed/head. arch_decision §Optimizer."""
     adamw_lr = float(cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
     wd = float(cfg.get("weight_decay", 0.1))
