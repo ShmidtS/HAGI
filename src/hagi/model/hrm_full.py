@@ -168,8 +168,12 @@ class HRMCore(nn.Module):
         gdr_state = None
         pre_gdr_h = None
         for h_cycle in range(self.h_cycles):
+            # z_H is invariant across all l_cycles within an h_cycle (it only
+            # updates after the l-cycle loop via h_transition). Lift its
+            # projection out so it runs once per h_cycle instead of l_cycles.
+            h_term = self.z_h_to_hidden(z_H).unsqueeze(1)
             for l_cycle in range(self.l_cycles):
-                bias = self.z_l_to_hidden(z_L).unsqueeze(1) + self.z_h_to_hidden(z_H).unsqueeze(1)
+                bias = h_term + self.z_l_to_hidden(z_L).unsqueeze(1)
                 for block in reasoning_blocks:
                     h_in = h + bias
                     if gradient_checkpointing:
