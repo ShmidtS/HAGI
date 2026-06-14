@@ -1188,7 +1188,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     optimizer_kind = str(train_cfg.get("optimizer", "adamw")).lower()
     magic_norm_max = float(train_cfg.get("magic_norm_max", 1.0))
     data_cfg = cfg.get("data", {})
-    dataset_mode = args.dataset_mode or str(data_cfg.get("dataset_mode", "memmap"))
+    dataset_mode = getattr(args, "dataset_mode", None) or str(data_cfg.get("dataset_mode", "memmap"))
     train_path = (
         resolve_train_path(cfg, args.train_path, args.data_dir)
         if args.train_path is not None or not resolve_mix_paths(data_cfg, args.data_dir)
@@ -1197,8 +1197,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     eval_interval = int(train_cfg.get("eval_interval", 0))
     eval_samples = int(train_cfg.get("eval_samples", 500))
     sequential_cycles = int(
-        args.dataset_cycles
-        if args.dataset_cycles is not None
+        getattr(args, "dataset_cycles", None)
+        if getattr(args, "dataset_cycles", None) is not None
         else data_cfg.get("sequential_cycles", 0)
     )
     # Compute max_steps early so we can derive steps_per_cycle for sequential mode
@@ -1329,6 +1329,23 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     last_components: dict[str, float] = {}
     accum_loss_tensor: torch.Tensor | None = None
 
+    # Compression observability (opt-in). Stateless, not in checkpoint.
+    compression_monitor = None
+    cm_cfg = train_cfg.get("compression_monitor", {})
+    if cm_cfg.get("enabled", False):
+        from hagi.train.compression_metrics import CompressionMonitor
+
+        num_params = sum(p.numel() for p in model.parameters())
+        train_tokens_cm = int(data_cfg.get("train_tokens", 0))
+        compression_monitor = CompressionMonitor(
+            num_params=num_params, train_tokens=train_tokens_cm, cfg=cm_cfg
+        )
+        if getattr(model_cfg, "use_fused_ce", False):
+            print(
+                "WARNING: compression_monitor enabled with use_fused_ce; "
+                "logits are None on the fused path, dependent metrics skipped"
+            )
+
     for step in range(start_step, max_steps):
         if optimizer_kind == "schedule-free-adamw":
             lr = learning_rate
@@ -1362,6 +1379,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         accum_loss_tensor = None
         accum_components: dict[str, torch.Tensor] = {}
         need_components = log_interval > 0 and step % log_interval == 0
+        monitor_logits: torch.Tensor | None = None
+        monitor_targets: torch.Tensor | None = None
+        monitor_hidden: torch.Tensor | None = None
         backward_count = 0
         t_forward = 0.0
         t_backward = 0.0
@@ -1436,6 +1456,16 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     else:
                         accum_components[name] = prev + value
             tokens_since_log += tokens.numel()
+            if compression_monitor is not None and need_components:
+                # Retain last micro-batch tensors (detached) for compression metrics.
+                monitor_logits = logits.detach() if logits is not None else None
+                monitor_targets = targets.detach()
+                hidden_probe = (
+                    output.get("pre_norm_hidden") if isinstance(output, dict) else None
+                )
+                monitor_hidden = (
+                    hidden_probe.detach() if hidden_probe is not None else None
+                )
             del output, loss, logits
 
         if backward_count == 0:
@@ -1545,11 +1575,27 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 allocated = torch.cuda.memory_allocated(args.device) / (1024**3)
                 reserved = torch.cuda.memory_reserved(args.device) / (1024**3)
                 mem_text = f" | mem_allocated {allocated:.2f}GB | mem_reserved {reserved:.2f}GB"
+            compression_text = ""
+            if compression_monitor is not None and monitor_logits is not None:
+                cm = compression_monitor.compute(
+                    logits=monitor_logits,
+                    hidden=monitor_hidden,
+                    targets=monitor_targets,
+                    step=step,
+                )
+                compression_text = (
+                    f" | c_ratio {cm['compression_ratio']:.2f}"
+                    f" | entropy {cm.get('entropy', 0.0):.4f}"
+                    f" | ece {cm.get('calibration_error', 0.0):.4f}"
+                    f" | artifact {cm.get('artifact_ratio', 0.0):.2%}"
+                )
+                if "effective_rank" in cm:
+                    compression_text += f" | eff_rank {cm['effective_rank']:.2f}"
             print(
                 f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
                 f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm_val:.2e} | "
                 f"magic_norm_max_grad {magic_norm_max_grad.item():.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text} | "
-                f"fwd {t_forward*1000:.1f}ms | bwd {t_backward*1000:.1f}ms | opt {t_opt*1000:.1f}ms"
+                f"fwd {t_forward*1000:.1f}ms | bwd {t_backward*1000:.1f}ms | opt {t_opt*1000:.1f}ms{compression_text}"
             )
             tokens_since_log = 0
             last_log_time = now

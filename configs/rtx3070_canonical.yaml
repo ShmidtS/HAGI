@@ -65,7 +65,7 @@ model:
     trivector: 64
     vector: 192
     vector_momentum: 0.5
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   h_dim: 256
   hdim_delay_steps: 1
   hdim_full: true
@@ -121,7 +121,7 @@ training:
   eval_samples: 500
   grad_accum_steps: 2
   grad_clip: 1.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   log_interval: 25
   loss_warmup_mode: linear
   magic_norm_max: 1.0
@@ -129,7 +129,7 @@ training:
   min_lr_ratio: 0.1
   muon_lr: 0.003
   muon_momentum: 0.95
-  muon_ns_steps: 20
+  muon_ns_steps: 5
   optimizer: muon_adamw
   pin_memory: true
   precision: manual_bf16
@@ -139,3 +139,9 @@ training:
   warmup_steps: 100
   weight_decay: 0.1
   num_workers: 0
+  compression_monitor:
+    enabled: false
+    artifact_threshold: 0.5
+    calibration_bins: 10
+    rank_subsample: 256
+    heavy_interval_mult: 4

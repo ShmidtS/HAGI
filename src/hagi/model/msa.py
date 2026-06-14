@@ -640,8 +640,8 @@ class HDIMSlotRouter(nn.Module):
         self.hidden_size = hidden_size
         self.blade_count = blade_count
         self.key_dim = key_dim
-        self.hidden_to_mv = nn.Linear(hidden_size, blade_count)
-        self.key_proj = nn.Linear(blade_count, key_dim)
+        self.hidden_to_mv = nn.Linear(hidden_size, blade_count, bias=False)
+        self.key_proj = nn.Linear(blade_count, key_dim, bias=False)
 
     def routing_key(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Compute scalar Clifford invariant from hidden states.

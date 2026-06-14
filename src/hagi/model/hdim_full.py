@@ -17,7 +17,7 @@ class HiddenToMultivector(nn.Module):
         self.hidden_size = hidden_size
         self.heads = heads
         self.blade_count = blade_count
-        self.proj = nn.Linear(hidden_size, heads * blade_count)
+        self.proj = nn.Linear(hidden_size, heads * blade_count, bias=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         B, T, _ = hidden_states.shape

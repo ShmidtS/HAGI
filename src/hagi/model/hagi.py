@@ -181,7 +181,13 @@ class HAGI(nn.Module):
             self.nars_msa = NarsMsaReasoner()
 
         loops = cfg.loop_count if cfg.use_loop else 1
-        self.iter_embed = nn.Parameter(torch.randn(loops, cfg.hidden_size) * 0.01)
+        # iter_embed is consumed only by the non-HRM loop path. When HRM owns
+        # the recurrence loop the parameter is dead (created, never updated,
+        # never read). From-scratch training lets us skip it cleanly.
+        if cfg.hrm:
+            self.register_buffer("iter_embed", torch.empty(0), persistent=False)
+        else:
+            self.iter_embed = nn.Parameter(torch.randn(loops, cfg.hidden_size) * 0.01)
 
         self.final_norm = RMSNorm(cfg.hidden_size, tcfg.norm_eps)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
@@ -551,6 +557,7 @@ class HAGI(nn.Module):
         pre_logits_hidden = (
             h if need_quality and self.quality_head is not None else None
         )
+        pre_norm_hidden = h  # pre-norm hidden for compression observability
         h = self.final_norm(h)
 
         logits = None
@@ -623,6 +630,7 @@ class HAGI(nn.Module):
                     result["invariant_tgt"] = gdr_state["fused"]
             if pre_logits_hidden is not None:
                 result["model_output"] = pre_logits_hidden
+            result["pre_norm_hidden"] = pre_norm_hidden
             if msa_slot_ids is not None:
                 result["msa_slot_ids"] = msa_slot_ids
                 result["msa_scores"] = msa_scores
