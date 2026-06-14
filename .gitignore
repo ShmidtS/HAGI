@@ -50,3 +50,7 @@ wandb/
 !prototype/data/
 benchmarks/results/*/
 !benchmarks/results/.gitkeep
+
+# local micro-experiment runs (checkpoints, logs)
+_local/
+_smoke*/
