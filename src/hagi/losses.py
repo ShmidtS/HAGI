@@ -237,6 +237,8 @@ def composite_loss(
     moe_aux_loss: torch.Tensor | None = None,
     num_moe_layers: int | torch.Tensor | None = None,
     chunk_size: int = 0,
+    quality_score: torch.Tensor | None = None,
+    quality_targets: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Compute CE, auxiliary, isomorphic, and weighted total losses."""
     # Pick a reference tensor for device/dtype when logits is None (fused CE path)
@@ -269,7 +271,13 @@ def composite_loss(
     if num_moe_layers is None and isinstance(auxiliary_output, dict):
         num_moe_layers = auxiliary_output.get("num_moe_layers")
 
-    merged_weights = {"w_ce": 1.0, "w_aux": 0.1, "w_iso": 0.01, "w_moe": 0.0}
+    merged_weights = {
+        "w_ce": 1.0,
+        "w_aux": 0.1,
+        "w_iso": 0.01,
+        "w_moe": 0.0,
+        "w_quality": 0.0,
+    }
     if weights is not None:
         merged_weights.update(weights)
 
@@ -317,5 +325,21 @@ def composite_loss(
         result["L_moe"] = l_moe
     else:
         result["L_moe"] = l_ce.new_zeros(())
+    if (
+        merged_weights.get("w_quality", 0.0) != 0.0
+        and quality_score is not None
+        and quality_targets is not None
+    ):
+        valid = quality_targets != -1.0
+        if valid.any():
+            l_quality = F.binary_cross_entropy_with_logits(
+                quality_score[valid], quality_targets[valid], reduction="mean"
+            ).to(device=ref_tensor.device, dtype=ref_tensor.dtype)
+            l_total = l_total + merged_weights["w_quality"] * l_quality
+            result["L_quality"] = l_quality
+        else:
+            result["L_quality"] = l_ce.new_zeros(())
+    else:
+        result["L_quality"] = l_ce.new_zeros(())
     result["L_total"] = l_total
     return result

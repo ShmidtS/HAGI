@@ -647,6 +647,12 @@ def compute_loss(
     num_moe_layers = (
         model_output.get("num_moe_layers") if isinstance(model_output, dict) else None
     )
+    quality_score = (
+        model_output.get("quality_score") if isinstance(model_output, dict) else None
+    )
+    quality_targets = (
+        model_output.get("quality_target") if isinstance(model_output, dict) else None
+    )
     if num_moe_layers is None:
         # Estimate: 12 layers total (perception + reasoning + expression)
         num_moe_layers = 12
@@ -679,6 +685,8 @@ def compute_loss(
             moe_aux_loss=moe_aux_loss,
             num_moe_layers=num_moe_layers,
             chunk_size=chunk_size,
+            quality_score=quality_score,
+            quality_targets=quality_targets,
         )
     else:
         losses = composite_loss(
@@ -708,6 +716,8 @@ def compute_loss(
             moe_aux_loss=moe_aux_loss,
             num_moe_layers=num_moe_layers,
             chunk_size=chunk_size,
+            quality_score=quality_score,
+            quality_targets=quality_targets,
         )
     total_loss = losses["L_total"]
     components = {name: value.detach().float() for name, value in losses.items()}
@@ -1420,6 +1430,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     and effective_weights.get("w_aux", 0) == 0
                     and effective_weights.get("w_iso", 0) == 0
                     and effective_weights.get("w_moe", 0) == 0
+                    and effective_weights.get("w_quality", 0) == 0
                 ):
                     loss = output["loss"]
                     components = {}

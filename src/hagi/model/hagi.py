@@ -423,6 +423,7 @@ class HAGI(nn.Module):
                         tgt_rotor_idx=tgt_idx,
                         moe_aux_losses=moe_aux_losses,
                         nars_controller=self.nars_hrm,
+                        noise_sigma=self.cfg.thinking_noise,
                     )
                 elif gdr_type == "hdim":
                     if need_iso:
@@ -449,6 +450,7 @@ class HAGI(nn.Module):
                         gradient_checkpointing=use_gradient_checkpointing,
                         moe_aux_losses=moe_aux_losses,
                         nars_controller=self.nars_hrm,
+                        noise_sigma=self.cfg.thinking_noise,
                     )
                 else:
                     h = self.gdr(h)
@@ -461,6 +463,7 @@ class HAGI(nn.Module):
                         gradient_checkpointing=use_gradient_checkpointing,
                         moe_aux_losses=moe_aux_losses,
                         nars_controller=self.nars_hrm,
+                        noise_sigma=self.cfg.thinking_noise,
                     )
             else:
                 h, _, _, _, _ = self.hrm(
@@ -472,6 +475,7 @@ class HAGI(nn.Module):
                     gradient_checkpointing=use_gradient_checkpointing,
                     moe_aux_losses=moe_aux_losses,
                     nars_controller=self.nars_hrm,
+                    noise_sigma=self.cfg.thinking_noise,
                 )
             layer_idx += len(self.reasoning)
         else:
@@ -599,6 +603,20 @@ class HAGI(nn.Module):
             if "fused" in gdr_state:
                 gdr_state["features"] = self.gdr_aux_proj(gdr_state["fused"])
 
+        quality_target = None
+        if (
+            need_quality
+            and self.quality_head is not None
+            and logits is not None
+            and targets is not None
+        ):
+            with torch.no_grad():
+                preds = logits.argmax(dim=-1)
+                quality_target = (preds == targets).float()
+                quality_target = quality_target.masked_fill(
+                    targets == ignore_index, -1.0
+                )
+
         if training_mode:
             result = {"logits": logits}
             if loss is not None:
@@ -645,6 +663,8 @@ class HAGI(nn.Module):
                 result["quality_score"] = self.quality_head(pre_logits_hidden).squeeze(
                     -1
                 )
+            if quality_target is not None:
+                result["quality_target"] = quality_target
             return result
 
         if loss is not None:

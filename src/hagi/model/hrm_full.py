@@ -152,6 +152,7 @@ class HRMCore(nn.Module):
         tgt_rotor_idx: int | torch.Tensor = 0,
         moe_aux_losses: list[torch.Tensor] | None = None,
         nars_controller=None,
+        noise_sigma: float = 0.0,
     ):
         h = hidden_states
         B, T, H = h.shape
@@ -170,6 +171,8 @@ class HRMCore(nn.Module):
         # dtype/device access and the gate scaling below.
         z_H = cast(torch.Tensor, z_H)
         z_L = cast(torch.Tensor, z_L)
+        assert isinstance(z_H, torch.Tensor)
+        assert isinstance(z_L, torch.Tensor)
 
         # NARS truth-weighted gating — active controller
         if nars_controller is not None:
@@ -183,11 +186,18 @@ class HRMCore(nn.Module):
         gdr_state = None
         pre_gdr_h = None
         for h_cycle in range(self.h_cycles):
+            if noise_sigma > 0.0:
+                z_H = z_H + torch.randn_like(z_H) * noise_sigma
             # z_H is invariant across all l_cycles within an h_cycle (it only
             # updates after the l-cycle loop via h_transition). Lift its
             # projection out so it runs once per h_cycle instead of l_cycles.
             h_term = self.z_h_to_hidden(z_H).unsqueeze(1)
             for l_cycle in range(self.l_cycles):
+                # Loop reassignments can widen the inferred type back to the
+                # parameter union; narrow before each use.
+                z_L = cast(torch.Tensor, z_L)
+                if noise_sigma > 0.0:
+                    z_L = z_L + torch.randn_like(z_L) * noise_sigma
                 bias = h_term + self.z_l_to_hidden(z_L).unsqueeze(1)
                 for block in reasoning_blocks:
                     h_in = h + bias

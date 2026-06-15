@@ -417,19 +417,21 @@ def generate_with_rollouts(
         finally:
             if hasattr(model, "cfg") and hasattr(model.cfg, "thinking_noise"):
                 model.cfg.thinking_noise = old_noise
-        # Confidence score from last-position logits
         if torch is not None and torch.is_tensor(result):
             with torch.no_grad():
-                last_logits = (
-                    compiled_model(result[:, -1:])
-                    if hasattr(compiled_model, "forward")
-                    else None
-                )
-                if last_logits is not None:
-                    if isinstance(last_logits, tuple):
-                        last_logits = last_logits[0]
+                score_output = compiled_model(result[:, -1:], training_mode=True)
+                if isinstance(score_output, dict) and "quality_score" in score_output:
+                    score = score_output["quality_score"].mean().item()
+                else:
+                    last_logits = (
+                        score_output[0]
+                        if isinstance(score_output, tuple)
+                        else score_output["logits"]
+                        if isinstance(score_output, dict)
+                        else score_output
+                    )
                     score = confidence_score(last_logits[..., -1, :])
-                    if score > best_score:
-                        best_score = score
-                        best_generated = result
+                if score > best_score:
+                    best_score = score
+                    best_generated = result
     return best_generated if best_generated is not None else result

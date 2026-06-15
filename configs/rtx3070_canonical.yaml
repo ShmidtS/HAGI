@@ -56,7 +56,7 @@ eval:
 model:
   ce_chunk_size: 0
   compile: false
-  use_fused_ce: false
+  use_fused_ce: true
   expression_layers: 4
   grades:
     bivector: 192
@@ -80,7 +80,7 @@ model:
   moe_alpha: 0.01
   moe_intermediate_size: 512
   moe_top_k: 1
-  msa_slot_count: 100
+  msa_slot_count: 10000
   msa_top_k: 5
   num_experts: 4
   perception_layers: 4
@@ -101,6 +101,7 @@ model:
   use_moe: true
   use_msa: true
   use_nars: true
+  use_quality_head: true
   vocab_size: 49152
 name: rtx3070_canonical
 training:
@@ -113,6 +114,7 @@ training:
     w_ce: 1.0
     w_iso: 0.05
     w_moe: 0.005
+    w_quality: 0.01
   use_gdr_aux: true
   cooldown_frac: 0.05
   ema:
