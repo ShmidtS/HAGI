@@ -198,7 +198,7 @@ def main():
         for r in results:
             if r["kind"] != "lora":
                 d = r["held_out_ce"] - lora["held_out_ce"]
-                print(f"  {r['kind']:<6} ΔCE = {d:+.4f}   ΔEM = {r['test_em']-lora['test_em']:+.3f}"
+                print(f"  {r['kind']:<6} dCE = {d:+.4f}   dEM = {r['test_em']-lora['test_em']:+.3f}"
                       f"   ({'WINS' if d < 0 else 'loses'} vs LoRA)")
     print("\nsaved ->", results_path)
 

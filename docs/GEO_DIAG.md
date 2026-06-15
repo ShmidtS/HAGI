@@ -128,3 +128,49 @@ as a cheap adapter on a proven base**, never the grade partition. The pivot stan
 
 Reproduce: `configs/micro_{b,d,d_gated}.yaml`, `prototype/tests/test_gdr_gated.py`,
 notebook `notebooks/runs/hagi_kaggle_geo_diag_2026-06-09.ipynb` (cloud original).
+
+---
+
+## T1 adapter bake-off (2026-06-15) — does Clifford help as an ADAPTER?
+
+The from-scratch tests killed grade decomposition; the gated re-test left one ember —
+the geometric-product cross-term was the only gate that moved. T1 is its last fair
+shot: re-cast the geometric product as a **PEFT adapter on a frozen pretrained base**
+(SmolLM2-360M) and ask whether it beats a plain low-rank adapter at **matched budget**.
+Maybe grades fail building representations from scratch but help operating on good ones.
+
+Three adapters injected at the same `q_proj`/`v_proj` targets, same GSM8K SFT data,
+schedule, seed — only the adapter math differs (`prototype/model/clifford_adapters.py`,
+8 unit tests + SmolLM2 integration smoke). Both Clifford adapters are ReZero exact
+identities at init. Trained locally on a 4GB card (frozen base + gradient checkpointing,
+peak 1.6 GB), 400 steps, held-out CE on GSM8K answer tokens (primary) + test exact-match.
+
+| Adapter | Trainable | Held-out CE | PPL | Test EM | ΔCE vs LoRA |
+|---------|-----------|-------------|-----|---------|-------------|
+| **LoRA** (low-rank delta) | 1,638,400 | **0.6699** | 1.95 | **0.060** | — |
+| Rotor (orthogonal sandwich) | 15,360 | 1.1098 | 3.03 | 0.007 | **+0.4399** |
+| Geo (geometric-product residual) | 1,639,488 | 1.1823 | 3.26 | 0.033 | **+0.5124** |
+
+```json
+[{"kind": "lora",  "trainable": 1638400, "held_out_ce": 0.6699, "ppl": 1.954, "test_em": 0.06},
+ {"kind": "geo",   "trainable": 1639488, "held_out_ce": 1.1823, "ppl": 3.262, "test_em": 0.0333},
+ {"kind": "rotor", "trainable": 15360,   "held_out_ce": 1.1098, "ppl": 3.034, "test_em": 0.0067}]
+```
+
+### Read
+
+- **Geo loses to LoRA by +0.5124 nats at matched 1.64M params** — not noise, a chasm.
+  LoRA also wins on **train loss** (0.77 vs geo 1.03 vs rotor 1.28), so geo/rotor are
+  genuinely worse fits, not LoRA overfitting. EM agrees: LoRA 6% > geo 3.3% > rotor 0.7%.
+- This is the pre-registered kill condition (`geo ΔCE ≥ 0`). The geometric-product
+  ember was noise. **Clifford structure has no edge as an adapter either.**
+- Caveat (honest): single seed, fixed HPs not tuned per adapter, and geo's single-scalar
+  ReZero gate may open slowly — a per-channel-gated / higher-LR geo might narrow the gap.
+  But the deficit is large and the prior is now three independent falsifications deep.
+
+**Conclusion: Clifford is falsified across both regimes — from-scratch (GDR grades +
+geometric product) AND as a PEFT adapter (geo, rotor) on a proven base. The pivot is
+unambiguous: plain LoRA capability work on a strong open base. Clifford retired.**
+
+Reproduce: `scripts/run_t1_local.py` (local, 4GB) or `notebooks/hagi_t1_adapter_bakeoff.ipynb`
+(Colab). Adapter weights + `results.json` under the run's `OUT_DIR`.
