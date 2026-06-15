@@ -129,10 +129,13 @@ def sample_next_token(
 
 
 def _model_device(model: Any) -> Any:
+    if torch is None:
+        return None
     try:
-        return next(model.parameters()).device
+        device = next(model.parameters()).device
     except (AttributeError, StopIteration):
         return None
+    return device if isinstance(device, torch.device) else None
 
 
 def _maybe_compile(model: Any, compile_model: bool) -> Any:
@@ -188,7 +191,11 @@ def _maybe_static_cache(
 
 
 def _forward(
-    model: Any, input_ids: Any, cache: CacheKeyValues | None, use_cache: bool
+    model: Any,
+    input_ids: Any,
+    cache: CacheKeyValues | None,
+    use_cache: bool,
+    external_msa_registry: Any | None,
 ) -> tuple[Any, CacheKeyValues | None]:
     if use_cache:
         try:
@@ -196,11 +203,17 @@ def _forward(
                 input_ids,
                 past_key_values=cache.to_model_cache() if cache is not None else None,
                 use_cache=True,
+                external_msa_registry=external_msa_registry,
             )
             return _split_output(output)
         except TypeError:
             pass
-    return _split_output(model(input_ids))
+    try:
+        return _split_output(
+            model(input_ids, external_msa_registry=external_msa_registry)
+        )
+    except TypeError:
+        return _split_output(model(input_ids))
 
 
 @torch.no_grad() if torch is not None else (lambda fn: fn)
@@ -218,6 +231,7 @@ def generate(
     pin_memory: bool = False,
     training_mode: bool = False,
     use_static_cache: bool = False,
+    external_msa_registry: Any | None = None,
 ) -> Any:
     """Generate token ids with optional KV-cache acceleration.
 
@@ -256,7 +270,9 @@ def generate(
         active_cache = cache
         generated_tokens: list[Any] = []
         for _ in range(max_new_tokens):
-            logits, active_cache = _forward(model, next_input, active_cache, use_cache)
+            logits, active_cache = _forward(
+                model, next_input, active_cache, use_cache, external_msa_registry
+            )
             next_token = sample_next_token(logits, temperature, top_k, top_p)
             if next_token.dim() == 0:
                 next_token = next_token.unsqueeze(0)
@@ -302,6 +318,7 @@ def stream_generate(
     compile_model: bool = False,
     pin_memory: bool = False,
     use_static_cache: bool = False,
+    external_msa_registry: Any | None = None,
 ) -> Iterator[Any]:
     """Yield next token ids as they are generated."""
     if torch is None:
@@ -352,7 +369,9 @@ def stream_generate(
     next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
     active_cache = cache
     for _ in range(max_new_tokens):
-        logits, active_cache = _forward(model, next_input, active_cache, use_cache)
+        logits, active_cache = _forward(
+            model, next_input, active_cache, use_cache, external_msa_registry
+        )
         next_token = sample_next_token(logits, temperature, top_k, top_p)
         if next_token.dim() == 0:
             next_token = next_token.unsqueeze(0)
@@ -377,6 +396,7 @@ def generate_with_rollouts(
     noise_sigma: float = 0.0,
     use_cache: bool = True,
     compile_model: bool = False,
+    external_msa_registry: Any | None = None,
 ) -> Any:
     """Generate with multiple noisy rollouts, select best by confidence (PTRM idea)."""
     if rollouts <= 1 or noise_sigma <= 0.0:
@@ -390,6 +410,7 @@ def generate_with_rollouts(
             eos_token_id,
             use_cache=use_cache,
             compile_model=compile_model,
+            external_msa_registry=external_msa_registry,
         )
 
     best_generated = None
@@ -413,6 +434,7 @@ def generate_with_rollouts(
                 use_cache=use_cache,
                 compile_model=False,
                 training_mode=True,
+                external_msa_registry=external_msa_registry,
             )
         finally:
             if hasattr(model, "cfg") and hasattr(model.cfg, "thinking_noise"):

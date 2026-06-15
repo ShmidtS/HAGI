@@ -152,8 +152,10 @@ def toy_answer(model: HAGI, question: str, device: str, max_new_tokens: int) -> 
 def toy_chat(checkpoint_path: Path, device: str, max_new_tokens: int) -> None:
     model, step, _ = load_checkpoint(str(checkpoint_path), device=device, use_ema=True)
     model.eval()
+    feedback: list[float] = []
     print(f"loaded checkpoint from step {step}: {checkpoint_path}")
-    print("Type /quit to exit.")
+    print("Commands: /good, /bad, /save_adapter PATH, /load_adapter PATH,")
+    print("          /reset_adapter, /quit")
     while True:
         try:
             question = input("you> ").strip()
@@ -162,6 +164,24 @@ def toy_chat(checkpoint_path: Path, device: str, max_new_tokens: int) -> None:
         if question == "/quit":
             break
         if not question:
+            continue
+        if question == "/good":
+            feedback.append(1.0)
+            print("feedback recorded: positive (toy mode: buffer only)")
+            continue
+        if question == "/bad":
+            feedback.append(-1.0)
+            print("feedback recorded: negative (toy mode: buffer only)")
+            continue
+        if question.startswith("/save_adapter"):
+            print("toy mode: adapter save not supported")
+            continue
+        if question.startswith("/load_adapter"):
+            print("toy mode: adapter load not supported")
+            continue
+        if question == "/reset_adapter":
+            feedback.clear()
+            print("adapter reset (toy mode: feedback buffer cleared)")
             continue
         print(f"hagi> {toy_answer(model, question, device, max_new_tokens)}")
 
@@ -226,12 +246,20 @@ def production_repl(args: argparse.Namespace) -> None:
         system_prompt=args.system,
         max_context_length=args.max_context_length,
         compile_model=False,
+        auto_learn_after=args.auto_learn_after,
     )
     session.rollouts = args.rollouts
     session.noise_sigma = args.noise_sigma
+    if args.adapter_path is not None:
+        try:
+            session.load_adapter(str(args.adapter_path))
+            print(f"adapter loaded from {args.adapter_path}")
+        except Exception as e:
+            print(f"error loading adapter: {e}")
     print(f"loaded checkpoint step={step}: {checkpoint}")
     print(vram_usage())
-    print("Commands: /system TEXT, /clear, /quit")
+    print("Commands: /system TEXT, /clear, /good, /bad,")
+    print("          /save_adapter PATH, /load_adapter PATH, /reset_adapter, /quit")
     while True:
         try:
             text = input("you> ").strip()
@@ -250,6 +278,44 @@ def production_repl(args: argparse.Namespace) -> None:
             prompt = text[len("/system") :].strip()
             session.set_system_prompt(prompt)
             print("system prompt updated" if prompt else "system prompt cleared")
+            continue
+        if text == "/good":
+            if session.mark_response(1.0):
+                print("feedback recorded: positive")
+            else:
+                print("no response to score yet")
+            continue
+        if text == "/bad":
+            if session.mark_response(-1.0):
+                print("feedback recorded: negative")
+            else:
+                print("no response to score yet")
+            continue
+        if text.startswith("/save_adapter"):
+            path = text[len("/save_adapter") :].strip()
+            if not path:
+                print("usage: /save_adapter PATH")
+                continue
+            try:
+                session.save_adapter(path)
+                print(f"adapter saved -> {path}")
+            except Exception as e:
+                print(f"error saving adapter: {e}")
+            continue
+        if text.startswith("/load_adapter"):
+            path = text[len("/load_adapter") :].strip()
+            if not path:
+                print("usage: /load_adapter PATH")
+                continue
+            try:
+                session.load_adapter(path)
+                print(f"adapter loaded from {path}")
+            except Exception as e:
+                print(f"error loading adapter: {e}")
+            continue
+        if text == "/reset_adapter":
+            session.reset_adapter()
+            print("adapter reset")
             continue
 
         session.add_user_message(text)
@@ -282,6 +348,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rollouts", type=int, default=1)
     parser.add_argument("--noise-sigma", type=float, default=0.0)
+    parser.add_argument("--adapter-path", type=Path, default=None)
+    parser.add_argument("--auto-learn-after", type=int, default=3)
     return parser.parse_args()
 
 

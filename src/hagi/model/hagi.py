@@ -89,9 +89,9 @@ class HAGIConfig:
                 self.transformer.intermediate_size // self.num_experts
             )
         if self.use_gdr and not self.hdim_full and not self.hrm:
-            assert (
-                self.hidden_size == self.grades.hidden_size
-            ), f"grade dims sum to {self.grades.hidden_size}, hidden is {self.hidden_size}"
+            assert self.hidden_size == self.grades.hidden_size, (
+                f"grade dims sum to {self.grades.hidden_size}, hidden is {self.hidden_size}"
+            )
 
 
 class HAGI(nn.Module):
@@ -310,6 +310,7 @@ class HAGI(nn.Module):
         use_cache: bool = False,
         training_mode: bool = False,
         weights: dict[str, float] | None = None,
+        external_msa_registry: Any | None = None,
     ):
         """Returns logits, or (logits, loss) when targets are provided.
 
@@ -396,7 +397,9 @@ class HAGI(nn.Module):
             if training_mode and hasattr(self.gdr, "rotors"):
                 num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
                 tgt_idx = _pick_rotor_idx(
-                    self.cfg.rotor_seed, self._step, num_rotors  # type: ignore[arg-type]
+                    self.cfg.rotor_seed,
+                    self._step,
+                    num_rotors,  # type: ignore[arg-type]
                 )
             if (
                 training_mode
@@ -519,7 +522,15 @@ class HAGI(nn.Module):
             assert self.hdim_slot_router is not None
             assert self.msa_router is not None
             assert self.msa_registry is not None
-            self.msa_registry.clear()
+            # Bind a local active registry without mutating self.msa_registry,
+            # so a later forward call is never left pointing at a caller-owned
+            # registry. The external registry is only used when caching is on;
+            # otherwise the model's own registry is cleared and used.
+            if external_msa_registry is not None and use_cache:
+                active_registry = external_msa_registry
+            else:
+                active_registry = self.msa_registry
+                active_registry.clear()
             b, t, _ = h.shape
             nkv = self.msa.num_kv_heads
             head_dim = self.msa.head_dim
@@ -540,26 +551,33 @@ class HAGI(nn.Module):
                     domain_id=0,
                 )
             )
-            self.msa_registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)
+            # batch_register already evicts to the registry's _max_slots; the
+            # explicit prune below enforces the tighter cfg.msa_slot_count.
+            active_registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)
+
+            if len(active_registry) > self.cfg.msa_slot_count:
+                active_registry.prune_oldest(
+                    len(active_registry) - self.cfg.msa_slot_count
+                )
 
             nars_weights = None
             if self.cfg.use_nars and self.nars_msa is not None:
                 with torch.no_grad():
                     query_nars = routing_keys.mean(dim=0)  # [key_dim]
                     top_k_ids, top_values = self.nars_msa.route_top_k_with_nars(
-                        self.msa_registry, query_nars, self.cfg.msa_top_k
+                        active_registry, query_nars, self.cfg.msa_top_k
                     )
                     msa_slot_ids = top_k_ids.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
                     msa_scores = top_values.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
                     nars_weights = self.nars_msa.compute_attention_weights(msa_slot_ids)
             else:
                 msa_slot_ids, _raw_scores, msa_weights = self.msa_router.route_top_k(
-                    h, self.msa_registry, self.cfg.msa_top_k
+                    h, active_registry, self.cfg.msa_top_k
                 )
                 msa_scores = msa_weights
 
             msa_out = self.msa(
-                h, msa_slot_ids, self.msa_registry, nars_weights=nars_weights
+                h, msa_slot_ids, active_registry, nars_weights=nars_weights
             )
             h = h + msa_out
 

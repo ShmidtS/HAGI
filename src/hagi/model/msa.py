@@ -51,21 +51,30 @@ class SlotRegistry:
 
     def _evict_oldest(self, n: int) -> None:
         """Remove oldest n slots to make room."""
-        while n > 0 and self._slot_ids:
+        # Clamp n to the registry size so the slice below stays aligned.
+        n = max(0, min(n, len(self._slot_ids)))
+        for _ in range(n):
             oldest = self._slot_ids.pop(0)
             self._id_to_idx.pop(oldest, None)
-            n -= 1
-        if self._routing_keys is not None and self._routing_keys.size(0) > 0:
-            self._routing_keys = self._routing_keys[len(self._slot_ids):] if len(self._slot_ids) < self._routing_keys.size(0) else None
-        if self._k_caches is not None and self._k_caches.size(0) > 0:
-            self._k_caches = self._k_caches[len(self._slot_ids):] if len(self._slot_ids) < self._k_caches.size(0) else None
-        if self._v_caches is not None and self._v_caches.size(0) > 0:
-            self._v_caches = self._v_caches[len(self._slot_ids):] if len(self._slot_ids) < self._v_caches.size(0) else None
+        # After popping the oldest n IDs, the surviving data is rows [n:].
+        if self._routing_keys is not None:
+            self._routing_keys = self._routing_keys[n:] if n < self._routing_keys.size(0) else None
+        if self._k_caches is not None:
+            self._k_caches = self._k_caches[n:] if n < self._k_caches.size(0) else None
+        if self._v_caches is not None:
+            self._v_caches = self._v_caches[n:] if n < self._v_caches.size(0) else None
         self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
         self._id_to_idx_tensor.fill_(-1)
         for i, sid in enumerate(self._slot_ids):
             self._id_to_idx_tensor[sid] = i
         self._slot_ids_tensor = None
+
+    def prune_oldest(self, n: int) -> None:
+        """Remove the oldest n slots from the registry."""
+        if n <= 0:
+            return
+        n = max(0, min(n, len(self)))
+        self._evict_oldest(n)
 
     def batch_register(
         self,
