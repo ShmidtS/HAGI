@@ -98,6 +98,8 @@ WARMUP         = 30
 EVAL_CE_N      = 300      # held-out test examples for CE (primary metric)
 EVAL_EM_N      = 150      # test examples for generate+exact-match (slower)
 SEED           = 1234
+OUT_DIR        = "t1_out"  # results.json + small adapter weights saved here per adapter
+GRAD_CKPT      = False     # set True for low-VRAM GPUs (frozen 360M fits 4GB with this on)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 assert DEVICE == "cuda", "set Colab runtime to GPU (T4)"
 
@@ -107,6 +109,23 @@ assert DEVICE == "cuda", "set Colab runtime to GPU (T4)"
 _CC = torch.cuda.get_device_capability()[0]
 DTYPE = torch.bfloat16 if _CC >= 8 else torch.float32
 print(f"GPU {torch.cuda.get_device_name()} (cc {_CC}.x) -> dtype {DTYPE}")
+"""))
+
+cells.append(md(
+"""### (optional) Persist results to Google Drive
+
+Colab's local disk dies with the session. Run this to save `results.json` + the small
+adapter weights to Drive so a disconnect mid-run loses nothing (the bug that ate the
+earlier A100 run). Skip it and `OUT_DIR` stays on local disk.
+"""))
+
+cells.append(code(
+"""import os
+# Uncomment to persist across disconnects:
+# from google.colab import drive; drive.mount('/content/drive')
+# OUT_DIR = '/content/drive/MyDrive/hagi_t1_out'
+os.makedirs(OUT_DIR, exist_ok=True)
+print('saving results + adapter weights to:', os.path.abspath(OUT_DIR))
 """))
 
 cells.append(code(LIB_CELL))
@@ -164,8 +183,12 @@ from transformers import AutoModelForCausalLM
 
 def fresh_base():
     torch.manual_seed(SEED)
-    m = AutoModelForCausalLM.from_pretrained(BASE_MODEL, dtype=DTYPE)
-    return m.to(DEVICE)
+    m = AutoModelForCausalLM.from_pretrained(BASE_MODEL, dtype=DTYPE).to(DEVICE)
+    if GRAD_CKPT:
+        m.gradient_checkpointing_enable()
+        m.enable_input_require_grads()   # base frozen + grad ckpt needs this
+        m.config.use_cache = False
+    return m
 
 @torch.no_grad()
 def eval_ce(model):
@@ -219,8 +242,15 @@ def run_adapter(kind, **knobs):
         if step % 100 == 0 or step == 1:
             print(f"  [{kind}] step {step:4d}/{TRAIN_STEPS} loss {last:.3f} "
                   f"({(time.time()-t0)/step:.2f}s/step)")
+    if GRAD_CKPT:
+        model.config.use_cache = True  # generation wants the cache back
     ce = eval_ce(model)
     em = eval_em(model, EVAL_EM_N)
+    # Persist the small adapter weights (trainable params only) so a disconnect
+    # after this adapter still leaves something on disk.
+    import os
+    sd = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
+    torch.save(sd, os.path.join(OUT_DIR, f"{kind}_adapter.pt"))
     res = dict(kind=kind, trainable=info["trainable"], n_wrapped=info["n_wrapped"],
                train_loss=round(last, 4), held_out_ce=round(ce, 4),
                ppl=round(math.exp(ce), 3), test_em=round(em, 4))
@@ -232,10 +262,13 @@ def run_adapter(kind, **knobs):
 
 cells.append(code(
 """# Run the bake-off. Same data/schedule/targets; only the adapter math differs.
+# results.json is rewritten after EACH adapter, so a disconnect keeps finished ones.
+import json as _json, os
 results = []
 for kind, knobs in ADAPTERS.items():
     print(f"=== {kind} ===")
     results.append(run_adapter(kind, **knobs))
+    _json.dump(results, open(os.path.join(OUT_DIR, "results.json"), "w"), indent=2)
 
 print("\\n================ T1 RESULTS ================")
 hdr = f"{'adapter':<8}{'trainable':>12}{'held-out CE':>14}{'ppl':>10}{'test EM':>10}"
