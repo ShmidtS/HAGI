@@ -448,6 +448,18 @@ class SparseRouter(nn.Module):
 
         slot_ids = registry.slot_ids_tensor(device=str(query.device))
 
+        # Cosine routing: L2-normalize query and keys before the dot product so
+        # scores lie in [-1, 1] and are invariant to the hidden-state magnitude.
+        # The raw dot product `query @ keys.T` makes the load-balance loss scale
+        # with ||h||: as hidden drifts/low-rank-concentrates during training the
+        # routing keys correlate, softmax peaks onto a few slots, and L_msa_lb
+        # climbs monotonically (5 -> 54 over ~500 steps in the rtx3070 run).
+        # Normalising keeps the router's load-balance loss at its floor
+        # (alpha * top_k) regardless of magnitude drift — verified offline
+        # (raw: 60-71, cosine: 5.0). eps matches the bfloat16 floor.
+        query = F.normalize(query, dim=-1, eps=1e-8)
+        keys = F.normalize(keys, dim=-1, eps=1e-8)
+
         # LSH path: only when enabled AND registry is large enough to benefit.
         # (Exact matmul+topk is faster and exact for small N — the ANN overhead
         # pays off only once the candidate set is much smaller than N.)

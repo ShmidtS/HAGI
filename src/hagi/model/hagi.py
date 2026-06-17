@@ -720,10 +720,21 @@ class HAGI(nn.Module):
                             "labels": gdr_state["labels"],
                         }
             if pre_gdr_h is not None and gdr_state is not None:
-                # Use hidden states before/after HDIM for meaningful L_iso
-                result["invariant_src"] = pre_gdr_h
-                if "fused" in gdr_state and gdr_state["fused"] is not None:
-                    result["invariant_tgt"] = gdr_state["fused"]
+                # L_iso compares the two domain invariants of HDIM: the
+                # source invariant U=R_src^-1 G R_src and the target invariant
+                # extracted directly via R_tgt. Both are rotor sandwiches of the
+                # same multivector G, so they are isometries (bounded by ||G||)
+                # and the MSE between them measures domain alignment without a
+                # quadratic feedback path. Targeting the fused output instead
+                # (pre_gdr_h vs fused) routes the gradient through the geometric
+                # self-product g0=<mv,mv> in GradeDecomposedRecurrence, whose
+                # x^2 forward gain destabilises L_iso super-exponentially
+                # (481 -> 1.5e10 in ~50 steps once w_iso ramps in).
+                inv_src = gdr_state.get("invariant")
+                inv_tgt = gdr_state.get("target_invariant")
+                if inv_src is not None and inv_tgt is not None:
+                    result["invariant_src"] = inv_src
+                    result["invariant_tgt"] = inv_tgt
             if pre_logits_hidden is not None:
                 result["model_output"] = pre_logits_hidden
             result["pre_norm_hidden"] = pre_norm_hidden
