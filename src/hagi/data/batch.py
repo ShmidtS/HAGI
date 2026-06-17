@@ -6,6 +6,7 @@ from typing import Any, cast
 import numpy as np
 
 from hagi.data.dataloader import MemmapDataset
+from hagi.utils.misc import _pad_shift_collate
 
 try:
     import torch
@@ -42,10 +43,9 @@ def get_batch_memmap(dataset: Any, batch_size: int, seq_len: int) -> tuple[Any, 
 
 
 def _shift_collate(batch: list[Any]) -> tuple[Any, Any]:
-    array = np.stack([np.asarray(item, dtype=np.int64) for item in batch])
-    x = array[:, :-1]
-    y = array[:, 1:]
-    return _as_long_tensor(x), _as_long_tensor(y)
+    # Variable-length aware: right-pads with ignore_index when window lengths
+    # differ (variable-length training); identical to np.stack when equal.
+    return _pad_shift_collate(batch)
 
 
 def get_memmap_dataloader(

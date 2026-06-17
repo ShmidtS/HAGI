@@ -27,12 +27,11 @@ except ImportError:
 
 
 def _shift_collate(batch: list[Any]) -> tuple[Any, Any]:
-    array = np.stack([np.asarray(item, dtype=np.int64) for item in batch])
-    x = array[:, :-1]
-    y = array[:, 1:]
-    from hagi.utils import _as_long_tensor
+    # Variable-length aware: right-pads with ignore_index when window lengths
+    # differ (variable-length training); identical to np.stack when equal.
+    from hagi.utils import _pad_shift_collate
 
-    return _as_long_tensor(x), _as_long_tensor(y)
+    return _pad_shift_collate(batch)
 
 
 class ChunkedRandomSampler(Sampler):
@@ -113,6 +112,7 @@ class SequentialCyclingIterator:
         dtype: str = "uint16",
         cycles_per_dataset: int = 1,
         steps_per_cycle: int | None = None,
+        min_seq_len: int | None = None,
     ):
         self.entries = entries
         self.batch_size = batch_size
@@ -122,6 +122,9 @@ class SequentialCyclingIterator:
         self.dtype = dtype
         self.cycles_per_dataset = cycles_per_dataset
         self.steps_per_cycle = steps_per_cycle
+        # Variable-length training floor; MemmapDataset samples a window in
+        # [min_seq_len, seq_len] per item. None/seq_len = fixed length.
+        self.min_seq_len = int(min_seq_len) if min_seq_len is not None else seq_len
         self.current_idx = 0
         self.current_cycle = 0
         self._current_iter: Any = None
@@ -134,7 +137,11 @@ class SequentialCyclingIterator:
         path_key = str(path)
         if path_key not in self._dataset_cache:
             self._dataset_cache[path_key] = MemmapDataset(
-                path, seq_len=self.seq_len, dtype=self.dtype, preload=True
+                path,
+                seq_len=self.seq_len,
+                dtype=self.dtype,
+                preload=True,
+                min_seq_len=self.min_seq_len,
             )
         base = self._dataset_cache[path_key]
         cache_key = (self.current_idx, self.current_cycle)

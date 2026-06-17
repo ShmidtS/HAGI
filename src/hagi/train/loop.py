@@ -115,7 +115,7 @@ def _patch_inductor_decoder() -> None:
     try:
         import torch._dynamo as _dynamo  # type: ignore[import-not-found]
 
-        _dynamo.config.capture_scalar_outputs = True
+        _dynamo.config.capture_scalar_outputs = True  # type: ignore[attr-defined]
     except Exception:
         pass
 

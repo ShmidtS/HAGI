@@ -488,6 +488,7 @@ def build_full_dataloader(
                 dtype=dtype,
                 cycles_per_dataset=sequential_cycles,
                 steps_per_cycle=steps_per_cycle,
+                min_seq_len=min_seq_len,
             )
         else:
             train_loader = get_mixed_memmap_dataloader(
@@ -499,6 +500,7 @@ def build_full_dataloader(
                 dtype=dtype,
                 seed=int(train_cfg.get("seed", 0)),
                 preload=True,
+                min_seq_len=min_seq_len,
             )
         eval_path = resolve_eval_path(data_cfg, data_dir)
         eval_loader = (
