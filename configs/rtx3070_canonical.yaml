@@ -5,7 +5,7 @@ data:
   # random length in [min_seq_len, max_seq_len]; the collate fn pads to the
   # batch max with ignore_index so padded positions are loss-free. Leave unset
   # for fixed-length (backward-compatible). The MODEL accepts arbitrary T.
-  min_seq_len: 256
+  min_seq_len: 16
   mix:
     edu: 0.4
     slimpajama: 0.25
@@ -114,19 +114,9 @@ model:
 name: rtx3070_canonical
 training:
   compile: false
-  # Peak lr tuned for convergence speed. The architecture's divergence floor
-  # is ~9e-4 (reasoning loop geometric-product g0=<mv,mv> amplifies Muon
-  # updates; grad_clip cannot stop it since Muon's zeropower update is
-  # unit-norm and ignores grad magnitude). With the L_iso and cosine-MSA
-  # fixes in place the run is stable (grad_norm 0.5-0.7, well under clip),
-  # so 5e-4 was over-conservative: the model under-trained. 6e-4 sits at
-  # ~0.67x of the threshold; grad_norm stays <1.0 (clip inactive) while
-  # roughly halving the per-step loss drop time. learning_rate drives the
-  # AdamW groups (embed/head/norm/router); muon_lr is raised proportionally
-  # but conservatively below.
   learning_rate: 0.0006
-  batch_size: 10
-  ckpt_interval: 1000
+  batch_size: 8
+  ckpt_interval: 500
   composite_loss:
     w_aux: 0.01
     w_ce: 1.0
@@ -141,7 +131,7 @@ training:
     start_step: 500
   eval_interval: 0
   eval_samples: 500
-  grad_accum_steps: 2
+  grad_accum_steps: 4
   grad_clip: 1.0
   gradient_checkpointing: false
   log_interval: 25
@@ -156,12 +146,11 @@ training:
   magic_norm_max: 1.0
   max_steps: 8000
   min_lr_ratio: 0.1
-  # Muon peak for the reasoning-core 2D weights. Was 0.02 (diverged) -> 0.01
-  # (stable but slow). 0.012 sits between: the geometric-product feedback in
-  # the reasoning loop makes Muon's effective step the divergence bottleneck,
-  # so this rises more conservatively than learning_rate. ratio under the
-  # cosine schedule is independent of learning_rate, so peak = muon_lr*1.0.
-  muon_lr: 0.012
+  # Muon peak for the reasoning-core 2D weights. Muon itself ignores grad_clip (zeropower restores unit-norm), but
+  # the reasoning-loop geometric-product g0=<mv,mv> feedback makes its
+  # effective step the divergence bottleneck, so it stays conservative at
+  # 0.6x of the 0.02 divergence point.
+  muon_lr: 0.016
   muon_momentum: 0.95
   muon_ns_steps: 5
   optimizer: muon_adamw

@@ -436,6 +436,35 @@ def train(
             "(fp32 master weights lost)"
         )
 
+        # Realign optimizer moment buffers to the (now low-precision) param
+        # dtype. Fresh run: state is lazy (empty) -> no-op. On resume,
+        # scripts/train.py loads the saved optimizer state BEFORE this cast:
+        # load_state_dict upconverts the bf16 moment buffers to the model's
+        # then-fp32 params, then this cast flips the params to bf16 but leaves
+        # the upconverted fp32 moments alone, so the fused AdamW kernel aborts:
+        #   "params, grads, exp_avgs, and exp_avg_sqs must have same dtype".
+        # Cast only the N-dim moment tensors (exp_avg, exp_avg_sq, Muon's
+        # momentum_buffer) to the param dtype. The 0-dim ``step`` counter is
+        # left untouched: capturable=True fused AdamW keeps it fp32 on purpose,
+        # and casting it to bf16 corrupts the increment at large step values
+        # (bf16 ulp ~8 near 2000 -> step += 1 rounds back -> NaN downstream).
+        if optimizer is not None:
+            sub_opts = getattr(optimizer, "optimizers", [optimizer])
+            for opt in sub_opts:
+                for group in opt.param_groups:
+                    for p in group["params"]:
+                        st = opt.state.get(p)
+                        if not st:
+                            continue
+                        pdt = p.data.dtype
+                        for _k, v in st.items():
+                            if (
+                                isinstance(v, torch.Tensor)
+                                and v.dim() > 0
+                                and v.dtype != pdt
+                            ):
+                                st[_k] = v.to(dtype=pdt, device=p.data.device)
+
     # EMA: eager init to avoid copy.deepcopy inside the hot loop.
     if cfg.enable_ema and model_ema is None:
         import copy
