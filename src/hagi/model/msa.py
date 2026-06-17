@@ -245,9 +245,13 @@ class SlotRegistry:
         """Return sequence lengths for the given indices."""
         if self._k_caches is None:
             raise RuntimeError("No K caches in registry")
-        return torch.tensor(
-            [self._k_caches[i].size(-2) for i in indices.tolist()],
-            dtype=torch.long, device=indices.device,
+        # All registered slots share one uniform T_slot (the registry stores a
+        # dense [N, nkv, T_slot, head_dim] stack), so the per-slot offset is a
+        # single broadcast scalar. The prior per-slot Python list comprehension
+        # had a variable length each step → torch.compile recompile_limit.
+        t_slot = self._k_caches.size(-2)
+        return torch.full(
+            indices.shape, t_slot, dtype=torch.long, device=indices.device
         )
 
     def state_dict(self) -> dict[str, Any]:

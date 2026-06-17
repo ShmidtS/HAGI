@@ -109,6 +109,15 @@ def _patch_inductor_decoder() -> None:
     # (codec, errors) — cp866 matches MSVC's OEM output; replace tolerates any
     # other codepage a non-Russian locale might emit.
     _cb.SUBPROCESS_DECODE_ARGS = ("cp866", "replace")
+    # HAGI reads self._step (a buffer) via .item() for the rotor schedule.
+    # That .item() graph-breaks the compiled forward; capture_scalar_outputs
+    # keeps it inside the graph as a single (cheap) device→host read.
+    try:
+        import torch._dynamo as _dynamo  # type: ignore[import-not-found]
+
+        _dynamo.config.capture_scalar_outputs = True
+    except Exception:
+        pass
 
 
 def lr_at(
