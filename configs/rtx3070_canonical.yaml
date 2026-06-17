@@ -1,21 +1,44 @@
+# =============================================================================
+# HAGI Configuration — rtx3070_canonical
+# Target: RTX 3070 (8GB VRAM), ~119M params, ~262M training tokens
+# =============================================================================
+name: rtx3070_canonical
+
+# =============================================================================
+# DATA — training data sources, tokenization, and batching
+# Read in: scripts/train.py (build_dataloader, _resolve_max_steps)
+# =============================================================================
 data:
+  # Dataset format: "memmap_packed" → binary memmap with BFD packing.
+  # Mapped to "memmap" internally (train.py:437).
   dataset_mode: memmap_packed
+
+  # Maximum sequence length (tokens). The MODEL accepts arbitrary T.
+  # Read in: train.py:170, train.py:427, train.py:700
   max_seq_len: 1024
-  # Uncomment to enable variable-length training windows. Each sample draws a
-  # random length in [min_seq_len, max_seq_len]; the collate fn pads to the
-  # batch max with ignore_index so padded positions are loss-free. Leave unset
-  # for fixed-length (backward-compatible). The MODEL accepts arbitrary T.
+
+  # Variable-length training: each sample draws a random length in
+  # [min_seq_len, max_seq_len]. Collate fn pads with ignore_index (-100)
+  # so padded positions are loss-free. Set = max_seq_len for fixed-length.
+  # Read in: train.py:431-432
   min_seq_len: 16
+
+  # Data mix weights (source name → proportion). Must sum to ~1.0.
+  # Used for manifest generation in download_data.py.
   mix:
-    edu: 0.4
-    slimpajama: 0.25
-    wikipedia_en: 0.1
-    wikipedia_ru: 0.08
-    oscar_ru: 0.07
-    openwebmath: 0.03
-    smoltalk: 0.03
-    tinystories: 0.02
-    python_instruct: 0.02
+    edu: 0.4            # Educational content (largest source)
+    slimpajama: 0.25    # Web text (English, SlimPajama subset)
+    wikipedia_en: 0.1   # Encyclopedia (English)
+    wikipedia_ru: 0.08  # Encyclopedia (Russian)
+    oscar_ru: 0.07      # Web text (Russian, OSCAR)
+    openwebmath: 0.03   # Mathematics
+    smoltalk: 0.03      # Instruction-following dialogs
+    tinystories: 0.02   # Short stories (coherent narrative)
+    python_instruct: 0.02 # Python code instructions
+
+  # Explicit mix paths for memmap_packed mode. Each entry maps a source
+  # name to a .bin file path with its weight.
+  # Read in: train.py:477 (_resolve_sequential_entries), train.py:497
   mix_paths:
   - name: edu
     path: v4_3b/edu.bin
@@ -44,127 +67,607 @@ data:
   - name: python_instruct
     path: v4_3b/python_instruct.bin
     weight: 0.02
+
+  # DataLoader worker processes. 0 = synchronous (no multiprocessing).
+  # Read in: train.py:434 (data_cfg.get("num_workers", 4))
   num_workers: 0
+
+  # Sequence packing strategy: "bfd" = Best-Fit-Decreasing on EOS boundaries.
+  # Used in download_data.py for manifest generation.
   packing: bfd
+
+  # Sequential cycling: iterate datasets in order N times before shuffling.
+  # 0 = random mix. >0 = sequential cycling through mix_paths.
+  # Read in: train.py:694-698
   sequential_cycles: 3
+
+  # Pin memory for faster CPU→GPU transfer.
+  # Read in: train.py:435 (data_cfg.get("pin_memory", ...))
   pin_memory: true
+
+  # HuggingFace tokenizer model name. SmolLM2-135M has vocab=49,152.
+  # Read in: train.py:441 (data_cfg.get("tokenizer", ...))
   tokenizer: HuggingFaceTB/SmolLM2-135M
+
+  # Total training tokens. If set, max_steps is derived:
+  #   max_steps = ceil(train_tokens / (batch_size * grad_accum * seq_len))
+  # Read in: train.py:47 (_resolve_max_steps)
   train_tokens: 3000000000
+
+  # Memmap dtype for binary data files. "uint16" supports vocab up to 65535.
+  # Read in: train.py:190,457 (data_cfg.get("dtype", "uint16")), cli.py:94
+  dtype: uint16
+
+  # Optional: explicit path to a single .bin training file. When unset,
+  # train.py auto-discovers .bin files in data_dir or uses mix_paths.
+  # Read in: train.py:68,177 (data_cfg.get("train_path") or data_cfg.get("path"))
+  # train_path: data/v4_3b/edu.bin
+
+  # Optional: explicit path to eval .bin file. When unset, train.py holds
+  # out the last 10% of the training file for evaluation.
+  # Read in: train.py:403 (data_cfg.get("eval_path"))
+  # eval_path: data/v4_3b/eval.bin
+
+  # Optional: block size for memmap dataset (default = max_seq_len).
+  # Read in: cli.py:93 (data_cfg.get("block_size", seq_len))
+  # block_size: 1024
+
+  # SFT mode only: HuggingFace dataset name for instruction tuning.
+  # Read in: train.py:443 (data_cfg.get("dataset_name", ...))
+  # dataset_name: HuggingFaceTB/smoltalk
+
+  # SFT mode only: local path to pre-downloaded SFT dataset.
+  # Read in: train.py:444 (data_cfg.get("local_path"))
+  # local_path: data/smoltalk
+
+# =============================================================================
+# EVAL — benchmark evaluation during/after training
+# NOTE: eval section is read by hagi.eval.evaluate CLI, NOT by scripts/train.py.
+#       train.py reads eval_interval/eval_samples/eval_iters from TRAINING.
+# =============================================================================
 eval:
+  # Benchmarks to run via lm-eval-harness.
+  # Read in: hagi/eval/evaluate.py:55 (--benchmarks CLI arg, not from config)
   benchmarks:
-  - gsm8k
-  - arc_challenge
-  - boolq
-  - hellaswag
-  - winogrande
+  - gsm8k            # Grade School Math 8K (mathematical reasoning)
+  - arc_challenge    # AI2 Reasoning Challenge (science QA)
+  - boolq            # Boolean Yes/No questions (reading comprehension)
+  - hellaswag        # Commonsense NLI (sentence completion)
+  - winogrande       # Winograd schema challenge (coreference resolution)
+
+  # Evaluate every N steps. NOTE: not read in code — train.py uses
+  # training.eval_interval instead. Candidate for removal.
   every_n_steps: 2000
+
+# =============================================================================
+# MODEL — HAGI architecture configuration
+# Read in: scripts/train.py:659 → config_from_dict(cfg["model"]) → HAGIConfig
+# =============================================================================
 model:
+  # --- Cross-entropy / loss computation ---
+
+  # Chunk size for CE computation. 0 = no chunking. >0 = process logits in
+  # row-chunks of this size to bound peak activation memory.
+  # Read in: HAGIConfig.ce_chunk_size (hagi.py:89), loop.py:354
   ce_chunk_size: 2048
-  compile: false
+
+  # Fused lm_head + CE: compute loss without materializing [B, T, V] logits.
+  # When true, logits is None and loss is computed via fused_linear_cross_entropy.
+  # Read in: HAGIConfig.use_fused_ce (hagi.py:90), hagi.py:644
   use_fused_ce: true
-  expression_layers: 4
-  grades:
-    bivector: 192
-    residual: 256
-    scalar: 64
-    scalar_momentum: 0.5
-    trivector: 64
-    vector: 192
-    vector_momentum: 0.5
-  gradient_checkpointing: true
+
+  # Chunk size for the fused CE path (separate from ce_chunk_size for
+  # independent tuning). Used when use_fused_ce=true.
+  # Read in: HAGIConfig.ce_fused_chunk_size (hagi.py:91), hagi.py:652-655
   ce_fused_chunk_size: 2048
+
+  # Label smoothing for token cross-entropy. 0 disables. 0.05-0.1 improves
+  # generalization/calibration for small LMs.
+  # Read in: HAGIConfig.label_smoothing (hagi.py:94), hagi.py:657,667
   label_smoothing: 0.1
-  h_dim: 256
-  hdim_delay_steps: 1
-  hdim_full: true
-  hdim_heads: 4
-  hidden_size: 768
-  hrm: true
-  hrm_h_cycles: 1
-  hrm_l_cycles: 2
-  l_dim: 256
-  loop_count: 10
-  moe_alpha: 0.01
-  moe_intermediate_size: 512
-  moe_top_k: 1
-  msa_slot_count: 512
-  msa_top_k: 5
-  num_experts: 4
+
+  # --- Architecture: layer counts ---
+
+  # Perception stage: transformer blocks for primary input processing.
+  # Read in: HAGIConfig.perception_layers (hagi.py:42), hagi.py:129
   perception_layers: 4
+
+  # Reasoning stage: transformer blocks for recurrent reasoning (reused
+  # via HRM loop or iter_embed loop).
+  # Read in: HAGIConfig.reasoning_layers (hagi.py:43), hagi.py:132
   reasoning_layers: 4
-  rotor_seed: 42
-  transformer:
-    hidden_size: 768
-    intermediate_size: 2048
-    max_seq_len: 2048
-    norm: rmsnorm
-    num_kv_heads: 4
-    num_query_heads: 12
-    qk_norm: true
-    rope_theta: 10000.0
-    fuse_qkv: true
-  use_gdr: true
-  use_hdim_cross_domain: true
-  use_loop: true
-  use_moe: true
-  use_msa: true
-  use_nars: false
-  use_quality_head: false
+
+  # Expression stage: transformer blocks for output generation.
+  # Read in: HAGIConfig.expression_layers (hagi.py:44), hagi.py:135
+  expression_layers: 4
+
+  # --- Core dimensions ---
+
+  # Hidden size (residual stream dimension). Must match transformer.hidden_size.
+  # Read in: HAGIConfig.hidden_size (hagi.py:41), hagi.py:100
+  hidden_size: 768
+
+  # Vocabulary size (SmolLM2 tokenizer = 49,152).
+  # Read in: HAGIConfig.vocab_size (hagi.py:40), hagi.py:128
   vocab_size: 49152
-name: rtx3070_canonical
-training:
+
+  # --- Reasoning loop ---
+
+  # Number of reasoning iterations. Used when use_loop=true and hrm=false.
+  # When hrm=true, HRM controls iterations via hrm_h_cycles × hrm_l_cycles.
+  # Read in: HAGIConfig.loop_count (hagi.py:45), hagi.py:213,527
+  loop_count: 10
+
+  # Enable reasoning loop (iterative refinement through reasoning blocks).
+  # Read in: HAGIConfig.use_loop (hagi.py:46), hagi.py:213,527
+  use_loop: true
+
+  # --- GDR (Grade-Decomposed Recurrence) ---
+
+  # Enable Clifford algebra Cl(3,0,0) grade-decomposed recurrence.
+  # Read in: HAGIConfig.use_gdr (hagi.py:47), hagi.py:140
+  use_gdr: true
+
+  # Use full HDIM module (project → invariant → transfer → fuse → GDR).
+  # When false, uses standalone GradeDecomposedRecurrence.
+  # Read in: HAGIConfig.hdim_full (hagi.py:48), hagi.py:141
+  hdim_full: true
+
+  # HDIM heads: number of parallel multivector projections.
+  # Read in: HAGIConfig.hdim_heads (hagi.py:49), hagi.py:146,150
+  hdim_heads: 4
+
+  # HDIM delay steps for DelayedHDIM (DTP). >1 enables delayed aggregation.
+  # 1 = standard HDIMFull (no delay).
+  # Read in: HAGIConfig.hdim_delay_steps (hagi.py:50), hagi.py:143,149
+  hdim_delay_steps: 1
+
+  # Enable cross-domain transfer in HDIM (rotor sandwich invariant extraction).
+  # When false, HDIM returns hidden unchanged (identity).
+  # Read in: HAGIConfig.use_hdim_cross_domain (hagi.py:58), hagi.py:156-157
+  use_hdim_cross_domain: true
+
+  # Rotor seed for deterministic rotor schedule (LCG-based index selection).
+  # Read in: HAGIConfig.rotor_seed (hagi.py:57), hagi.py:442
+  rotor_seed: 42
+
+  # --- Grade configuration (Clifford algebra) ---
+
+  # Hidden state split into 5 geometric grades. Sum must = hidden_size
+  # when use_gdr=true and hdim_full=false and hrm=false.
+  # Read in: GradeConfig (gdr.py:37-50), hagi.py:147
+  grades:
+    scalar: 64           # Grade 0: confidence/resolution (slow, momentum)
+    vector: 192          # Grade 1: entities/concepts (medium, momentum)
+    bivector: 192        # Grade 2: relations (fast, full update)
+    trivector: 64        # Grade 3: higher-order structure (fast, full update)
+    residual: 256        # Unconstrained channel (standard update)
+    scalar_momentum: 0.5 # Momentum for scalar grade update
+    vector_momentum: 0.5 # Momentum for vector grade update
+
+  # --- HRM (Hierarchical Recurrent Model) ---
+
+  # Enable HRM two-level recurrent reasoning controller.
+  # When true, HRM owns the reasoning loop (iter_embed is unused).
+  # Read in: HAGIConfig.hrm (hagi.py:51), hagi.py:168,217
+  hrm: true
+
+  # High-level state dimension (z_H). Updated once per h_cycle.
+  # Read in: HAGIConfig.h_dim (hagi.py:54), hagi.py:170
+  h_dim: 256
+
+  # Low-level state dimension (z_L). Updated every l_cycle.
+  # Read in: HAGIConfig.l_dim (hagi.py:55), hagi.py:171
+  l_dim: 256
+
+  # High-level cycles: z_H updates per forward pass. 1 = no h_transition.
+  # Read in: HAGIConfig.hrm_h_cycles (hagi.py:52), hagi.py:173
+  hrm_h_cycles: 1
+
+  # Low-level cycles: z_L updates per h_cycle. Effective reasoning
+  # iterations = hrm_h_cycles × hrm_l_cycles.
+  # Read in: HAGIConfig.hrm_l_cycles (hagi.py:53), hagi.py:174
+  hrm_l_cycles: 2
+
+  # --- MSA (Memory Sparse Attention) ---
+
+  # Enable slot-based sparse attention with external memory.
+  # Read in: HAGIConfig.use_msa (hagi.py:59), hagi.py:184
+  use_msa: true
+
+  # Maximum memory slots in the registry. Slots are evicted (oldest first)
+  # when exceeded. More slots = more context at cost of routing compute.
+  # Read in: HAGIConfig.msa_slot_count (hagi.py:60), hagi.py:203,602
+  msa_slot_count: 2048
+
+  # Top-k slots selected per query token. Higher = more attention coverage.
+  # Read in: HAGIConfig.msa_top_k (hagi.py:61), hagi.py:621
+  msa_top_k: 5
+
+  # Slot compression: group C adjacent tokens into one slot via mean-pooling.
+  # Cx more context at the same slot budget. 1 = per-token (legacy).
+  # Effective MSA context = msa_slot_count × msa_chunk_size.
+  # Read in: HAGIConfig.msa_chunk_size (hagi.py:68), hagi.py:595
+  msa_chunk_size: 4
+
+  # LSH sublinear routing: when registry exceeds this many slots, switch
+  # from exact matmul+topk to random-projection sign-hash pre-filter.
+  # 0 = disabled (always exact). Enables sublinear retrieval at scale.
+  # Read in: HAGIConfig.msa_lsh_threshold (hagi.py:69), hagi.py:197
+  msa_lsh_threshold: 512
+
+  # LSH: number of random projection hashes. More = better recall,
+  # more compute. Used only when msa_lsh_threshold > 0.
+  # Read in: HAGIConfig.msa_lsh_hashes (hagi.py:70), hagi.py:199
+  msa_lsh_hashes: 8
+
+  # LSH: bits per bucket. 2^bits = bucket count per hash.
+  # Read in: HAGIConfig.msa_lsh_bits (hagi.py:71), hagi.py:200
+  msa_lsh_bits: 10
+
+  # LSH: probe buckets per hash (top closest buckets to query).
+  # Read in: HAGIConfig.msa_lsh_probe (hagi.py:72), hagi.py:201
+  msa_lsh_probe: 2
+
+  # Load-balance aux loss on MSA router (mirror of MoE aux). Ensures
+  # router receives gradient even when MSAAttention recomputes its own softmax.
+  # Read in: HAGIConfig.msa_aux_loss (hagi.py:77), hagi.py:622
+  msa_aux_loss: true
+
+  # MSA load-balance loss coefficient (alpha in Shazeer/Switch formulation).
+  # Read in: HAGIConfig.msa_lb_alpha (hagi.py:78), hagi.py:624
+  msa_lb_alpha: 1.0
+
+  # --- MoE (Mixture of Experts) ---
+
+  # Enable MoE SwiGLU in transformer blocks (replaces standard SwiGLU).
+  # Read in: HAGIConfig.use_moe (hagi.py:84), hagi.py:103, transformer.py:406
+  use_moe: true
+
+  # Number of experts per MoE layer.
+  # Read in: HAGIConfig.num_experts (hagi.py:85), hagi.py:104
+  num_experts: 4
+
+  # Top-k experts selected per token. 1 = sparse (Switch Transformer style).
+  # Read in: HAGIConfig.moe_top_k (hagi.py:86), hagi.py:105
+  moe_top_k: 1
+
+  # Intermediate size per expert. None = intermediate_size // num_experts.
+  # Read in: HAGIConfig.moe_intermediate_size (hagi.py:87), hagi.py:106,108
+  moe_intermediate_size: 512
+
+  # MoE load-balance aux loss coefficient.
+  # Read in: HAGIConfig.moe_alpha (hagi.py:88), hagi.py:107, moe.py:46
+  moe_alpha: 0.01
+
+  # --- NARS (Non-Axiomatic Reasoning System) ---
+
+  # Enable NARS controllers for HRM/HDIM/MSA. When false, NARS modules
+  # are not created and standard routing is used.
+  # Read in: HAGIConfig.use_nars (hagi.py:79), hagi.py:208
+  use_nars: false
+
+  # --- Quality head ---
+
+  # Enable auxiliary quality prediction head (binary CE on token correctness).
+  # Read in: HAGIConfig.use_quality_head (hagi.py:81), hagi.py:227
+  use_quality_head: false
+
+  # --- Binary factorized layers ---
+
+  # Replace nn.Linear with BinaryFactorizedLinear (1-bit ±1 weights via STE).
+  # Experimental: ~46x parameter reduction but significant quality loss.
+  # Read in: HAGIConfig.use_binary_factorized (hagi.py:82), hagi.py:101
+  use_binary_factorized: false
+
+  # Rank for binary factorized decomposition. W = (B1 @ B2).T * scale.
+  # Read in: HAGIConfig.binary_factorized_rank (hagi.py:83), hagi.py:102
+  binary_factorized_rank: 8
+
+  # --- Regularization ---
+
+  # Thinking noise: inject Gaussian noise into HRM recurrent states (z_H, z_L)
+  # during training for regularization. 0 disables.
+  # Read in: HAGIConfig.thinking_noise (hagi.py:80), hagi.py:471,556
+  thinking_noise: 0.0
+
+  # --- Memory / performance ---
+
+  # Gradient checkpointing for transformer blocks. Saves activation memory
+  # at cost of recomputation in backward.
+  # Read in: HAGIConfig.gradient_checkpointing (hagi.py:56), hagi.py:376
+  gradient_checkpointing: true
+
+  # torch.compile the whole model. When true, loop.py wraps model in
+  # torch.compile for kernel fusion. Checkpoint keys stay clean.
+  # Read in: HAGIConfig.compile (hagi.py:95), loop.py:416-421
   compile: false
+
+  # --- Transformer block configuration ---
+  # Read in: config_from_dict → TransformerConfig (transformer.py:20)
+  transformer:
+    # Hidden size (must match model.hidden_size).
+    # Read in: TransformerConfig.hidden_size (transformer.py:21)
+    hidden_size: 768
+
+    # SwiGLU intermediate size (non-MoE path). When MoE is active, each
+    # expert uses moe_intermediate_size instead.
+    # Read in: TransformerConfig.intermediate_size (transformer.py:24)
+    intermediate_size: 2048
+
+    # Maximum sequence length for RoPE precomputation. T > max_seq_len
+    # falls back to dynamic cache.
+    # Read in: TransformerConfig.max_seq_len (transformer.py:27), hagi.py:235
+    max_seq_len: 2048
+
+    # Normalization type: "rmsnorm" (only option, kept for compatibility).
+    # Read in: TransformerConfig.norm (transformer.py:28)
+    norm: rmsnorm
+
+    # Epsilon for RMSNorm.
+    # Read in: TransformerConfig.norm_eps (transformer.py:26)
+    norm_eps: 1.0e-6
+
+    # Number of KV heads (GQA). Must divide num_query_heads.
+    # Read in: TransformerConfig.num_kv_heads (transformer.py:23)
+    num_kv_heads: 4
+
+    # Number of query heads (GQA). head_dim = hidden_size / num_query_heads.
+    # Read in: TransformerConfig.num_query_heads (transformer.py:22)
+    num_query_heads: 12
+
+    # QK-norm: apply RMSNorm to query and key projections after RoPE.
+    # Read in: TransformerConfig.qk_norm (transformer.py:29), transformer.py:196
+    qk_norm: true
+
+    # RoPE base frequency (theta). Higher = slower rotation = longer range.
+    # Read in: TransformerConfig.rope_theta (transformer.py:25)
+    rope_theta: 10000.0
+
+    # Fuse Q, K, V projections into a single matmul (3x fewer kernel launches).
+    # Disabled when use_binary_factorized=true.
+    # Read in: TransformerConfig.fuse_qkv (transformer.py:32), transformer.py:199
+    fuse_qkv: true
+
+    # Fuse gate and up projections in SwiGLU into a single matmul.
+    # Disabled when use_binary_factorized=true.
+    # Read in: TransformerConfig.fuse_gate_up (transformer.py:33), transformer.py:331
+    fuse_gate_up: true
+
+# =============================================================================
+# TRAINING — optimizer, schedule, loss, and loop configuration
+# Read in: scripts/train.py:660 (train_cfg = dict(cfg["training"]))
+#          → build_loop_config, build_optimizer, build_dataloader
+# =============================================================================
+training:
+  # torch.compile for training loop. NOTE: not read in code — model.compile
+  # (in model section) controls compilation. Candidate for removal.
+  compile: false
+
+  # Peak learning rate for AdamW (non-Muon params). Cosine schedule scales
+  # from 0 → learning_rate → min_lr_ratio × learning_rate.
+  # Read in: loop.py:338 (build_loop_config), optim.py:537 (build_optimizer)
   learning_rate: 0.0006
+
+  # Micro-batch size (per GPU step before gradient accumulation).
+  # Effective batch = batch_size × grad_accum_steps = 8 × 4 = 32.
+  # Read in: train.py:433, loop.py:340
   batch_size: 8
+
+  # Checkpoint save interval (steps).
+  # Read in: loop.py:346 (build_loop_config)
   ckpt_interval: 500
+
+  # --- Composite loss weights (final targets) ---
+  # Read in: loop.py:332-334 (build_loop_config), losses.py:272-281
   composite_loss:
-    w_aux: 0.01
-    w_ce: 1.0
-    w_iso: 0.05
-    w_moe: 0.005
-    w_msa_lb: 0.01
-    w_quality: 0.0
+    w_ce: 1.0        # Cross-entropy (main LM loss)
+    w_aux: 0.01      # Contrastive auxiliary (GDR feature alignment)
+    w_iso: 0.05      # Isomorphic MSE (HDIM domain invariant alignment)
+    w_moe: 0.005     # MoE load-balance aux
+    w_msa_lb: 0.01   # MSA router load-balance aux
+    w_quality: 0.0   # Quality head BCE (disabled when use_quality_head=false)
+
+  # Composite-loss warmup start values (ramp from start → final target).
+  # Read in: loop.py:360-363 (build_loop_config)
+  w_aux_start: 0.0
+  w_iso_start: 0.0
+  w_moe_start: 0.0
+  w_msa_lb_start: 0.0
+
+  # Enable GDR auxiliary projection (contrastive loss on GDR features).
+  # NOTE: not read in code — gdr_aux_proj is created when use_gdr=true
+  # regardless of this flag. Candidate for removal.
   use_gdr_aux: true
+
+  # --- Schedule ---
+
+  # LR schedule: "cosine" (warmup → cosine decay) or "wsd" (warmup → stable → decay).
+  # Read in: loop.py:350 (build_loop_config), loop.py:135
+  schedule: cosine
+
+  # Warmup steps: linear ramp from 0 → learning_rate.
+  # Read in: loop.py:337 (build_loop_config), loop.py:133
+  warmup_steps: 500
+
+  # Minimum LR ratio: cosine decays to min_lr_ratio × learning_rate.
+  # Read in: loop.py:339 (build_loop_config), loop.py:147
+  min_lr_ratio: 0.1
+
+  # Cooldown fraction: last N% of training decays linearly to min_lr.
+  # Used only with "wsd" schedule.
+  # Read in: loop.py:351 (build_loop_config), loop.py:136
   cooldown_frac: 0.05
+
+  # Maximum training steps. Overridden by train_tokens if set (see data section).
+  # Read in: loop.py:336 (build_loop_config)
+  max_steps: 8000
+
+  # --- Gradient ---
+
+  # Gradient accumulation steps. Effective batch = batch_size × grad_accum.
+  # Read in: loop.py:340 (build_loop_config), loop.py:547
+  grad_accum_steps: 4
+
+  # Global gradient clipping (max L2 norm). Applied before optimizer step.
+  # Read in: loop.py:341 (build_loop_config), train.py (clip_grad_norm_)
+  grad_clip: 1.0
+
+  # Gradient checkpointing in training loop (separate from model setting).
+  # When true, overrides model.gradient_checkpointing at runtime.
+  # Read in: loop.py:343 (build_loop_config), loop.py:410
+  gradient_checkpointing: false
+
+  # Per-blade gradient norm clip for GDR grade-decomposed weights.
+  # 0 disables. Clips each 8-blade multivector view independently.
+  # Read in: loop.py:353 (build_loop_config), loop.py:199 (magic_norm_clip)
+  magic_norm_max: 1.0
+
+  # --- Precision ---
+
+  # Precision: "bf16" (autocast), "manual_bf16" (model cast to bf16, no autocast),
+  # "fp16" (autocast + GradScaler), "fp32" (no mixed precision).
+  # Read in: loop.py:342 (build_loop_config), loop.py:160 (autocast_ctx)
+  precision: manual_bf16
+
+  # --- Optimizer: Muon + AdamW hybrid ---
+
+  # Optimizer kind: "adamw", "muon_adamw", "schedule-free-adamw", etc.
+  # "muon_adamw" = Muon for 2D weights + AdamW for rest.
+  # Read in: loop.py:352 (build_loop_config), optim.py:534 (build_optimizer)
+  optimizer: muon_adamw
+
+  # Muon peak LR for reasoning-core 2D weights. Muon orthogonalizes updates
+  # via Newton-Schulz, so LR is independent of grad_clip.
+  # Read in: optim.py:488 (cfg.get("muon_lr", 0.02))
+  muon_lr: 0.016
+
+  # Muon momentum (Nesterov-style).
+  # Read in: optim.py:489 (cfg.get("muon_momentum", 0.95))
+  muon_momentum: 0.95
+
+  # Newton-Schulz iteration count for zero-power orthogonalization.
+  # More = better approximation, more compute.
+  # Read in: optim.py:490 (cfg.get("muon_ns_steps", 5))
+  muon_ns_steps: 5
+
+  # Weight decay (decoupled, AdamW style). Applied to ≥2D non-norm params.
+  # Read in: optim.py:479,538 (cfg.get("weight_decay", 0.1))
+  weight_decay: 0.1
+
+  # AdamW betas (beta1, beta2) for momentum and variance EMA.
+  # Read in: optim.py:539 (cfg.get("betas", (0.9, 0.95)))
+  betas: [0.9, 0.95]
+
+  # AdamW epsilon for numerical stability.
+  # Read in: optim.py:540 (cfg.get("eps", 1e-8))
+  eps: 1.0e-8
+
+  # Optional: override AdamW LR (defaults to learning_rate when unset).
+  # Read in: optim.py:478,509 (cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
+  # adamw_lr: 0.0006
+
+  # Schedule-Free AdamW: Polyak-Ruppert averaging decay.
+  # Used only when optimizer=schedule-free-adamw.
+  # Read in: optim.py:574 (cfg.get("schedule_free_avg_decay", 0.999))
+  # schedule_free_avg_decay: 0.999
+
+  # Adam-Mini: block size for block-wise optimizer state.
+  # Used only when optimizer=adam-mini.
+  # Read in: optim.py:587 (cfg.get("adam_mini_block_size", 128))
+  # adam_mini_block_size: 128
+
+  # AdEMAMix: slow momentum mixing coefficient (alpha).
+  # Used only when optimizer=muon_ademamix.
+  # Read in: optim.py:484 (cfg.get("ademamix_alpha", 0.5))
+  # ademamix_alpha: 0.5
+
+  # --- EMA (Exponential Moving Average) ---
+
+  # EMA decay rate. 0.9995 = slow average for Polyak-Ruppert averaging.
+  # Read in: loop.py:356 (build_loop_config), loop.py:171 (update_ema)
   ema:
     decay: 0.9995
+
+    # Start EMA from this step (skip early unstable steps).
+    # Read in: loop.py:357 (build_loop_config), loop.py:469
     start_step: 500
+
+  # --- Evaluation ---
+
+  # In-loop eval interval (steps). 0 = no in-loop eval.
+  # Read in: train.py:691 (train_cfg.get("eval_interval", 0))
   eval_interval: 0
+
+  # Number of samples held out for in-loop evaluation.
+  # Read in: train.py:692 (train_cfg.get("eval_samples", 500))
   eval_samples: 500
-  grad_accum_steps: 4
-  grad_clip: 1.0
-  gradient_checkpointing: false
+
+  # Number of eval iterations (batches) per eval round.
+  # Read in: loop.py:345 (build_loop_config)
+  eval_iters: 50
+
+  # --- Logging ---
+
+  # Log interval (steps). 0 = no logging.
+  # Read in: loop.py:348 (build_loop_config), loop.py:542
   log_interval: 25
+
+  # NARS policy update interval (steps). Used only when use_nars=true.
+  # Read in: loop.py:349 (build_loop_config)
   nars_policy_interval: 200
-  vram_probe:
-    safety: 1.0
-    headroom: 0.85
+
+  # --- Loss warmup ---
+
+  # Loss warmup mode: "linear" or "cosine" ramp for composite loss weights.
+  # Read in: loop.py:373 (build_loop_config), loop.py:155
   loss_warmup_mode: linear
+
+  # Warmup steps for L_aux (contrastive auxiliary loss).
+  # Read in: loop.py:364 (build_loop_config), loop.py:527
   aux_warmup_steps: 2000
+
+  # Warmup steps for L_iso (isomorphic invariant loss).
+  # Read in: loop.py:368 (build_loop_config), loop.py:529
   iso_warmup_steps: 3000
+
+  # Warmup steps for L_moe (MoE load-balance loss).
+  # Read in: loop.py:370 (build_loop_config), loop.py:533
   moe_warmup_steps: 2000
-  magic_norm_max: 1.0
-  max_steps: 8000
-  min_lr_ratio: 0.1
-  # Muon peak for the reasoning-core 2D weights. Muon itself ignores grad_clip (zeropower restores unit-norm), but
-  # the reasoning-loop geometric-product g0=<mv,mv> feedback makes its
-  # effective step the divergence bottleneck, so it stays conservative at
-  # 0.6x of the 0.02 divergence point.
-  muon_lr: 0.016
-  muon_momentum: 0.95
-  muon_ns_steps: 5
-  optimizer: muon_adamw
-  pin_memory: true
-  precision: manual_bf16
-  schedule: cosine
+
+  # --- VRAM probe ---
+
+  # VRAM probing for automatic batch size / gradient checkpointing adjustment.
+  # Read in: train.py:788-790 (vram_probe safety/headroom)
+  vram_probe:
+    safety: 1.0       # Safety multiplier for VRAM budget
+    headroom: 0.85    # Fraction of VRAM to target (0.85 = 85% of total)
+
+  # --- Misc ---
+
+  # Random seed for reproducibility.
+  # Read in: train.py:174 (train_cfg.get("seed", 42))
   seed: 42
+
+  # Prefix LM mode: pack multiple documents per sequence with attention mask.
+  # Read in: train.py:681 (train_cfg.get("use_prefix_lm", False))
   use_prefix_lm: false
-  warmup_steps: 500
-  weight_decay: 0.1
+
+  # Pin memory for training DataLoader. NOTE: not read in code —
+  # data.pin_memory is used instead. Candidate for removal.
+  pin_memory: true
+
+  # DataLoader workers for training. NOTE: not read in code —
+  # data.num_workers is used instead. Candidate for removal.
   num_workers: 0
+
+  # --- Compression monitor ---
+  # Tracks compression metrics (entropy, calibration, artifact ratio)
+  # during training. CompressionMonitor class exists but is NOT
+  # instantiated in scripts/train.py. Candidate for wiring or removal.
   compression_monitor:
-    enabled: true
-    artifact_threshold: 0.5
-    calibration_bins: 10
-    rank_subsample: 256
-    heavy_interval_mult: 4
+    enabled: true             # Enable compression monitoring
+    artifact_threshold: 0.5   # Confidence threshold for artifact detection
+    calibration_bins: 10      # Bins for calibration error computation
+    rank_subsample: 256       # Token subsample for effective rank computation
+    heavy_interval_mult: 4    # Run heavy metrics every N × log_interval steps
