@@ -116,6 +116,10 @@ class HAGIConfig:
 
 
 class HAGI(nn.Module):
+    # Non-persistent buffer holding the training step counter (scalar long).
+    # Read through the ``_step`` property as an int for the rotor schedule.
+    _step_buf: torch.Tensor
+
     def __init__(self, cfg: HAGIConfig):
         super().__init__()
         self.cfg = cfg
@@ -240,8 +244,10 @@ class HAGI(nn.Module):
 
         # Persisted step counter: the rotor schedule stays deterministic across
         # checkpoint save/resume. Old checkpoints without this key load fine
-        # (see _load_from_state_dict).
-        self._step: int = 0  # type: ignore[assignment]
+        # (see _load_from_state_dict). Stored as a non-persistent buffer so
+        # torch.compile does not treat the per-forward increment as a static
+        # module-attribute guard (which would force a recompile every step).
+        self.register_buffer("_step_buf", torch.zeros((), dtype=torch.long), persistent=False)
 
         self.apply(self._init_weights)
 
@@ -270,6 +276,14 @@ class HAGI(nn.Module):
         elif isinstance(module, RMSNorm):
             if hasattr(module, "weight") and module.weight is not None:
                 torch.nn.init.ones_(module.weight)
+
+    @property
+    def _step(self) -> int:
+        return int(self._step_buf.item())
+
+    @_step.setter
+    def _step(self, value: int) -> None:
+        self._step_buf.fill_(int(value))
 
     def state_dict(self, *args, **kwargs):  # type: ignore[override]
         prefix = kwargs.get("prefix", "")
@@ -363,7 +377,10 @@ class HAGI(nn.Module):
             self.cfg.gradient_checkpointing and self.training and not use_cache
         )
         if self.training:
-            self._step += 1
+            # In-place buffer increment: dynamo-compatible (no static-int guard
+            # recompile). The _step property reads this via .item(), which is a
+            # single cheap graph break used only for the rotor schedule index.
+            self._step_buf.add_(1)
         moe_aux_losses: list[torch.Tensor] = []
         # Feature collection is decoupled from loss weighting. Always collect
         # when training so warmup schedules (which ramp a weight from 0) get the

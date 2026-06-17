@@ -83,27 +83,27 @@ def _apply_rope_impl(
     return torch.cat([rx1, rx2], dim=-1)
 
 
-_apply_rope_compiled = (
-    torch.compile(_apply_rope_impl, mode="default", dynamic=False)
-    if torch.cuda.is_available()
-    else None
-)
-
-
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    fn = (
-        _apply_rope_compiled
-        if x.is_cuda and _apply_rope_compiled is not None
-        else _apply_rope_impl
-    )
-    return fn(x, cos, sin)
+    return _apply_rope_impl(x, cos, sin)
 
 
 _TORCH_MAJOR_MINOR = tuple(
     int(p) for p in torch.__version__.split("+")[0].split(".")[:2]
 )
 _SDPA_SUPPORTS_GQA = _TORCH_MAJOR_MINOR >= (2, 5)
-_flash_available: bool | None = None
+# Eagerly probe flash-attention availability at import so torch.compile does
+# not recompile when the lazy `_flash_available is None` branch fires on the
+# first forward pass (a global-mutation guard).
+def _probe_flash() -> bool:
+    if not _SDPA_SUPPORTS_GQA or not torch.cuda.is_available():
+        return False
+    try:
+        return bool(torch.backends.cuda.is_flash_attention_available())
+    except (AttributeError, RuntimeError):
+        return False
+
+
+_flash_available: bool = _probe_flash()
 
 
 def _use_enable_gqa(q: torch.Tensor) -> bool:
@@ -119,11 +119,6 @@ def _use_enable_gqa(q: torch.Tensor) -> bool:
         return False
     if q.dtype not in (torch.float16, torch.bfloat16):
         return False
-    if _flash_available is None:
-        try:
-            _flash_available = bool(torch.backends.cuda.is_flash_attention_available())
-        except (AttributeError, RuntimeError):
-            _flash_available = False
     return _flash_available
 
 

@@ -60,7 +60,7 @@ eval:
   every_n_steps: 2000
 model:
   ce_chunk_size: 2048
-  compile: false
+  compile: true
   use_fused_ce: true
   expression_layers: 4
   grades:
@@ -113,7 +113,7 @@ model:
   vocab_size: 49152
 name: rtx3070_canonical
 training:
-  compile: false
+  compile: true
   learning_rate: 0.001
   batch_size: 10
   ckpt_interval: 1000

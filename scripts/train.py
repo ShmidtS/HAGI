@@ -17,7 +17,6 @@ from hagi.data import (
     PrefixLMBatch,
     SequentialCyclingIterator,
     create_prefix_lm_batch,
-    get_memmap_dataloader,
     get_mixed_memmap_dataloader,
     get_sft_dataloader,
 )
@@ -299,6 +298,11 @@ def maybe_compile(model: HAGI, device: str) -> Any:
         and model.cfg.compile
         and device.startswith("cuda")
     ):
+        # MSVC cl.exe on a Russian Windows emits cp866; inductor's cp1251/utf-8
+        # decode of `cl /help` aborts torch.compile before any kernel builds.
+        from hagi.train.loop import _patch_inductor_decoder
+
+        _patch_inductor_decoder()
         print("torch.compile enabled (mode=default)")
         return torch.compile(model, mode="default")
     return model

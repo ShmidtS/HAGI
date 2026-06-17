@@ -85,6 +85,40 @@ _BV_MASK_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _OTHER_MASK_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
 
+def _prime_caches() -> None:
+    """Pre-fill the (device, dtype) caches for the default CUDA device.
+
+    torch.compile installs a dict-mutation guard on these module globals; a
+    lazy miss on the first forward recompiles the HDIM graph. Priming the
+    bf16 + fp32 entries at import makes the guard static for the whole run.
+    """
+    if not torch.cuda.is_available():
+        return
+    dev = torch.device("cuda", 0)
+    for dt in (torch.bfloat16, torch.float32, torch.float16):
+        _STRUCT_CACHE[(dev, dt)] = _STRUCT_TRITON.to(device=dev, dtype=dt)
+        _REVERSE_SIGNS_CACHE[(dev, dt)] = torch.tensor(
+            [(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)],
+            dtype=dt, device=dev,
+        )
+        _BV_MASK_CACHE[(dev, dt)] = torch.tensor(
+            [1.0 if GRADE[i] == 2 else 0.0 for i in range(BLADE_COUNT)],
+            dtype=dt, device=dev,
+        )
+        _OTHER_MASK_CACHE[(dev, dt)] = torch.tensor(
+            [1.0 if GRADE[i] not in (0, 2) else 0.0 for i in range(BLADE_COUNT)],
+            dtype=dt, device=dev,
+        )
+        for grade in (0, 2):
+            _GRADE_MASK_CACHE[(dev, dt, grade)] = torch.tensor(
+                [1.0 if GRADE[i] == grade else 0.0 for i in range(BLADE_COUNT)],
+                dtype=dt, device=dev,
+            )
+
+
+_prime_caches()
+
+
 def _get_struct(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     key = (device, dtype)
     if key not in _STRUCT_CACHE:

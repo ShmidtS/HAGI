@@ -92,6 +92,30 @@ class SlotRegistry:
             v_caches: [N, nkv, T_slot, head_dim] tensor of V caches.
         """
         n = slot_ids.size(0)
+
+        # Fast path: empty registry (the common per-step case, since HAGI's
+        # forward clears the model-owned registry each call). Skip dedup/evict
+        # and append directly — no Python loop, no set intersection, no
+        # per-element _id_to_idx_tensor writes.
+        if len(self._slot_ids) == 0:
+            ids_list = slot_ids.tolist()
+            self._slot_ids = ids_list
+            self._id_to_idx = {sid: i for i, sid in enumerate(ids_list)}
+            self._routing_keys = routing_keys
+            self._k_caches = k_caches
+            self._v_caches = v_caches
+            # One vectorized scatter instead of N scalar writes.
+            idx_t = self._id_to_idx_tensor
+            if slot_ids.device != idx_t.device:
+                slot_ids_cpu = slot_ids.to(idx_t.device)
+            else:
+                slot_ids_cpu = slot_ids
+            idx_t[slot_ids_cpu] = torch.arange(
+                n, dtype=idx_t.dtype, device=idx_t.device
+            )
+            self._slot_ids_tensor = None
+            return
+
         ids_list = slot_ids.tolist()
 
         # Remove duplicates
@@ -115,9 +139,17 @@ class SlotRegistry:
         # Append
         start = len(self._slot_ids)
         self._slot_ids.extend(ids_list)
+        idx_t = self._id_to_idx_tensor
+        if slot_ids.device != idx_t.device:
+            slot_ids_cpu = slot_ids.to(idx_t.device)
+        else:
+            slot_ids_cpu = slot_ids
+        new_indices = torch.arange(
+            start, start + n, dtype=idx_t.dtype, device=idx_t.device
+        )
+        idx_t[slot_ids_cpu] = new_indices
         for i, sid in enumerate(ids_list):
             self._id_to_idx[sid] = start + i
-            self._id_to_idx_tensor[sid] = start + i
 
         self._routing_keys = routing_keys if self._routing_keys is None else torch.cat([self._routing_keys, routing_keys], dim=0)
         self._k_caches = k_caches if self._k_caches is None else torch.cat([self._k_caches, k_caches], dim=0)
@@ -174,7 +206,11 @@ class SlotRegistry:
     def slot_ids_tensor(self, device: str | None = None) -> torch.Tensor:
         """Return a cached tensor of slot IDs."""
         if self._slot_ids_tensor is None:
-            self._slot_ids_tensor = torch.tensor(self._slot_ids, dtype=torch.long).pin_memory()
+            # Plain CPU tensor; route_top_k immediately .to(device, non_blocking)
+            # it, which already overlaps the H2D copy. pin_memory() here would
+            # add nothing and is unsupported inside torch.compile (aten._pin_memory
+            # is NYI for fake tensors), so it is omitted.
+            self._slot_ids_tensor = torch.tensor(self._slot_ids, dtype=torch.long)
         if device is not None:
             return self._slot_ids_tensor.to(device, non_blocking=True)
         return self._slot_ids_tensor
@@ -187,6 +223,7 @@ class SlotRegistry:
         self._k_caches = None
         self._v_caches = None
         self._slot_ids_tensor = None
+        self._id_to_idx_tensor.fill_(-1)
 
     def __len__(self) -> int:
         return len(self._slot_ids)

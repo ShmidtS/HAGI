@@ -131,8 +131,12 @@ def geometric_product_triton(
     blade_count = x.shape[-1]
     orig_shape = x.shape
     batch = math.prod(x.shape[:-1])
-    # Fallback to PyTorch einsum for small batches where kernel launch overhead dominates.
-    if batch < 128:
+    # The per-row Triton kernel (one program per multivector, an 8-wide tl.dot)
+    # is dominated by launch overhead and never beats the fused cuBLAS einsum
+    # for Cl(3,0,0)'s 8-blade product. Benchmarked across all HAGI batch sizes
+    # (16..245k): einsum wins by 1.3-4x. Keep the kernel for reference but route
+    # everything to the einsum path.
+    if batch < 1_000_000:
         return _geometric_product_torch(x, y, table)
 
     # table must be on CUDA and contiguous

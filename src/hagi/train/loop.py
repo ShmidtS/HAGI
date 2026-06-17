@@ -84,6 +84,33 @@ def _enable_ampere_flags(device: str, tf32: bool) -> None:
         pass
 
 
+_inductor_decoder_patched = False
+
+
+def _patch_inductor_decoder() -> None:
+    """Make torch._inductor's cl.exe output decode resilient to cp866.
+
+    MSVC ``cl.exe`` on a Russian Windows emits its banner/help in the OEM
+    codepage (cp866). Inductor decodes that subprocess output with
+    ``locale.getpreferredencoding()`` (cp1251 / utf-8), which raises
+    ``UnicodeDecodeError`` (0x98 / 0x8e) and aborts ``torch.compile`` before a
+    single kernel is built. Decode as cp866 with ``errors="replace"`` so the
+    probe (it only checks whether the binary *is* cl, not the message content)
+    succeeds regardless of locale. No-op off-Windows or if inductor is absent.
+    """
+    global _inductor_decoder_patched
+    if _inductor_decoder_patched:
+        return
+    _inductor_decoder_patched = True
+    try:
+        import torch._inductor.cpp_builder as _cb  # type: ignore[import-not-found]
+    except Exception:
+        return
+    # (codec, errors) — cp866 matches MSVC's OEM output; replace tolerates any
+    # other codepage a non-Russian locale might emit.
+    _cb.SUBPROCESS_DECODE_ARGS = ("cp866", "replace")
+
+
 def lr_at(
     step: int,
     max_steps: int,
@@ -381,6 +408,7 @@ def train(
         "cuda"
     ):
         if hasattr(torch, "compile"):
+            _patch_inductor_decoder()
             run_model = torch.compile(model)
 
     precision = cfg.precision

@@ -56,21 +56,28 @@ class DomainRotor(nn.Module):
         )
         return rotors / torch.sqrt(norm_sq)
 
-    def value(self, rotor_idx: int | torch.Tensor = 0) -> torch.Tensor:
-        rotors = self._normalized_rotors()
+    def _select(
+        self, rotors: torch.Tensor, rotor_idx: int | torch.Tensor
+    ) -> torch.Tensor:
         if isinstance(rotor_idx, torch.Tensor):
             idx = rotor_idx.to(device=rotors.device, dtype=torch.long)
             selected = rotors.index_select(0, idx.reshape(-1))
             return selected.reshape(*idx.shape, self.heads, self.blade_count)
         return rotors[int(rotor_idx)]
 
-    def inverse(self, rotor_idx: int | torch.Tensor = 0) -> torch.Tensor:
-        rotors = self._normalized_rotors()
-        if isinstance(rotor_idx, torch.Tensor):
-            idx = rotor_idx.to(device=rotors.device, dtype=torch.long)
-            selected = reverse(rotors.index_select(0, idx.reshape(-1)))
-            return selected.reshape(*idx.shape, self.heads, self.blade_count)
-        return reverse(rotors[int(rotor_idx)])
+    def value(
+        self, rotor_idx: int | torch.Tensor = 0, rotors: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if rotors is None:
+            rotors = self._normalized_rotors()
+        return self._select(rotors, rotor_idx)
+
+    def inverse(
+        self, rotor_idx: int | torch.Tensor = 0, rotors: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if rotors is None:
+            rotors = self._normalized_rotors()
+        return reverse(self._select(rotors, rotor_idx))
 
     def _expand_like(
         self, rotor: torch.Tensor, multivector: torch.Tensor
@@ -80,17 +87,31 @@ class DomainRotor(nn.Module):
         return rotor.expand_as(multivector)
 
     def sandwich(
-        self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0
+        self,
+        multivector: torch.Tensor,
+        rotor_idx: int | torch.Tensor = 0,
+        rotors: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        rotor = self._expand_like(self.value(rotor_idx), multivector)
-        rotor_inv = self._expand_like(self.inverse(rotor_idx), multivector)
+        if rotors is None:
+            rotors = self._normalized_rotors()
+        rotor = self._expand_like(self._select(rotors, rotor_idx), multivector)
+        rotor_inv = self._expand_like(
+            reverse(self._select(rotors, rotor_idx)), multivector
+        )
         return geometric_product(geometric_product(rotor, multivector), rotor_inv)
 
     def inverse_sandwich(
-        self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0
+        self,
+        multivector: torch.Tensor,
+        rotor_idx: int | torch.Tensor = 0,
+        rotors: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        rotor = self._expand_like(self.value(rotor_idx), multivector)
-        rotor_inv = self._expand_like(self.inverse(rotor_idx), multivector)
+        if rotors is None:
+            rotors = self._normalized_rotors()
+        rotor = self._expand_like(self._select(rotors, rotor_idx), multivector)
+        rotor_inv = self._expand_like(
+            reverse(self._select(rotors, rotor_idx)), multivector
+        )
         return geometric_product(geometric_product(rotor_inv, multivector), rotor)
 
     def forward(
@@ -107,8 +128,9 @@ class InvariantExtractor(nn.Module):
         multivector: torch.Tensor,
         source_rotor: DomainRotor,
         rotor_idx: int | torch.Tensor = 0,
+        rotors: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return source_rotor.inverse_sandwich(multivector, rotor_idx)
+        return source_rotor.inverse_sandwich(multivector, rotor_idx, rotors)
 
 
 class DomainTransfer(nn.Module):
@@ -119,8 +141,9 @@ class DomainTransfer(nn.Module):
         invariant: torch.Tensor,
         target_rotor: DomainRotor,
         rotor_idx: int | torch.Tensor = 0,
+        rotors: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return target_rotor.sandwich(invariant, rotor_idx)
+        return target_rotor.sandwich(invariant, rotor_idx, rotors)
 
 
 class GatedFusion(nn.Module):
@@ -198,9 +221,14 @@ class HDIMFull(nn.Module):
                 }
             return hidden_states
         multivector = self.project(hidden_states)
-        invariant = self.extract(multivector, self.rotors, src_rotor_idx)
-        target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
-        target_invariant = self.extract(multivector, self.rotors, tgt_rotor_idx)
+        # Normalize all rotors ONCE per forward (was 6× via value/inverse in
+        # extract/transfer/extract). Each normalization calls geometric_product
+        # on a [num_rotors, heads, 8] stack; reusing one result removes 5 of
+        # them — the dominant cost in the GDR/HDIM block.
+        rotors = self.rotors._normalized_rotors()
+        invariant = self.extract(multivector, self.rotors, src_rotor_idx, rotors)
+        target = self.transfer(invariant, self.rotors, tgt_rotor_idx, rotors)
+        target_invariant = self.extract(multivector, self.rotors, tgt_rotor_idx, rotors)
         fused, gate = self.fuse(target, hidden_states, return_gate=True)
         if self.gdr is not None:
             fused = self.gdr(fused)
@@ -299,9 +327,10 @@ class DelayedHDIM(HDIMFull):
             self._buffer_sum = None
             self._buffer_count = 0
 
-            invariant = self.extract(agg_mv, self.rotors, src_rotor_idx)
-            target = self.transfer(invariant, self.rotors, tgt_rotor_idx)
-            target_invariant = self.extract(agg_mv, self.rotors, tgt_rotor_idx)
+            rotors = self.rotors._normalized_rotors()
+            invariant = self.extract(agg_mv, self.rotors, src_rotor_idx, rotors)
+            target = self.transfer(invariant, self.rotors, tgt_rotor_idx, rotors)
+            target_invariant = self.extract(agg_mv, self.rotors, tgt_rotor_idx, rotors)
             fused, gate = self.fuse(target, hidden_states, return_gate=True)
 
             if return_state:
