@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 try:
     import typer
@@ -16,7 +17,7 @@ from hagi.train.config import config_from_dict
 from hagi.utils import _load_yaml
 
 
-def _load_state_dict(checkpoint: Path, device: str) -> tuple[dict, dict]:
+def _load_state_dict(checkpoint: Path, device: str) -> tuple[dict[str, Any], dict[str, Any]]:
     """Load (model_state_dict, aux_state) from a flat file or sharded dir.
 
     Sharded layout: ``<dir>/{model.pt,meta.pt,...}``. The model weights always

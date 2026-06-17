@@ -153,6 +153,33 @@ def _is_muon_param(name: str, p: nn.Parameter) -> bool:
     return True
 
 
+def _is_decay_param(name: str, p: nn.Parameter) -> bool:
+    """Weight-decay target: >=2D, non-norm params (matches build_optimizer contract)."""
+    return p.ndim >= 2 and "norm" not in name.lower()
+
+
+def _split_decay_groups(
+    named: list[tuple[str, nn.Parameter]],
+) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+    """Partition params into (weight_decay, no_weight_decay) groups."""
+    decay = [p for n, p in named if _is_decay_param(n, p)]
+    no_decay = [p for n, p in named if not _is_decay_param(n, p)]
+    return decay, no_decay
+
+
+def _split_muon_groups(
+    named: list[tuple[str, nn.Parameter]],
+) -> tuple[list[nn.Parameter], list[nn.Parameter], list[nn.Parameter]]:
+    """Partition into (muon_params, adam_decay, adam_no_decay).
+
+    muon: 2D hidden weights (_is_muon_param). remainder split by _is_decay_param.
+    """
+    muon_params = [p for n, p in named if _is_muon_param(n, p)]
+    rest = [(n, p) for n, p in named if not _is_muon_param(n, p)]
+    decay, no_decay = _split_decay_groups(rest)
+    return muon_params, decay, no_decay
+
+
 class ScheduleFreeAdamW(torch.optim.Optimizer):
     """AdamW with fixed LR and built-in Polyak-Ruppert parameter averaging.
 
@@ -455,17 +482,7 @@ def _build_muon_ademamix(
     )
     eps = float(cfg.get("eps", 1e-8))
     alpha = float(cfg.get("ademamix_alpha", 0.5))
-    muon_params = [p for n, p in named if _is_muon_param(n, p)]
-    adam_decay = [
-        p
-        for n, p in named
-        if not _is_muon_param(n, p) and p.ndim >= 2 and "norm" not in n.lower()
-    ]
-    adam_no_decay = [
-        p
-        for n, p in named
-        if not _is_muon_param(n, p) and not (p.ndim >= 2 and "norm" not in n.lower())
-    ]
+    muon_params, adam_decay, adam_no_decay = _split_muon_groups(named)
     muon = Muon(
         muon_params,
         lr=float(cfg.get("muon_lr", 0.02)),
@@ -493,17 +510,7 @@ def _build_muon_adamw(
     wd = float(cfg.get("weight_decay", 0.1))
     betas_cfg = cast(tuple[float, float], tuple(cfg.get("betas", (0.9, 0.95))))
     eps = float(cfg.get("eps", 1e-8))
-    muon_params = [p for n, p in named if _is_muon_param(n, p)]
-    adam_decay = [
-        p
-        for n, p in named
-        if not _is_muon_param(n, p) and p.ndim >= 2 and "norm" not in n.lower()
-    ]
-    adam_no_decay = [
-        p
-        for n, p in named
-        if not _is_muon_param(n, p) and not (p.ndim >= 2 and "norm" not in n.lower())
-    ]
+    muon_params, adam_decay, adam_no_decay = _split_muon_groups(named)
     muon = Muon(
         muon_params,
         lr=float(cfg.get("muon_lr", 0.02)),
@@ -541,10 +548,7 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
         return _build_muon_ademamix(named, cfg)
 
     if kind == "adamw":
-        decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
-        no_decay = [
-            p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())
-        ]
+        decay, no_decay = _split_decay_groups(named)
         return torch.optim.AdamW(
             [
                 {"params": decay, "weight_decay": wd},
@@ -558,10 +562,7 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
         )
 
     if kind == "schedule-free-adamw":
-        decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
-        no_decay = [
-            p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())
-        ]
+        decay, no_decay = _split_decay_groups(named)
         return ScheduleFreeAdamW(
             [
                 {"params": decay, "weight_decay": wd},
@@ -574,10 +575,7 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
         )
 
     if kind == "adam-mini":
-        decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
-        no_decay = [
-            p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())
-        ]
+        decay, no_decay = _split_decay_groups(named)
         return AdamMini(
             [
                 {"params": decay, "weight_decay": wd},
@@ -591,13 +589,10 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
 
     if kind in ("adamw8bit", "paged_adamw8bit"):
         try:
-            import bitsandbytes as bnb
+            import bitsandbytes as bnb  # type: ignore[reportMissingImports]
         except ImportError:
             raise ImportError("bitsandbytes not installed. `pip install bitsandbytes`.")
-        decay = [p for n, p in named if p.ndim >= 2 and "norm" not in n.lower()]
-        no_decay = [
-            p for n, p in named if not (p.ndim >= 2 and "norm" not in n.lower())
-        ]
+        decay, no_decay = _split_decay_groups(named)
         cls = (
             bnb.optim.PagedAdamW8bit
             if kind.startswith("paged")

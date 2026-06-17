@@ -160,7 +160,7 @@ class SequentialCyclingIterator:
         if self.num_workers > 0:
             kwargs["prefetch_factor"] = 4
             kwargs["persistent_workers"] = True
-        loader = DataLoader(dataset, **kwargs)  # type: ignore[operator]
+        loader = DataLoader(dataset, **kwargs)  # pyright: ignore[reportOptionalCall, reportArgumentType]
         self._loader_cache[cache_key] = loader
         return loader
 
@@ -171,8 +171,10 @@ class SequentialCyclingIterator:
         while True:
             if self._current_iter is None:
                 self._advance()
+            current_iter = self._current_iter
+            assert current_iter is not None
             try:
-                return next(self._current_iter)
+                return next(current_iter)
             except StopIteration:
                 self.current_cycle += 1
                 if self.current_cycle >= self.cycles_per_dataset:

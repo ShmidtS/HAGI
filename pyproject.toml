@@ -37,3 +37,8 @@ reportMissingImports = "none"
 reportIncompatibleMethodOverride = "none"
 reportRedeclaration = "none"
 reportPrivateImportUsage = "none"
+# HAGI uses conditional/deferred attribute registration as a design pattern:
+# GDR legacy-layout rebuild (gdr._build_legacy_mlps), fused qkv/gate_up
+# (transformer), and register_buffer buffers. These attrs are always set before
+# use but not in the class body / __init__, so the rule is noise, not signal.
+reportUninitializedInstanceVariable = "none"

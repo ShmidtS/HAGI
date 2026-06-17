@@ -1,4 +1,10 @@
-"""Command-line entry point for HAGI training."""
+"""Command-line entry point for HAGI training.
+
+Thin dispatcher over the canonical loop in :mod:`hagi.train.loop`. Builds the
+same rich ``LoopConfig`` (composite-loss warmup, EMA, schedule, TF32) as
+``scripts/train.py`` so ``hagi-train`` and the script are two doors to one
+house.
+"""
 
 from __future__ import annotations
 
@@ -94,6 +100,27 @@ def _build_batcher(
     )
 
 
+def _loop_config_from(
+    cfg: dict[str, Any], ckpt_dir: str, max_steps: int | None, precision: str
+) -> tuple[dict[str, Any], LoopConfig]:
+    """Build training-config dict + canonical LoopConfig.
+
+    Delegates field construction to ``hagi.train.loop.build_loop_config`` so the
+    console entry and ``scripts/train.py`` share one source of truth.
+    """
+    from hagi.train.loop import build_loop_config
+
+    train_cfg = dict(cfg.get("training", {}))
+    if max_steps is not None:
+        train_cfg["max_steps"] = max_steps
+    train_cfg.setdefault("precision", precision)
+    merged_cfg = dict(cfg)
+    merged_cfg["training"] = train_cfg
+    resolved_max_steps = int(train_cfg.get("max_steps", 50000))
+    loop_cfg = build_loop_config(merged_cfg, ckpt_dir, resolved_max_steps)
+    return train_cfg, loop_cfg
+
+
 def run(
     config: Path,
     device: str = "cpu",
@@ -120,30 +147,7 @@ def run(
         else:
             model.load_state_dict(state)
 
-    train_cfg = dict(cfg.get("training", {}))
-    train_cfg["precision"] = precision
-    train_cfg["ckpt_dir"] = ckpt_dir
-    if max_steps is not None:
-        train_cfg["max_steps"] = max_steps
-    loop_cfg = LoopConfig(
-        max_steps=int(train_cfg.get("max_steps", 50000)),
-        warmup_steps=int(train_cfg.get("warmup_steps", 2000)),
-        learning_rate=float(train_cfg.get("learning_rate", 3e-4)),
-        min_lr_ratio=float(train_cfg.get("min_lr_ratio", 0.1)),
-        grad_accum_steps=int(train_cfg.get("grad_accum_steps", 1)),
-        grad_clip=float(train_cfg.get("grad_clip", 1.0)),
-        precision=str(train_cfg.get("precision", precision)),
-        gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", False)),
-        eval_interval=int(
-            cfg.get("eval", {}).get(
-                "every_n_steps", train_cfg.get("eval_interval", 2000)
-            )
-        ),
-        eval_iters=int(train_cfg.get("eval_iters", 50)),
-        ckpt_interval=int(train_cfg.get("ckpt_interval", 5000)),
-        ckpt_dir=str(train_cfg.get("ckpt_dir", ckpt_dir)),
-        log_interval=int(train_cfg.get("log_interval", 50)),
-    )
+    train_cfg, loop_cfg = _loop_config_from(cfg, ckpt_dir, max_steps, precision)
     optimizer = build_optimizer(model, train_cfg)
     get_batch = _build_batcher(cfg, device, overfit, generator)
 

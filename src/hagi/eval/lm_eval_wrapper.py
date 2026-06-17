@@ -22,12 +22,12 @@ import torch
 import torch.nn.functional as F
 
 try:
-    from lm_eval.api.model import LM
-    from lm_eval.api.registry import register_model
+    from lm_eval.api.model import LM  # type: ignore[reportMissingImports]
+    from lm_eval.api.registry import register_model  # type: ignore[reportMissingImports]
 
-    _LM_EVAL_AVAILABLE = True
+    lm_eval_available = True
 except ImportError:  # allow import without lm-eval installed
-    _LM_EVAL_AVAILABLE = False
+    lm_eval_available = False
 
     class LM:  # minimal stub so the module imports
         pass
@@ -50,7 +50,7 @@ def load_tokenizer(name: str):
 
 
 @register_model("hagi")
-class HAGILMEval(LM):  # type: ignore[misc]
+class HAGILMEval(LM):  # pyright: ignore[reportGeneralTypeIssues]
     def __init__(
         self,
         ckpt: str,
@@ -60,7 +60,7 @@ class HAGILMEval(LM):  # type: ignore[misc]
         **kwargs,
     ):
         super().__init__()
-        if not _LM_EVAL_AVAILABLE:
+        if not lm_eval_available:
             raise ImportError("lm-eval not installed. `pip install lm-eval`.")
         self.device = device if torch.cuda.is_available() else "cpu"
         self.max_length = max_length

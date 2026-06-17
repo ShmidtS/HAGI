@@ -256,6 +256,23 @@ def parse_token_count(value: str) -> int:
     return int(float(text) * multiplier)
 
 
+def _count_bin_tokens(path: Path) -> int | None:
+    """Token count in a uint16 .bin, or None if absent/invalid.
+
+    Used by skip-existing checks: a non-empty even-sized .bin is read via memmap
+    to count tokens; otherwise None (caller re-downloads/tokenizes).
+    """
+    if not path.exists():
+        return None
+    size = path.stat().st_size
+    if size == 0 or size % 2 != 0:
+        return None
+    existing = np.memmap(path, dtype=np.uint16, mode="r")
+    count = int(existing.shape[0])
+    del existing
+    return count if count > 0 else None
+
+
 def flush_shard(tokens: list[int], output_dir: Path, shard_idx: int) -> Path:
     path = output_dir / f"fineweb_edu_{shard_idx:05d}.bin"
     array = np.asarray(tokens, dtype=np.uint16)
@@ -356,15 +373,11 @@ def tokenize_source_parallel(
     skip_existing: bool = False,
 ) -> Path:
     path = output_dir / f"{source}.bin"
-    if skip_existing and path.exists():
-        size = path.stat().st_size
-        if size > 0 and size % 2 == 0:
-            existing = np.memmap(path, dtype=np.uint16, mode="r")
-            existing_count = int(existing.shape[0])
-            del existing
-            if existing_count > 0:
-                print(f"source={source} skip_existing tokens={existing_count}")
-                return path
+    if skip_existing:
+        existing_count = _count_bin_tokens(path)
+        if existing_count is not None:
+            print(f"source={source} skip_existing tokens={existing_count}")
+            return path
 
     tokenizer = TokenizerWrapper.smollm2(tokenizer_name, use_fast=True)
     eos_token_id = (
@@ -433,16 +446,12 @@ def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:
     ) as executor:
         for source, ratio in args.mix_ratios.items():
             target_path = output_dir / f"{source}.bin"
-            if skip_existing and target_path.exists():
-                size = target_path.stat().st_size
-                if size > 0 and size % 2 == 0:
-                    existing = np.memmap(target_path, dtype=np.uint16, mode="r")
-                    existing_count = int(existing.shape[0])
-                    del existing
-                    if existing_count > 0:
-                        paths[source] = target_path
-                        print(f"source={source} skip_existing tokens={existing_count}")
-                        continue
+            if skip_existing:
+                existing_count = _count_bin_tokens(target_path)
+                if existing_count is not None:
+                    paths[source] = target_path
+                    print(f"source={source} skip_existing tokens={existing_count}")
+                    continue
             source_target = max(args.min_source_tokens, int(target_tokens * ratio))
             dataset_name, dataset_config, split = _dataset_spec_for_source(source)
             target_chars = max(1, source_target * 5)

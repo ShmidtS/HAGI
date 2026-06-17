@@ -278,9 +278,10 @@ class ChatSession:
     def _zero_lora_adapters(self) -> None:
         if self.lora_adapter is not None:
             for adapter in self.lora_adapter:
-                if hasattr(adapter, "B"):
+                b = getattr(adapter, "B", None)
+                if isinstance(b, torch.Tensor):
                     with torch.no_grad():
-                        adapter.B.zero_()
+                        b.zero_()
 
     def reset_adapter(self) -> None:
         self._zero_lora_adapters()

@@ -240,32 +240,160 @@ class SparseRouter(nn.Module):
 
     Computes dot-product scores between the query hidden state and slot routing
     keys, then returns the top-k slot IDs, raw scores, and softmax-normalised
-    weights.
+    weights. When the registry exceeds ``lsh_threshold`` slots, an LSH
+    (random-projection sign-hash) pre-filter narrows the candidate set before
+    the exact top-k — sublinear retrieval as the store scales toward millions
+    of slots. Below the threshold the exact matmul+topk path runs unchanged.
     """
 
-    def __init__(self, hidden_size: int, key_dim: int | None = None):
+    def __init__(
+        self,
+        hidden_size: int,
+        key_dim: int | None = None,
+        lsh_threshold: int = 0,
+        n_hashes: int = 8,
+        bucket_bits: int = 10,
+        probe_buckets: int = 2,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.key_dim = key_dim if key_dim is not None else hidden_size
         self.query_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
+        self.lsh_threshold = int(lsh_threshold)
+        self.n_hashes = int(n_hashes)
+        self.bucket_bits = int(bucket_bits)
+        self.probe_buckets = int(probe_buckets)
+        # Random projection planes for LSH: n_hashes projections, each
+        # bucket_bits wide. Non-persistent: deterministic, no checkpoint impact.
+        if self.lsh_threshold > 0:
+            proj = torch.randn(self.n_hashes * self.bucket_bits, self.key_dim)
+            self.register_buffer("_lsh_proj", proj, persistent=False)
+
+    @torch.no_grad()
+    def _bucket_codes(self, keys: torch.Tensor) -> torch.Tensor:
+        """Hash keys to per-hash bucket indices via sign of random projections.
+
+        keys: [..., key_dim] -> bucket bits packed per hash. Returns
+        [..., n_hashes] long bucket ids in [0, 2**bucket_bits).
+        """
+        lsh_proj = getattr(self, "_lsh_proj", None)
+        assert isinstance(lsh_proj, torch.Tensor), "LSH projection planes not initialised"
+        proj = keys @ lsh_proj.transpose(-2, -1)  # [..., n_hashes*bits]
+        proj = proj.view(*keys.shape[:-1], self.n_hashes, self.bucket_bits)
+        bits = (proj > 0).long()
+        weights = (1 << torch.arange(self.bucket_bits - 1, -1, -1, device=bits.device)).long()
+        return (bits * weights).sum(dim=-1)  # [..., n_hashes]
+
+    def route_top_k_lsh(
+        self,
+        query: torch.Tensor,
+        keys: torch.Tensor,
+        slot_ids: torch.Tensor,
+        top_k: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """LSH-filtered top-k. query [.., key_dim], keys [N, key_dim].
+
+        Probe the candidate set = union of buckets closest to the query across
+        ``n_hashes`` hashes (top ``probe_buckets`` per hash), then exact topk
+        over only those candidates. Falls back to exact topk over all N when the
+        LSH candidate set would be empty or smaller than top_k.
+        """
+        N = keys.size(0)
+        q_codes = self._bucket_codes(query)  # [.., n_hashes]
+        k_codes = self._bucket_codes(keys)  # [N, n_hashes] -> [n_hashes, N]
+        # match[q, h, n] = (q's bucket on hash h == key n's bucket on hash h).
+        # q_codes: [Q, n_hashes, 1]; k_codes transposed: [1, n_hashes, N].
+        match = q_codes.unsqueeze(-1) == k_codes.transpose(-2, -1).unsqueeze(-3)
+        cand_mask = match.any(dim=-2)  # [Q, N] bool
+
+        # cand_mask is [Q, N]. Pad per-query candidate lists to a common length;
+        # pad with -1 (filtered to -inf afterwards). cand_idx: [Q, max_cand].
+        Q = cand_mask.size(0)
+        cand_idx_list = [
+            cand_mask[i].nonzero(as_tuple=False).squeeze(-1) for i in range(Q)
+        ]
+        maxc = max((c.numel() for c in cand_idx_list), default=0)
+        cand_idx = torch.full(
+            (Q, maxc), -1, dtype=torch.long, device=query.device
+        )
+        for i, c in enumerate(cand_idx_list):
+            if c.numel() > 0:
+                cand_idx[i, : c.numel()] = c
+
+        # Gather candidate scores: [Q, max_cand]. -1 idx -> gather index 0,
+        # then masked to -inf via pad_mask.
+        safe_idx = cand_idx.clamp(min=0)
+        cand_keys = keys[safe_idx]  # [Q, max_cand, key_dim]
+        cand_scores = torch.einsum("qd,qcd->qc", query, cand_keys)
+        pad_mask = cand_idx < 0
+        cand_scores = cand_scores.masked_fill(pad_mask, float("-inf"))
+
+        top_k = min(top_k, N)
+        tk_weights, tk_local = torch.topk(cand_scores, k=top_k, dim=-1, sorted=False)
+        # Map local candidate index -> global slot index -> slot id.
+        tk_global = safe_idx.gather(-1, tk_local)
+        tk_global = torch.where(torch.isfinite(tk_weights), tk_global, torch.zeros_like(tk_global))
+        top_k_ids = slot_ids[tk_global]
+        weights = F.softmax(tk_weights, dim=-1)
+        return top_k_ids, tk_weights, weights
+
+    def load_balance_loss(
+        self,
+        scores: torch.Tensor,
+        top_k_indices: torch.Tensor,
+        alpha: float = 1.0,
+    ) -> torch.Tensor:
+        """Shazeer/Switch load-balance loss over the full routing distribution.
+
+        L = alpha * N * sum_s( f_s * P_s ), where f_s is the (detached) fraction
+        of queries whose top-k selected slot s, and P_s is the mean full-softmax
+        probability of slot s. f_s carries no gradient (detached counter); P_s is
+        differentiable through query_proj AND the routing keys (registry), so this
+        is what actually trains the router. Minimum = alpha * top_k at uniform use.
+        Mirror of moe.py MoESwiGLU aux loss.
+
+        scores: [B, T, N] or [B, N] dot-product logits (pre-topk).
+        top_k_indices: [..., top_k] long indices into N (from torch.topk).
+        """
+        n = scores.size(-1)
+        probs = F.softmax(scores, dim=-1)  # full distribution over all N slots
+        flat_probs = probs.reshape(-1, n)  # [BT, N]
+        mean_prob = flat_probs.mean(dim=0)  # [N]
+        flat_idx = top_k_indices.reshape(-1, top_k_indices.size(-1))  # [BT, top_k]
+        one_hot = torch.zeros(
+            flat_idx.size(0),
+            n,
+            device=scores.device,
+            dtype=mean_prob.dtype,
+        )
+        one_hot.scatter_(1, flat_idx, 1.0)
+        fraction = one_hot.mean(dim=0).detach()  # [N], detached counter
+        return alpha * float(n) * (fraction * mean_prob).sum()
 
     def route_top_k(
         self,
         query_hidden: torch.Tensor,
         registry: SlotRegistry,
         top_k: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return top-k slot IDs, scores, and weights.
+        compute_lb: bool = False,
+        lb_alpha: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Return top-k slot IDs, scores, weights, and optional load-balance loss.
 
         Args:
             query_hidden: [B, T, hidden_size] or [B, hidden_size].
             registry: slot registry with pre-registered routing keys.
             top_k: number of slots to select.
+            compute_lb: when True (training), also return the load-balance aux
+                loss so the router receives a gradient from the LM loss. The
+                full-softmax term is differentiable through query_proj and the
+                registry routing keys.
 
         Returns:
             top_k_ids: [B, T, top_k] or [B, top_k] long tensor of slot IDs.
             scores:    same shape as top_k_ids, raw dot-product scores.
             weights:   same shape, softmax-normalised weights.
+            lb_loss:   scalar load-balance loss when compute_lb, else None.
         """
         if len(registry) == 0:
             raise RuntimeError("Cannot route: registry is empty")
@@ -277,6 +405,36 @@ class SparseRouter(nn.Module):
         if keys.device != query.device or keys.dtype != query.dtype:
             keys = keys.to(device=query.device, dtype=query.dtype)
 
+        slot_ids = registry.slot_ids_tensor(device=str(query.device))
+
+        # LSH path: only when enabled AND registry is large enough to benefit.
+        # (Exact matmul+topk is faster and exact for small N — the ANN overhead
+        # pays off only once the candidate set is much smaller than N.)
+        if (
+            self.lsh_threshold > 0
+            and len(registry) >= self.lsh_threshold
+            and query.shape[-1] == self.key_dim
+        ):
+            orig_shape = query.shape
+            q_flat = query.reshape(-1, self.key_dim)
+            top_k_ids, top_k_weights, weights = self.route_top_k_lsh(
+                q_flat, keys, slot_ids, top_k
+            )
+            top_k_ids = top_k_ids.reshape(*orig_shape[:-1], top_k)
+            top_k_weights = top_k_weights.reshape(*orig_shape[:-1], top_k)
+            weights = weights.reshape(*orig_shape[:-1], top_k)
+            # LSH path has no full scores; compute lb from an exact pass if asked.
+            lb_loss = None
+            if compute_lb:
+                full_scores = torch.matmul(
+                    query.reshape(-1, self.key_dim), keys.transpose(-2, -1)
+                )
+                flat_tk = torch.topk(full_scores, k=top_k, dim=-1, sorted=False).indices
+                lb_loss = self.load_balance_loss(
+                    full_scores.reshape(*query.shape[:-1], -1), flat_tk.reshape(*query.shape[:-1], top_k), lb_alpha
+                )
+            return top_k_ids, top_k_weights, weights, lb_loss
+
         # Dot-product scores: [B, T, N] or [B, N]
         scores = torch.matmul(query, keys.transpose(-2, -1))
 
@@ -285,10 +443,13 @@ class SparseRouter(nn.Module):
         weights = F.softmax(top_k_weights, dim=-1)
 
         # Map indices back to actual slot IDs (cached tensor)
-        slot_ids = registry.slot_ids_tensor(device=str(query.device))
         top_k_ids = slot_ids[top_k_indices]
 
-        return top_k_ids, top_k_weights, weights
+        lb_loss = None
+        if compute_lb:
+            lb_loss = self.load_balance_loss(scores, top_k_indices, lb_alpha)
+
+        return top_k_ids, top_k_weights, weights, lb_loss
 
 
 class DocumentWiseRoPE(nn.Module):
@@ -663,6 +824,7 @@ class HDIMSlotRouter(nn.Module):
         v_cache: torch.Tensor,
         slot_id_base: int = 0,
         domain_id: int = 0,
+        chunk_size: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Create slot tensors for all positions in a batch.
 
@@ -672,29 +834,70 @@ class HDIMSlotRouter(nn.Module):
             v_cache: [B, nkv, T, head_dim].
             slot_id_base: starting slot ID.
             domain_id: domain ID for all slots.
+            chunk_size: group ``chunk_size`` adjacent tokens into ONE slot by
+                mean-pooling their K/V and routing key. ``chunk_size=1`` (default)
+                reproduces the legacy per-token slots (T_slot=1). ``chunk_size>1``
+                yields compressed slots (T_slot=chunk_size): each slot summarizes
+                that many source tokens, so the registry holds ``B*T/chunk_size``
+                slots and represents ``chunk_size``x more source context at the
+                same max_slots budget. A trailing partial chunk (< chunk_size
+                tokens) is dropped to keep fixed T_slot.
 
         Returns:
             (slot_ids, routing_keys, k_caches, v_caches) where:
-            - slot_ids: [B*T] tensor
-            - routing_keys: [B*T, key_dim]
-            - k_caches: [B*T, nkv, 1, head_dim]
-            - v_caches: [B*T, nkv, 1, head_dim]
+            - slot_ids: [N] tensor (N = B*T//chunk_size)
+            - routing_keys: [N, key_dim]
+            - k_caches: [N, nkv, chunk_size, head_dim]
+            - v_caches: [N, nkv, chunk_size, head_dim]
         """
         B, T, _ = hidden_states.shape
-        inv = self.routing_key(hidden_states)  # [B, T, key_dim]
-        inv_flat = inv.reshape(B * T, -1)
-        total = B * T
+        if chunk_size <= 1:
+            inv = self.routing_key(hidden_states)  # [B, T, key_dim]
+            inv_flat = inv.reshape(B * T, -1)
+            total = B * T
+            k_t = k_cache.transpose(1, 2)  # [B, T, nkv, head_dim]
+            v_t = v_cache.transpose(1, 2)
+            k_flat = k_t.reshape(total, k_cache.size(1), k_cache.size(-1)).unsqueeze(2)
+            v_flat = v_t.reshape(total, v_cache.size(1), v_cache.size(-1)).unsqueeze(2)
+            slot_ids = torch.arange(
+                slot_id_base,
+                slot_id_base + total,
+                dtype=torch.long,
+                device=hidden_states.device,
+            )
+            return slot_ids, inv_flat, k_flat.detach(), v_flat.detach()
 
-        # Transpose to [B, T, nkv, head_dim] for per-token slicing
-        k_t = k_cache.transpose(1, 2)
-        v_t = v_cache.transpose(1, 2)
+        # Chunked (compressed) path: pool every `chunk_size` tokens into a slot.
+        n_full_chunks = T // chunk_size  # trailing partial chunk dropped
+        T_use = n_full_chunks * chunk_size
+        inv = self.routing_key(hidden_states[:, :T_use])  # [B, T_use, key_dim]
+        k_use = k_cache[:, :, :T_use]  # [B, nkv, T_use, head_dim]
+        v_use = v_cache[:, :, :T_use]
+        nkv, head_dim = k_cache.size(1), k_cache.size(-1)
 
-        # Flatten batch dimension and create per-token [nkv, 1, head_dim] slices
-        k_flat = k_t.reshape(total, k_cache.size(1), k_cache.size(-1)).unsqueeze(2)
-        v_flat = v_t.reshape(total, v_cache.size(1), v_cache.size(-1)).unsqueeze(2)
+        # Reshape to chunks and mean-pool: [B, n_chunks, chunk_size, ...] -> mean
+        # routing key: [B, T_use, key_dim] -> [B, n_chunks, chunk_size, key_dim]
+        inv_chunked = inv.view(B, n_full_chunks, chunk_size, -1).mean(dim=2)
+        inv_flat = inv_chunked.reshape(B * n_full_chunks, -1)
 
-        slot_ids = torch.arange(slot_id_base, slot_id_base + total, dtype=torch.long, device=hidden_states.device)
+        # K/V: [B, nkv, T_use, head_dim] -> [B, nkv, n_chunks, chunk_size, head_dim]
+        k_chunked = k_use.view(B, nkv, n_full_chunks, chunk_size, head_dim)
+        v_chunked = v_use.view(B, nkv, n_full_chunks, chunk_size, head_dim)
+        # -> [B, n_chunks, nkv, chunk_size, head_dim] -> [B*n_chunks, nkv, chunk_size, head_dim]
+        k_flat = k_chunked.permute(0, 2, 1, 3, 4).reshape(
+            B * n_full_chunks, nkv, chunk_size, head_dim
+        )
+        v_flat = v_chunked.permute(0, 2, 1, 3, 4).reshape(
+            B * n_full_chunks, nkv, chunk_size, head_dim
+        )
 
+        total = B * n_full_chunks
+        slot_ids = torch.arange(
+            slot_id_base,
+            slot_id_base + total,
+            dtype=torch.long,
+            device=hidden_states.device,
+        )
         return slot_ids, inv_flat, k_flat.detach(), v_flat.detach()
 
     def create_slot(

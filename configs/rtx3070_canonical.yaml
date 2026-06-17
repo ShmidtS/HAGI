@@ -1,6 +1,11 @@
 data:
   dataset_mode: memmap_packed
   max_seq_len: 1024
+  # Uncomment to enable variable-length training windows. Each sample draws a
+  # random length in [min_seq_len, max_seq_len]; the collate fn pads to the
+  # batch max with ignore_index so padded positions are loss-free. Leave unset
+  # for fixed-length (backward-compatible). The MODEL accepts arbitrary T.
+  min_seq_len: 256
   mix:
     edu: 0.4
     slimpajama: 0.25
@@ -54,7 +59,7 @@ eval:
   - winogrande
   every_n_steps: 2000
 model:
-  ce_chunk_size: 0
+  ce_chunk_size: 2048
   compile: false
   use_fused_ce: true
   expression_layers: 4
@@ -66,7 +71,9 @@ model:
     trivector: 64
     vector: 192
     vector_momentum: 0.5
-  gradient_checkpointing: false
+  gradient_checkpointing: true
+  ce_fused_chunk_size: 2048
+  label_smoothing: 0.1
   h_dim: 256
   hdim_delay_steps: 1
   hdim_full: true
@@ -74,13 +81,13 @@ model:
   hidden_size: 768
   hrm: true
   hrm_h_cycles: 1
-  hrm_l_cycles: 3
+  hrm_l_cycles: 2
   l_dim: 256
   loop_count: 10
   moe_alpha: 0.01
   moe_intermediate_size: 512
   moe_top_k: 1
-  msa_slot_count: 10000
+  msa_slot_count: 512
   msa_top_k: 5
   num_experts: 4
   perception_layers: 4
@@ -95,42 +102,51 @@ model:
     num_query_heads: 12
     qk_norm: true
     rope_theta: 10000.0
+    fuse_qkv: true
   use_gdr: true
   use_hdim_cross_domain: true
   use_loop: true
   use_moe: true
   use_msa: true
-  use_nars: true
-  use_quality_head: true
+  use_nars: false
+  use_quality_head: false
   vocab_size: 49152
 name: rtx3070_canonical
 training:
   compile: false
-  learning_rate: 0.00015
-  batch_size: 8
+  learning_rate: 0.001
+  batch_size: 10
   ckpt_interval: 1000
   composite_loss:
     w_aux: 0.01
     w_ce: 1.0
     w_iso: 0.05
     w_moe: 0.005
-    w_quality: 0.01
+    w_msa_lb: 0.01
+    w_quality: 0.0
   use_gdr_aux: true
   cooldown_frac: 0.05
   ema:
     decay: 0.9995
-    start_step: 800
+    start_step: 500
   eval_interval: 0
   eval_samples: 500
   grad_accum_steps: 2
   grad_clip: 1.0
   gradient_checkpointing: false
   log_interval: 25
+  nars_policy_interval: 200
+  vram_probe:
+    safety: 1.0
+    headroom: 0.85
   loss_warmup_mode: linear
+  aux_warmup_steps: 2000
+  iso_warmup_steps: 3000
+  moe_warmup_steps: 2000
   magic_norm_max: 1.0
   max_steps: 8000
   min_lr_ratio: 0.1
-  muon_lr: 0.003
+  muon_lr: 0.02
   muon_momentum: 0.95
   muon_ns_steps: 5
   optimizer: muon_adamw
@@ -139,11 +155,11 @@ training:
   schedule: cosine
   seed: 42
   use_prefix_lm: false
-  warmup_steps: 100
+  warmup_steps: 500
   weight_decay: 0.1
   num_workers: 0
   compression_monitor:
-    enabled: false
+    enabled: true
     artifact_threshold: 0.5
     calibration_bins: 10
     rank_subsample: 256

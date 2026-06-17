@@ -78,11 +78,11 @@ _STRUCT_TRITON = _STRUCT.permute(2, 0, 1).contiguous()
 
 
 # Cache per (device, dtype) to avoid repeated .to() sync
-_STRUCT_CACHE: dict[tuple, torch.Tensor] = {}
-_GRADE_MASK_CACHE: dict[tuple, torch.Tensor] = {}
-_REVERSE_SIGNS_CACHE: dict[tuple, torch.Tensor] = {}
-_BV_MASK_CACHE: dict[tuple, torch.Tensor] = {}
-_OTHER_MASK_CACHE: dict[tuple, torch.Tensor] = {}
+_STRUCT_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+_GRADE_MASK_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
+_REVERSE_SIGNS_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+_BV_MASK_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+_OTHER_MASK_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
 
 def _get_struct(device: torch.device, dtype: torch.dtype) -> torch.Tensor:

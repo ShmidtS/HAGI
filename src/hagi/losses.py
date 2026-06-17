@@ -17,6 +17,7 @@ def _cross_entropy_impl(
     targets: torch.Tensor,
     ignore_index: int = -100,
     chunk_size: int = 0,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     """Compute token cross-entropy with class logits in the final dimension.
 
@@ -25,20 +26,29 @@ def _cross_entropy_impl(
     spike at large N·V (e.g. 8·1024·49152·4B ≈ 1.6 GB). When chunk_size > 0, the
     upcast happens per row-chunk so the fp32 copy never fully materializes.
     Numerically identical to the unchunked path (sum over chunks / valid-token
-    count == mean).
+    count == mean). ``label_smoothing`` in [0,1) is forwarded to
+    ``F.cross_entropy`` (improves small-model generalization).
     """
     if logits.ndim > 2:
         logits = logits.view(-1, logits.size(-1))
         targets = targets.view(-1)
     if chunk_size <= 0 or logits.size(0) <= chunk_size:
-        return F.cross_entropy(logits, targets, ignore_index=ignore_index)
+        return F.cross_entropy(
+            logits, targets, ignore_index=ignore_index, label_smoothing=label_smoothing
+        )
     valid = (targets != ignore_index).sum().clamp(min=1)
-    total = torch.zeros((), dtype=logits.dtype, device=logits.device)
+    # fp32 accumulator: summing chunk losses in bf16 loses precision and the
+    # native CE kernel already returns fp32 for bf16 input, so this matches.
+    total = torch.zeros((), dtype=torch.float32, device=logits.device)
     for i in range(0, logits.size(0), chunk_size):
         lg = logits[i : i + chunk_size]
         tg = targets[i : i + chunk_size]
         total = total + F.cross_entropy(
-            lg, tg, ignore_index=ignore_index, reduction="sum"
+            lg,
+            tg,
+            ignore_index=ignore_index,
+            reduction="sum",
+            label_smoothing=label_smoothing,
         )
     return total / valid
 
@@ -55,13 +65,14 @@ def cross_entropy_loss(
     targets: torch.Tensor,
     ignore_index: int = -100,
     chunk_size: int = 0,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     fn = (
         _cross_entropy_compiled
         if logits.is_cuda and _cross_entropy_compiled is not None
         else _cross_entropy_impl
     )
-    return fn(logits, targets, ignore_index, chunk_size)
+    return fn(logits, targets, ignore_index, chunk_size, label_smoothing)
 
 
 def fused_linear_cross_entropy(
@@ -70,6 +81,7 @@ def fused_linear_cross_entropy(
     targets: torch.Tensor,
     ignore_index: int = -100,
     chunk_size: int = 4096,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     """Chunked lm_head projection + cross-entropy without materializing [N, V] logits.
 
@@ -80,8 +92,6 @@ def fused_linear_cross_entropy(
     of N / chunk_size. Numerically identical to the unchunked path (sum over
     chunks / valid-token count == mean).
     """
-    from torch.utils.checkpoint import checkpoint as _ckpt
-
     flat_h = hidden.reshape(-1, hidden.size(-1))
     flat_t = targets.reshape(-1)
     if chunk_size <= 0:
@@ -90,23 +100,26 @@ def fused_linear_cross_entropy(
 
     def _chunk_loss(h_chunk: torch.Tensor, t_chunk: torch.Tensor) -> torch.Tensor:
         logits = F.linear(h_chunk, weight)
+        # No explicit .float(): the native CUDA CE kernel accumulates in fp32
+        # internally for bf16/fp16 input, so upcasting the full [chunk, V]
+        # logits is pure bandwidth overhead (halves the chunk's memory spike).
         return F.cross_entropy(
-            logits.float(), t_chunk, ignore_index=ignore_index, reduction="sum"
+            logits,
+            t_chunk,
+            ignore_index=ignore_index,
+            reduction="sum",
+            label_smoothing=label_smoothing,
         )
 
-    needs_grad = torch.is_grad_enabled() and (
-        flat_h.requires_grad or weight.requires_grad
-    )
+    # Chunking (not checkpointing) bounds peak memory: only one [chunk, V]
+    # logits tensor is alive at a time. Checkpointing the chunk would recompute
+    # the lm_head matmul + log_softmax on backward — ~30% slower here for no
+    # memory benefit, since the chunk is already small (chunk_size * V * 2B).
     total = flat_h.new_zeros((), dtype=torch.float32)
     for i in range(0, flat_h.size(0), chunk_size):
         h_c = flat_h[i : i + chunk_size]
         t_c = flat_t[i : i + chunk_size]
-        if needs_grad:
-            chunk_loss = _ckpt(_chunk_loss, h_c, t_c, use_reentrant=False)
-            assert isinstance(chunk_loss, torch.Tensor)
-            total = total + chunk_loss
-        else:
-            total = total + _chunk_loss(h_c, t_c)
+        total = total + _chunk_loss(h_c, t_c)
     return (total / valid).to(hidden.dtype)
 
 
@@ -174,31 +187,11 @@ def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
     return loss.sum() / valid.sum().clamp_min(1)
 
 
-def _as_logits(output: torch.Tensor | tuple[Any, ...] | dict[str, Any]) -> torch.Tensor:
-    if isinstance(output, torch.Tensor):
-        return output
-    if isinstance(output, tuple):
-        return output[0]
-    if isinstance(output, dict):
-        return output["logits"]
-    raise TypeError("model output must be a tensor, tuple, or dict")
-
-
 def compute_isomorphic_loss(
     invariant_src,
     invariant_tgt=None,
-    targets: torch.Tensor | None = None,
-    device=None,
 ) -> torch.Tensor:
     """Compute invariant MSE when HDIM source and target invariants are available."""
-    if isinstance(invariant_src, torch.nn.Module):
-        if invariant_tgt is None or device is None:
-            raise ValueError("input_ids and device are required when passing a model")
-        input_ids = invariant_tgt.to(device)
-        first = _as_logits(invariant_src(input_ids))
-        second = _as_logits(invariant_src(input_ids))
-        return F.mse_loss(first, second)
-
     if isinstance(invariant_src, dict):
         src = None
         tgt = None
@@ -236,6 +229,7 @@ def composite_loss(
     precomputed_loss: torch.Tensor | None = None,
     moe_aux_loss: torch.Tensor | None = None,
     num_moe_layers: int | torch.Tensor | None = None,
+    msa_aux_loss: torch.Tensor | None = None,
     chunk_size: int = 0,
     quality_score: torch.Tensor | None = None,
     quality_targets: torch.Tensor | None = None,
@@ -270,12 +264,17 @@ def composite_loss(
         moe_aux_loss = auxiliary_output.get("moe_aux_loss")
     if num_moe_layers is None and isinstance(auxiliary_output, dict):
         num_moe_layers = auxiliary_output.get("num_moe_layers")
+    if msa_aux_loss is None and isinstance(auxiliary_output, dict):
+        msa_aux_loss = auxiliary_output.get("msa_aux_loss")
+    if msa_aux_loss is None and isinstance(model_output, dict):
+        msa_aux_loss = model_output.get("msa_aux_loss")
 
     merged_weights = {
         "w_ce": 1.0,
         "w_aux": 0.1,
         "w_iso": 0.01,
         "w_moe": 0.0,
+        "w_msa_lb": 0.0,
         "w_quality": 0.0,
     }
     if weights is not None:
@@ -325,6 +324,13 @@ def composite_loss(
         result["L_moe"] = l_moe
     else:
         result["L_moe"] = l_ce.new_zeros(())
+    if merged_weights.get("w_msa_lb", 0.0) != 0.0 and msa_aux_loss is not None:
+        # MSA router load-balance: no num_msa_layers (single MSA block per fwd).
+        l_msa_lb = msa_aux_loss.to(device=ref_tensor.device, dtype=ref_tensor.dtype)
+        l_total = l_total + merged_weights["w_msa_lb"] * l_msa_lb
+        result["L_msa_lb"] = l_msa_lb
+    else:
+        result["L_msa_lb"] = l_ce.new_zeros(())
     if (
         merged_weights.get("w_quality", 0.0) != 0.0
         and quality_score is not None

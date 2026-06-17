@@ -59,6 +59,23 @@ class HAGIConfig:
     use_msa: bool = True
     msa_slot_count: int = 100
     msa_top_k: int = 5
+    # ANN / long-context memory knobs. Defaults reproduce legacy behavior:
+    #   msa_chunk_size=1     -> per-token slots (T_slot=1)
+    #   msa_lsh_threshold=0  -> exact matmul+topk routing (LSH disabled)
+    # Raise msa_chunk_size to compress (slot = mean of C tokens, Cx more context
+    # at the same slot budget) and set msa_lsh_threshold to enable sublinear
+    # LSH retrieval once the slot store grows past it. See .omc/tech-debt.md.
+    msa_chunk_size: int = 1
+    msa_lsh_threshold: int = 0
+    msa_lsh_hashes: int = 8
+    msa_lsh_bits: int = 10
+    msa_lsh_probe: int = 2
+    # Load-balance aux loss on the MSA router (mirror of MoE aux). The router's
+    # query_proj / routing keys otherwise receive no gradient from the LM loss
+    # (MSAAttention recomputes its own softmax over fetched K/V). When enabled
+    # the loss flows through the full routing softmax; w_msa_lb gates its weight.
+    msa_aux_loss: bool = True
+    msa_lb_alpha: float = 1.0
     use_nars: bool = True
     thinking_noise: float = 0.0
     use_quality_head: bool = False
@@ -71,6 +88,10 @@ class HAGIConfig:
     moe_alpha: float = 0.01
     ce_chunk_size: int = 0
     use_fused_ce: bool = False
+    ce_fused_chunk_size: int = 4096
+    # Label smoothing for the token cross-entropy. 0 disables (default). Small
+    # values (0.05-0.1) improve generalization/calibration for small LMs.
+    label_smoothing: float = 0.0
     compile: bool = False
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
@@ -95,8 +116,6 @@ class HAGIConfig:
 
 
 class HAGI(nn.Module):
-    _step: torch.Tensor
-
     def __init__(self, cfg: HAGIConfig):
         super().__init__()
         self.cfg = cfg
@@ -168,7 +187,14 @@ class HAGI(nn.Module):
                 use_binary_factorized=cfg.use_binary_factorized,
                 binary_factorized_rank=cfg.binary_factorized_rank,
             )
-            self.msa_router = SparseRouter(cfg.hidden_size, key_dim=64)
+            self.msa_router = SparseRouter(
+                cfg.hidden_size,
+                key_dim=64,
+                lsh_threshold=getattr(cfg, "msa_lsh_threshold", 0),
+                n_hashes=getattr(cfg, "msa_lsh_hashes", 8),
+                bucket_bits=getattr(cfg, "msa_lsh_bits", 10),
+                probe_buckets=getattr(cfg, "msa_lsh_probe", 2),
+            )
             self.hdim_slot_router = HDIMSlotRouter(cfg.hidden_size, key_dim=64)
             self.msa_registry = SlotRegistry(max_slots=cfg.msa_slot_count)
 
@@ -339,15 +365,14 @@ class HAGI(nn.Module):
         if self.training:
             self._step += 1
         moe_aux_losses: list[torch.Tensor] = []
-        collect_moe_aux = training_mode and (
-            weights is None or weights.get("w_moe", 0.0) != 0.0
-        )
-        need_iso = training_mode and (
-            weights is None or weights.get("w_iso", 0.0) != 0.0
-        )
-        need_quality = training_mode and (
-            weights is None or weights.get("w_quality", 0.0) != 0.0
-        )
+        # Feature collection is decoupled from loss weighting. Always collect
+        # when training so warmup schedules (which ramp a weight from 0) get the
+        # feature tensors from step 0; the loop applies the (possibly zero)
+        # weight at aggregation time. Zeroing a w_* no longer silently kills the
+        # feature computation that feeds it.
+        collect_moe_aux = training_mode
+        need_iso = training_mode
+        need_quality = training_mode and self.quality_head is not None
 
         # Fast-path: skip MoE aux collection list when weights are zero
         _moe_list = moe_aux_losses if collect_moe_aux else None
@@ -518,6 +543,7 @@ class HAGI(nn.Module):
         msa_out = None
         msa_slot_ids = None
         msa_scores = None
+        msa_lb_loss: torch.Tensor | None = None
         if self.cfg.use_msa and self.msa is not None:
             assert self.hdim_slot_router is not None
             assert self.msa_router is not None
@@ -549,6 +575,7 @@ class HAGI(nn.Module):
                     v_cache=v,
                     slot_id_base=0,
                     domain_id=0,
+                    chunk_size=getattr(self.cfg, "msa_chunk_size", 1),
                 )
             )
             # batch_register already evicts to the registry's _max_slots; the
@@ -571,10 +598,16 @@ class HAGI(nn.Module):
                     msa_scores = top_values.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
                     nars_weights = self.nars_msa.compute_attention_weights(msa_slot_ids)
             else:
-                msa_slot_ids, _raw_scores, msa_weights = self.msa_router.route_top_k(
-                    h, active_registry, self.cfg.msa_top_k
+                msa_slot_ids, _raw_scores, msa_weights, msa_lb = self.msa_router.route_top_k(
+                    h,
+                    active_registry,
+                    self.cfg.msa_top_k,
+                    compute_lb=bool(getattr(self.cfg, "msa_aux_loss", True))
+                    and training_mode,
+                    lb_alpha=float(getattr(self.cfg, "msa_lb_alpha", 1.0)),
                 )
                 msa_scores = msa_weights
+                msa_lb_loss = msa_lb
 
             msa_out = self.msa(
                 h, msa_slot_ids, active_registry, nars_weights=nars_weights
@@ -600,8 +633,11 @@ class HAGI(nn.Module):
                 targets,
                 ignore_index=ignore_index,
                 chunk_size=(
-                    self.cfg.ce_chunk_size if self.cfg.ce_chunk_size > 0 else 4096
+                    self.cfg.ce_chunk_size
+                    if self.cfg.ce_chunk_size > 0
+                    else self.cfg.ce_fused_chunk_size
                 ),
+                label_smoothing=getattr(self.cfg, "label_smoothing", 0.0),
             )
         else:
             logits = self.lm_head(h)
@@ -611,6 +647,7 @@ class HAGI(nn.Module):
                     targets.reshape(-1),
                     ignore_index=ignore_index,
                     chunk_size=self.cfg.ce_chunk_size,
+                    label_smoothing=getattr(self.cfg, "label_smoothing", 0.0),
                 )
 
         if (
@@ -643,8 +680,7 @@ class HAGI(nn.Module):
                 result["moe_aux_loss"] = torch.stack(moe_aux_losses).sum()
                 result["num_moe_layers"] = len(moe_aux_losses)
             if (
-                (weights is None or weights.get("w_aux", 0.0) != 0.0)
-                and gdr_state is not None
+                gdr_state is not None
                 and isinstance(gdr_state, dict)
             ):
                 if "fused" in gdr_state or "features" in gdr_state:
@@ -677,6 +713,8 @@ class HAGI(nn.Module):
             if msa_slot_ids is not None:
                 result["msa_slot_ids"] = msa_slot_ids
                 result["msa_scores"] = msa_scores
+            if msa_lb_loss is not None:
+                result["msa_aux_loss"] = msa_lb_loss
             if pre_logits_hidden is not None and self.quality_head is not None:
                 result["quality_score"] = self.quality_head(pre_logits_hidden).squeeze(
                     -1

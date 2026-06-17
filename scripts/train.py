@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import math
-import time
 import warnings
-from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -13,10 +10,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 import torch.nn.functional as F
-import yaml
 from torch.utils.data import DataLoader, Subset
-
-# Note: expandable_segments not supported on Windows; skip
 
 from hagi.data import (
     MemmapDataset,
@@ -28,47 +22,25 @@ from hagi.data import (
     get_sft_dataloader,
 )
 from hagi.data.tokenizer import TokenizerWrapper
-from hagi.losses import composite_loss
 from hagi.model import HAGI
-from hagi.train.checkpoint import save_checkpoint
-from hagi.train.config import config_from_dict, config_to_dict
-from hagi.train.loop import LoopConfig, train
+from hagi.train.config import config_from_dict
+from hagi.train.loop import (
+    LoopConfig,
+    autocast_ctx,
+    train,
+)
 from hagi.train.optim import build_optimizer
+from hagi.utils import _load_yaml as load_yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = ROOT / "configs" / "rtx3070.yaml"
+DEFAULT_CONFIG_PATH = ROOT / "configs" / "rtx3070_canonical.yaml"
 DEFAULT_CKPT_DIR = ROOT / "checkpoints" / "rtx3070"
 DEFAULT_DATA_DIR = ROOT / "data"
 
 
-def load_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"config must be a mapping: {path}")
-    return data
-
-
-def detect_mode(cfg: dict[str, Any]) -> str:
-    train_cfg = cfg.get("training", {})
-    data_cfg = cfg.get("data", {})
-    if (
-        "composite_loss" in train_cfg
-        or "ema" in train_cfg
-        or "use_prefix_lm" in train_cfg
-        or "magic_norm_max" in train_cfg
-    ):
-        return "full"
-    if str(data_cfg.get("dataset_mode", "memmap")).lower() == "sft":
-        return "full"
-    if "prefetch_factor" in data_cfg or "persistent_workers" in data_cfg:
-        return "fast"
-    return "basic"
-
-
 def _resolve_max_steps(
-    tcfg: dict, data_cfg: dict, batch_size: int, block_size: int
+    tcfg: dict[str, Any], data_cfg: dict[str, Any], batch_size: int, block_size: int
 ) -> int:
     """Derive max_steps from train_tokens if set, else fall back to max_steps."""
     grad_accum = tcfg.get("grad_accum_steps", 1)
@@ -229,29 +201,6 @@ def build_basic_batcher(
     return synthetic_batcher(vocab_size, batch_size, seq_len, device, generator)
 
 
-def build_loop_config(
-    cfg: dict[str, Any], ckpt_dir: Path, max_steps: int | None
-) -> LoopConfig:
-    train_cfg = cfg.get("training", {})
-    return LoopConfig(
-        max_steps=int(
-            max_steps if max_steps is not None else train_cfg.get("max_steps", 100000)
-        ),
-        warmup_steps=int(train_cfg.get("warmup_steps", 1000)),
-        learning_rate=float(train_cfg.get("learning_rate", 5.0e-4)),
-        min_lr_ratio=float(train_cfg.get("min_lr_ratio", 0.1)),
-        grad_accum_steps=int(train_cfg.get("grad_accum_steps", 16)),
-        grad_clip=float(train_cfg.get("grad_clip", 1.0)),
-        precision=str(train_cfg.get("precision", "fp16")),
-        gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", True)),
-        eval_interval=int(train_cfg.get("eval_interval", 2000)),
-        eval_iters=int(train_cfg.get("eval_iters", 50)),
-        ckpt_interval=int(train_cfg.get("ckpt_interval", 5000)),
-        ckpt_dir=str(ckpt_dir),
-        log_interval=int(train_cfg.get("log_interval", 50)),
-    )
-
-
 def load_resume(model: HAGI, resume: Path, device: str) -> int:
     if resume.is_dir():
         model_path = resume / "model.pt"
@@ -270,50 +219,6 @@ def load_resume(model: HAGI, resume: Path, device: str) -> int:
         return int(state.get("step", 0))
     model.load_state_dict(state)
     return 0
-
-
-def lr_at(
-    step: int,
-    max_steps: int,
-    warmup_steps: int,
-    learning_rate: float,
-    min_lr_ratio: float = 0.1,
-    schedule: str = "cosine",
-    cooldown_frac: float = 0.05,
-) -> float:
-    if step < warmup_steps:
-        return learning_rate * (step + 1) / max(1, warmup_steps)
-    if str(schedule).lower() == "wsd":
-        cooldown_start = int(max_steps * (1.0 - cooldown_frac))
-        if step >= cooldown_start:
-            cd_progress = (step - cooldown_start) / max(1, max_steps - cooldown_start)
-            cd_progress = min(1.0, max(0.0, cd_progress))
-            return learning_rate * (
-                min_lr_ratio + (1.0 - min_lr_ratio) * (1.0 - cd_progress)
-            )
-        return learning_rate
-    progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-    progress = min(1.0, progress)
-    coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
-    return learning_rate * min_lr_ratio + coeff * learning_rate * (1.0 - min_lr_ratio)
-
-
-def scheduled_weight(
-    step: int, start: float, final: float, warmup_steps: int, mode: str = "linear"
-) -> float:
-    progress = min(1.0, step / max(1, warmup_steps))
-    if mode == "cosine":
-        progress = 0.5 * (1.0 - math.cos(math.pi * progress))
-    return start + (final - start) * progress
-
-
-def autocast_ctx(precision: str, device: str):
-    if precision in ("fp32", "manual_fp16", "manual_bf16") or not device.startswith(
-        "cuda"
-    ):
-        return nullcontext()
-    dtype = torch.bfloat16 if precision == "bf16" else torch.float16
-    return torch.autocast(device_type="cuda", dtype=dtype)
 
 
 def maybe_disable_gradient_checkpointing(
@@ -388,17 +293,6 @@ def maybe_disable_gradient_checkpointing(
         torch.cuda.empty_cache()
 
 
-def gpu_util(device: str) -> str:
-    if not device.startswith("cuda") or not torch.cuda.is_available():
-        return "n/a"
-    try:
-        index = torch.device(device).index
-        util = torch.cuda.utilization(index if index is not None else 0)
-        return f"{util}%"
-    except Exception:
-        return "n/a"
-
-
 def maybe_compile(model: HAGI, device: str) -> Any:
     if (
         hasattr(model.cfg, "compile")
@@ -439,10 +333,33 @@ def prefix_lm_collate(
     return prefix_batch, targets
 
 
-def _shift_collate(batch: list[Any]) -> tuple[Any, Any]:
-    array = np.stack([np.asarray(item, dtype=np.int64) for item in batch])
-    x = array[:, :-1]
-    y = array[:, 1:]
+def _shift_collate(
+    batch: list[Any], pad_id: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Collate variable-length samples, right-padding to the batch max.
+
+    Inputs shorter than the batch max are padded with ``pad_id``; their targets
+    are padded with ``ignore_index = -100`` so the loss (ignore_index=-100) and
+    accuracy skip padded positions. Equal-length batches take the fast path
+    (single np.stack, no padding).
+    """
+    items = [np.asarray(item, dtype=np.int64) for item in batch]
+    lens = np.array([it.shape[0] for it in items])
+    max_len = int(lens.max())
+    if int(lens.min()) == max_len:
+        array = np.stack(items)
+        x = array[:, :-1]
+        y = array[:, 1:]
+        return torch.as_tensor(x, dtype=torch.long), torch.as_tensor(y, dtype=torch.long)
+    # Variable lengths: pad each row to max_len. Output length is max_len-1.
+    out_len = max_len - 1
+    x = np.full((len(items), out_len), pad_id, dtype=np.int64)
+    y = np.full((len(items), out_len), -100, dtype=np.int64)
+    for i, it in enumerate(items):
+        n = it.shape[0] - 1  # valid (input,target) pairs from this sample
+        if n > 0:
+            x[i, :n] = it[:-1]
+            y[i, :n] = it[1:]
     return torch.as_tensor(x, dtype=torch.long), torch.as_tensor(y, dtype=torch.long)
 
 
@@ -504,6 +421,11 @@ def build_full_dataloader(
     train_cfg = cfg.get("training", {})
     data_cfg = cfg.get("data", {})
     seq_len = int(data_cfg.get("max_seq_len", 512))
+    # Variable-length training: windows sampled in [min_seq_len, seq_len].
+    # Defaults to seq_len (fixed length) when unset. Eval always uses seq_len
+    # for a deterministic held-out set.
+    min_seq_len_cfg = data_cfg.get("min_seq_len")
+    min_seq_len = int(min_seq_len_cfg) if min_seq_len_cfg is not None else seq_len
     batch_size = int(train_cfg.get("batch_size", 2))
     num_workers = int(data_cfg.get("num_workers", 4))
     pin_memory = bool(data_cfg.get("pin_memory", device.startswith("cuda")))
@@ -586,7 +508,9 @@ def build_full_dataloader(
 
     if train_path is None:
         raise ValueError("train_path is required when no mix_paths")
-    dataset = MemmapDataset(train_path, seq_len=seq_len, dtype=dtype)
+    dataset = MemmapDataset(
+        train_path, seq_len=seq_len, dtype=dtype, min_seq_len=min_seq_len
+    )
     total = len(dataset)
     if total <= 0:
         raise ValueError(f"dataset is empty: {train_path}")
@@ -611,128 +535,6 @@ def build_full_dataloader(
     return train_loader, eval_loader, batch_size, seq_len, pin_memory
 
 
-def unwrap_logits(output: Any) -> torch.Tensor:
-    if isinstance(output, torch.Tensor):
-        return output
-    if isinstance(output, tuple):
-        return output[0]
-    if isinstance(output, dict):
-        return output["logits"]
-    raise TypeError("model output must be a tensor, tuple, or dict")
-
-
-def compute_loss(
-    logits: torch.Tensor | None,
-    targets: torch.Tensor,
-    model_output: Any = None,
-    weights: dict[str, float] | None = None,
-    chunk_size: int = 0,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    if weights is None:
-        if logits is None:
-            raise ValueError("logits is None and weights is None; cannot compute loss")
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
-            targets.reshape(-1),
-            ignore_index=-100,
-        )
-        return loss, {}
-    # Reuse pre-computed loss from model forward if available
-    precomputed_loss = (
-        model_output.get("loss") if isinstance(model_output, dict) else None
-    )
-    moe_aux_loss = (
-        model_output.get("moe_aux_loss") if isinstance(model_output, dict) else None
-    )
-    num_moe_layers = (
-        model_output.get("num_moe_layers") if isinstance(model_output, dict) else None
-    )
-    quality_score = (
-        model_output.get("quality_score") if isinstance(model_output, dict) else None
-    )
-    quality_targets = (
-        model_output.get("quality_target") if isinstance(model_output, dict) else None
-    )
-    if num_moe_layers is None:
-        # Estimate: 12 layers total (perception + reasoning + expression)
-        num_moe_layers = 12
-    if precomputed_loss is not None:
-        losses = composite_loss(
-            logits,
-            targets,
-            auxiliary_output=(
-                model_output.get("auxiliary_output")
-                if isinstance(model_output, dict)
-                else None
-            ),
-            model_output=(
-                model_output.get("model_output")
-                if isinstance(model_output, dict)
-                else None
-            ),
-            weights=weights,
-            invariant_src=(
-                model_output.get("invariant_src")
-                if isinstance(model_output, dict)
-                else None
-            ),
-            invariant_tgt=(
-                model_output.get("invariant_tgt")
-                if isinstance(model_output, dict)
-                else None
-            ),
-            precomputed_loss=precomputed_loss,
-            moe_aux_loss=moe_aux_loss,
-            num_moe_layers=num_moe_layers,
-            chunk_size=chunk_size,
-            quality_score=quality_score,
-            quality_targets=quality_targets,
-        )
-    else:
-        losses = composite_loss(
-            logits,
-            targets,
-            auxiliary_output=(
-                model_output.get("auxiliary_output")
-                if isinstance(model_output, dict)
-                else None
-            ),
-            model_output=(
-                model_output.get("model_output")
-                if isinstance(model_output, dict)
-                else None
-            ),
-            weights=weights,
-            invariant_src=(
-                model_output.get("invariant_src")
-                if isinstance(model_output, dict)
-                else None
-            ),
-            invariant_tgt=(
-                model_output.get("invariant_tgt")
-                if isinstance(model_output, dict)
-                else None
-            ),
-            moe_aux_loss=moe_aux_loss,
-            num_moe_layers=num_moe_layers,
-            chunk_size=chunk_size,
-            quality_score=quality_score,
-            quality_targets=quality_targets,
-        )
-    total_loss = losses["L_total"]
-    components = {name: value.detach().float() for name, value in losses.items()}
-    return total_loss, components
-
-
-def get_grad_norm(model: torch.nn.Module) -> float:
-    grads = [p.grad for p in model.parameters() if p.grad is not None]
-    if not grads:
-        return 0.0
-    norms = torch._foreach_norm(grads)
-    total = torch.stack(norms).pow(2).sum()
-    return float(total.sqrt().item())
-
-
 @torch.no_grad()
 def run_eval(
     model: torch.nn.Module,
@@ -740,16 +542,13 @@ def run_eval(
     device: str,
     pin_memory: bool,
     precision: str,
-    composite_weights: dict[str, float] | None,
-    use_prefix_lm: bool,
 ) -> dict[str, float]:
+    """In-loop eval: perplexity + accuracy over the eval dataloader."""
     was_training = model.training
     model.eval()
     total_ce = torch.tensor(0.0, device=device)
     total_tokens = torch.tensor(0, device=device)
     total_correct = torch.tensor(0, device=device)
-    total_aux = torch.tensor(0.0, device=device)
-    total_iso = torch.tensor(0.0, device=device)
     num_batches = 0
     for batch, targets in eval_loader:
         batch = to_device(batch, device, pin_memory)
@@ -758,7 +557,7 @@ def run_eval(
         tokens = batch.tokens if isinstance(batch, PrefixLMBatch) else batch
         with autocast_ctx(precision, device):
             output = model(tokens, training_mode=False)
-            logits = unwrap_logits(output)
+            logits = output["logits"] if isinstance(output, dict) else output[0]
             ce = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
@@ -770,124 +569,19 @@ def run_eval(
             total_tokens += valid.sum()
             preds = logits.argmax(dim=-1)
             total_correct += ((preds == targets) & valid).sum()
-            if composite_weights is not None:
-                chunk_size = getattr(model.cfg, "ce_chunk_size", 0)
-                _, components = compute_loss(
-                    logits, targets, output, composite_weights, chunk_size=chunk_size
-                )
-                total_aux += components.get("L_aux", torch.tensor(0.0, device=device))
-                total_iso += components.get("L_iso", torch.tensor(0.0, device=device))
         num_batches += 1
     if was_training:
         model.train()
     if num_batches == 0:
-        return {
-            "ppl": float("nan"),
-            "acc": float("nan"),
-            "L_aux": float("nan"),
-            "L_iso": float("nan"),
-        }
+        return {"ppl": float("nan"), "acc": float("nan")}
     total_tokens = int(total_tokens.item())
     return {
         "ppl": math.exp(float(total_ce.item()) / max(1, total_tokens)),
         "acc": 100.0 * float(total_correct.item()) / max(1, total_tokens),
-        "L_aux": float(total_aux.item()) / max(1, num_batches),
-        "L_iso": float(total_iso.item()) / max(1, num_batches),
     }
 
 
-def update_ema(
-    model: torch.nn.Module, model_ema: torch.nn.Module, decay: float
-) -> None:
-    with torch.no_grad():
-        params = list(model.parameters())
-        ema_params = list(model_ema.parameters())
-        if hasattr(torch, "_foreach_mul"):
-            ema_device = ema_params[0].device if ema_params else None
-            if ema_device == params[0].device:
-                torch._foreach_mul_(cast(list[torch.Tensor], ema_params), decay)
-                torch._foreach_add_(
-                    cast(list[torch.Tensor], ema_params),
-                    [p.detach() for p in params],
-                    alpha=1.0 - decay,
-                )
-            else:
-                for ema_param, param in zip(ema_params, params, strict=True):
-                    ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
-        else:
-            for ema_param, param in zip(ema_params, params, strict=True):
-                ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
-        for ema_buffer, buffer in zip(
-            model_ema.buffers(), model.buffers(), strict=True
-        ):
-            ema_buffer.copy_(buffer)
-
-
-def magic_norm_clip(
-    model: torch.nn.Module, max_norm: float, blade_count: int = 8
-) -> torch.Tensor:
-    gdr = getattr(model, "gdr", None)
-    if gdr is None or max_norm <= 0:
-        return torch.tensor(
-            0.0, device=next(model.parameters()).device, dtype=torch.float32
-        )
-    first_param = next((p for p in gdr.parameters() if p.grad is not None), None)
-    if first_param is None:
-        return torch.tensor(
-            0.0, device=next(model.parameters()).device, dtype=torch.float32
-        )
-    max_norm_t = first_param.new_full((), max_norm, dtype=torch.float32)
-    max_seen_t = first_param.new_zeros((), dtype=torch.float32)
-    for param in gdr.parameters():
-        grad = param.grad
-        if grad is None or grad.ndim == 0 or grad.shape[-1] % blade_count != 0:
-            continue
-        view = grad.view(*grad.shape[:-1], grad.shape[-1] // blade_count, blade_count)
-        norms = view.norm(dim=-1, keepdim=True).clamp_min(1e-4).float()
-        local_max = norms.max().detach()
-        max_seen_t = torch.maximum(max_seen_t, local_max)
-        view.mul_((max_norm_t / norms).clamp(max=1.0).detach().to(dtype=view.dtype))
-    return max_seen_t
-
-
-def save_training_checkpoint(
-    model: HAGI,
-    model_ema: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    step: int,
-    ckpt_dir: Path,
-) -> None:
-    use_moe = getattr(model.cfg, "use_moe", False)
-    if use_moe:
-        from hagi.train.checkpoint import save_sharded_checkpoint
-
-        path = ckpt_dir / f"step-{step:08d}"
-        save_sharded_checkpoint(
-            model,
-            optimizer,
-            model_ema,
-            path,
-            step=step,
-            config=config_to_dict(model.cfg),
-        )
-        return
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    path = ckpt_dir / f"step-{step:08d}.pt"
-    state: dict[str, Any] = {
-        "model": model.state_dict(),
-        "step": step,
-        "optimizer": optimizer.state_dict(),
-        "model_ema": {
-            name: value.detach().cpu() for name, value in model_ema.state_dict().items()
-        },
-        "config": config_to_dict(model.cfg),
-    }
-    torch.save(state, path)
-
-
-def print_model_summary(
-    model: HAGI, cfg: Any, device: str, use_prefix_lm: bool, use_composite_loss: bool
-) -> None:
+def print_model_summary(model: HAGI, cfg: Any, device: str) -> None:
     params = (
         model.num_parameters()
         if hasattr(model, "num_parameters")
@@ -900,10 +594,9 @@ def print_model_summary(
     else:
         vram_text = "n/a"
     print(
-        "model summary | "
-        f"params {params:,} | vram {vram_text} | "
+        f"model summary | params {params:,} | vram {vram_text} | "
         f"use_loop {cfg.use_loop} | hrm {cfg.hrm} | use_gdr {cfg.use_gdr} | "
-        f"hdim_full {cfg.hdim_full} | prefix_lm {use_prefix_lm} | composite_loss {use_composite_loss}"
+        f"hdim_full {cfg.hdim_full}"
     )
 
 
@@ -923,13 +616,19 @@ def run_dry_profile(
         if use_prefix_lm:
             inputs, targets = batch
             output = model(inputs.tokens)
-            logits = unwrap_logits(output)
-            targets = apply_prefix_mask(targets, inputs)
+            logits = output["logits"] if isinstance(output, dict) else output
         else:
             x, targets = batch
-            output = model(x)
-            logits = unwrap_logits(output)
-        loss, _ = compute_loss(logits, targets)
+            output = model(x, targets=targets)
+            logits = output["logits"] if isinstance(output, dict) else output[0]
+        loss = output.get("loss") if isinstance(output, dict) else None
+        if loss is None and logits is not None:
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+                ignore_index=-100,
+            )
+        assert isinstance(loss, torch.Tensor), "dry-run produced no loss"
     print(f"dry_run_loss {float(loss.detach().cpu()):.4f}")
     if device.startswith("cuda"):
         allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
@@ -940,198 +639,24 @@ def run_dry_profile(
     print("dry_run_complete no optimizer step executed")
 
 
-def run_basic(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
-    model_cfg = config_from_dict(cfg.get("model", {}))
-    model = HAGI(model_cfg).to(args.device)
-    maybe_disable_gradient_checkpointing(model, args.device)
-    print_model_size(model)
-    print_vram_usage()
+def _build_loop_config(
+    cfg: dict[str, Any], ckpt_dir: Path, max_steps: int
+) -> LoopConfig:
+    """Delegates to the canonical builder in hagi.train.loop (shared with cli)."""
+    from hagi.train.loop import build_loop_config
 
-    start_step = 0
-    if args.resume is not None:
-        start_step = load_resume(model, args.resume, args.device)
-        print(f"resumed from step {start_step}")
-
-    args.ckpt_dir.mkdir(parents=True, exist_ok=True)
-    optimizer = build_optimizer(model, cfg.get("training", {}))
-    get_batch = build_basic_batcher(
-        cfg, args.device, args.train_path, args.data_dir, args.seq_len
-    )
-    train_cfg = cfg.get("training", {})
-    data_cfg = cfg.get("data", {})
-    batch_size = int(train_cfg.get("batch_size", 1))
-    _t = getattr(model_cfg, "transformer", None)
-    _default_seq_len = getattr(_t, "max_seq_len", 2048) if _t is not None else 2048
-    seq_len = int(
-        args.seq_len
-        if args.seq_len is not None
-        else data_cfg.get("max_seq_len", _default_seq_len)
-    )
-    max_steps = (
-        int(args.max_steps)
-        if args.max_steps is not None
-        else _resolve_max_steps(train_cfg, data_cfg, batch_size, seq_len)
-    )
-    loop_cfg = build_loop_config(cfg, args.ckpt_dir, max_steps)
-    final_loss = train(
-        model, optimizer, get_batch, loop_cfg, device=args.device, start_step=start_step
-    )
-    save_checkpoint(model, optimizer, loop_cfg.max_steps, str(args.ckpt_dir))
-    print(f"final_loss {final_loss:.4f}")
+    return build_loop_config(cfg, str(ckpt_dir), max_steps)
 
 
-def run_fast(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
-    model_cfg = config_from_dict(cfg.get("model", {}))
-    train_cfg = cfg.get("training", {})
-    data_cfg = cfg.get("data", {})
-
-    if args.device.startswith("cuda"):
-        torch.set_float32_matmul_precision("high")
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cuda.matmul.allow_fp16_accumulation = True
-        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
-
-    model = HAGI(model_cfg).to(args.device)
-    if hasattr(model.cfg, "gradient_checkpointing"):
-        model.cfg.gradient_checkpointing = bool(
-            train_cfg.get("gradient_checkpointing", True)
-        )
-    optimizer = build_optimizer(model, train_cfg)
-    train_model = maybe_compile(model, args.device)
-    train_model.train()
-
-    train_path = resolve_train_path(cfg, args.train_path, args.data_dir)
-    seq_len = int(data_cfg.get("max_seq_len", 512))
-    batch_size = int(train_cfg.get("batch_size", 2))
-    num_workers = int(data_cfg.get("num_workers", 4))
-    pin_memory = bool(data_cfg.get("pin_memory", args.device.startswith("cuda")))
-    dataloader = get_memmap_dataloader(
-        train_path,
-        batch_size=batch_size,
-        seq_len=seq_len,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        dtype=data_cfg.get("dtype", "uint16"),
-    )
-    data_iter = iter(dataloader)
-
-    max_steps = (
-        int(args.max_steps)
-        if args.max_steps is not None
-        else _resolve_max_steps(train_cfg, data_cfg, batch_size, seq_len)
-    )
-    grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
-    if grad_accum_steps <= 0:
-        raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
-    warmup_steps = int(train_cfg.get("warmup_steps", 500))
-    learning_rate = float(
-        train_cfg.get("learning_rate", train_cfg.get("adamw_lr", 1.0e-3))
-    )
-    grad_clip = float(train_cfg.get("grad_clip", 1.0))
-    precision = str(train_cfg.get("precision", "fp16"))
-    log_interval = int(train_cfg.get("log_interval", 25))
-    ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
-    use_scaler = precision == "fp16" and args.device.startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
-    if precision == "manual_fp16" and args.device.startswith("cuda"):
-        model = model.half()
-        print("Using manual FP16: model converted to float16, no autocast")
-    if precision == "manual_bf16" and args.device.startswith("cuda"):
-        model = model.to(torch.bfloat16)
-        print("Using manual BF16: model converted to bfloat16, no autocast")
-    maybe_disable_gradient_checkpointing(model, args.device)
-
-    for group in optimizer.param_groups:
-        group["initial_lr"] = group["lr"]
-
-    args.ckpt_dir.mkdir(parents=True, exist_ok=True)
-    start_time = time.perf_counter()
-    tokens_since_log = 0
-    last_log_time = start_time
-    last_loss = float("nan")
-
-    for step in range(max_steps):
-        lr = lr_at(step, max_steps, warmup_steps, learning_rate)
-        ratio = lr / max(learning_rate, 1e-12)
-        for group in optimizer.param_groups:
-            group["lr"] = group["initial_lr"] * ratio
-
-        optimizer.zero_grad(set_to_none=True)
-        accum_loss_tensor = None
-        for _ in range(grad_accum_steps):
-            try:
-                x, y = next(data_iter)
-            except StopIteration:
-                data_iter = iter(dataloader)
-                x, y = next(data_iter)
-            x = x.to(args.device, non_blocking=pin_memory)
-            y = y.to(args.device, non_blocking=pin_memory)
-            with autocast_ctx(precision, args.device):
-                _, loss = train_model(x, targets=y, training_mode=True)
-                loss = loss / grad_accum_steps
-            if use_scaler:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-            accum_loss_tensor = (
-                loss.detach()
-                if accum_loss_tensor is None
-                else accum_loss_tensor + loss.detach()
-            )
-            tokens_since_log += x.numel()
-            del loss
-
-        if use_scaler:
-            scaler.unscale_(optimizer)  # type: ignore[arg-type]
-        if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        if use_scaler:
-            scaler.step(optimizer)  # type: ignore[arg-type]
-            scaler.update()
-        else:
-            optimizer.step()  # type: ignore[arg-type]
-
-        last_loss = (
-            float(accum_loss_tensor.cpu().item())
-            if accum_loss_tensor is not None
-            else float("nan")
-        )
-        if log_interval > 0 and step % log_interval == 0:
-            now = time.perf_counter()
-            elapsed = max(now - last_log_time, 1e-9)
-            tok_per_sec = tokens_since_log / elapsed
-            print(
-                f"step {step:6d} | loss {last_loss:.4f} | lr {lr:.2e} | "
-                f"tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}"
-            )
-            tokens_since_log = 0
-            last_log_time = now
-
-        if ckpt_interval > 0 and step > 0 and step % ckpt_interval == 0:
-            save_checkpoint(model, optimizer, step, str(args.ckpt_dir))
-
-    save_checkpoint(model, optimizer, max_steps, str(args.ckpt_dir))
-    total_tokens = max_steps * grad_accum_steps * batch_size * seq_len
-    total_elapsed = max(time.perf_counter() - start_time, 1e-9)
-    print(
-        f"final_loss {last_loss:.4f} | avg_tokens/sec {total_tokens / total_elapsed:.0f}"
-    )
-
-
-def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
+def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
+    """Single canonical training entry: build model/optimizer/data/loop -> train."""
     model_cfg = config_from_dict(cfg.get("model", {}))
     train_cfg = dict(cfg.get("training", {}))
+    data_cfg = cfg.get("data", {})
     if args.learning_rate is not None:
         train_cfg["learning_rate"] = args.learning_rate
 
-    if args.device.startswith("cuda"):
-        torch.set_float32_matmul_precision("high")
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cuda.matmul.allow_fp16_accumulation = True
-        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
-
+    # Resolve resume BEFORE model construction so the checkpoint's config wins.
     start_step = 0
     if args.resume is not None and args.resume.exists():
         from hagi.train.loop import load_checkpoint
@@ -1141,63 +666,16 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         print(f"resumed from {args.resume} at step {start_step}")
     else:
         model = HAGI(model_cfg).to(args.device)
+
     if hasattr(model.cfg, "gradient_checkpointing"):
         model.cfg.gradient_checkpointing = bool(
             train_cfg.get("gradient_checkpointing", model.cfg.gradient_checkpointing)
         )
-    model_ema: torch.nn.Module | None = None
-    ema_cfg = train_cfg.get("ema", {})
-    ema_decay = float(ema_cfg.get("decay", train_cfg.get("ema_decay", 0.999)))
-    ema_start_step = int(
-        ema_cfg.get("start_step", train_cfg.get("ema_start_step", 1000))
-    )
-    # Eager EMA init: avoid expensive copy.deepcopy inside the hot loop
-    model_ema = copy.deepcopy(model).to(args.device)
-    model_ema.eval()
-    for param in model_ema.parameters():
-        param.requires_grad_(False)
-    train_model = maybe_compile(model, args.device)
-    train_model.train()
 
     use_prefix_lm = bool(train_cfg.get("use_prefix_lm", False))
-    composite_cfg = train_cfg.get("composite_loss")
-    composite_weights = dict(composite_cfg) if isinstance(composite_cfg, dict) else None
-    w_aux_start = float(train_cfg.get("w_aux_start", 0.0))
-    w_aux_final = float(
-        train_cfg.get(
-            "w_aux_final",
-            composite_weights.get("w_aux", 0.1) if composite_weights else 0.1,
-        )
-    )
-    aux_warmup_steps = int(
-        train_cfg.get("aux_warmup_steps", train_cfg.get("aux_warmup", 2000))
-    )
-    w_iso_start = float(train_cfg.get("w_iso_start", 0.0))
-    w_iso_final = float(
-        train_cfg.get(
-            "w_iso_final",
-            composite_weights.get("w_iso", 0.01) if composite_weights else 0.01,
-        )
-    )
-    iso_warmup_steps = int(
-        train_cfg.get("iso_warmup_steps", train_cfg.get("iso_warmup", 5000))
-    )
-    w_moe_start = float(train_cfg.get("w_moe_start", 0.0))
-    w_moe_final = float(
-        train_cfg.get(
-            "w_moe_final",
-            composite_weights.get("w_moe", 0.1) if composite_weights else 0.1,
-        )
-    )
-    moe_warmup_steps = int(
-        train_cfg.get("moe_warmup_steps", train_cfg.get("moe_warmup", 2000))
-    )
-    loss_warmup_mode = str(train_cfg.get("loss_warmup_mode", "linear"))
-    optimizer_kind = str(train_cfg.get("optimizer", "adamw")).lower()
-    magic_norm_max = float(train_cfg.get("magic_norm_max", 1.0))
-    data_cfg = cfg.get("data", {})
-    dataset_mode = getattr(args, "dataset_mode", None) or str(
-        data_cfg.get("dataset_mode", "memmap")
+    dataset_mode = (
+        getattr(args, "dataset_mode", None)
+        or str(data_cfg.get("dataset_mode", "memmap"))
     )
     train_path = (
         resolve_train_path(cfg, args.train_path, args.data_dir)
@@ -1212,7 +690,7 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         if dataset_cycles is not None
         else data_cfg.get("sequential_cycles", 0)
     )
-    # Compute max_steps early so we can derive steps_per_cycle for sequential mode
+
     _seq_len = int(data_cfg.get("max_seq_len", 512))
     _batch_size = int(train_cfg.get("batch_size", 2))
     grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
@@ -1228,9 +706,8 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         num_datasets = len(data_cfg.get("mix_paths", []))
         if num_datasets > 0:
             total_batches = max_steps * grad_accum_steps
-            steps_per_cycle = total_batches // (num_datasets * sequential_cycles)
-            if steps_per_cycle == 0:
-                steps_per_cycle = 1
+            steps_per_cycle = max(1, total_batches // (num_datasets * sequential_cycles))
+
     dataloader, eval_loader, batch_size, seq_len, pin_memory = build_full_dataloader(
         cfg,
         train_path,
@@ -1242,42 +719,14 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         sequential_cycles=sequential_cycles,
         steps_per_cycle=steps_per_cycle,
     )
-    data_iter = iter(dataloader)
-    warmup_steps = int(train_cfg.get("warmup_steps", 500))
-    learning_rate = float(
-        train_cfg.get("learning_rate", train_cfg.get("adamw_lr", 5.0e-4))
-    )
-    min_lr_ratio = float(train_cfg.get("min_lr_ratio", 0.1))
-    grad_clip = float(train_cfg.get("grad_clip", 1.0))
-    precision = str(train_cfg.get("precision", "fp16"))
-    log_interval = int(train_cfg.get("log_interval", 25))
-    ckpt_interval = int(train_cfg.get("ckpt_interval", 1000))
-    use_scaler = precision == "fp16" and args.device.startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
-    if precision == "manual_fp16" and args.device.startswith("cuda"):
-        model = model.half()
-        if model_ema is not None:
-            model_ema = model_ema.half()
-        print("Using manual FP16: model converted to float16, no autocast")
-    if precision == "manual_bf16" and args.device.startswith("cuda"):
-        model = model.to(torch.bfloat16)
-        if model_ema is not None:
-            model_ema = model_ema.to(torch.bfloat16)
-        print("Using manual BF16: model converted to bfloat16, no autocast")
-    maybe_disable_gradient_checkpointing(
-        model,
-        args.device,
-        explicit="gradient_checkpointing" in cfg.get("training", {}),
-    )
 
-    print_model_summary(
-        model, model_cfg, args.device, use_prefix_lm, composite_weights is not None
-    )
+    print_model_summary(model, model_cfg, args.device)
     if args.dry_run:
-        run_dry_profile(model, dataloader, args.device, use_prefix_lm, precision)
+        run_dry_profile(model, dataloader, args.device, use_prefix_lm, train_cfg.get("precision", "bf16"))
         return
 
     optimizer = build_optimizer(model, train_cfg)
+    resumed_ema_state: dict[str, Any] | None = None
     if args.resume is not None and args.resume.exists():
         if args.resume.is_dir():
             optimizer_path = args.resume / "optimizer.pt"
@@ -1285,7 +734,9 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 try:
                     optimizer.load_state_dict(
                         torch.load(
-                            optimizer_path, map_location=args.device, weights_only=True
+                            optimizer_path,
+                            map_location=args.device,
+                            weights_only=True,
                         )
                     )
                     print("loaded optimizer state")
@@ -1293,24 +744,20 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     print(f"optimizer state mismatch, starting fresh: {exc}")
             ema_path = args.resume / "ema.pt"
             if ema_path.exists():
-                if model_ema is None:
-                    model_ema = copy.deepcopy(model).to(args.device)
-                    model_ema.eval()
-                    for param in model_ema.parameters():
-                        param.requires_grad_(False)
                 try:
                     ema_state = torch.load(
                         ema_path, map_location=args.device, weights_only=True
                     )
-                    # Strip orphaned fused-projection keys emitted by old state_dict
                     for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
                         ema_state.pop(key, None)
-                    model_ema.load_state_dict(ema_state)
-                    print("loaded EMA state")
+                    resumed_ema_state = ema_state
+                    print("found EMA state to restore")
                 except Exception as exc:
-                    print(f"EMA state mismatch, starting fresh: {exc}")
+                    print(f"EMA state unreadable, starting fresh: {exc}")
         else:
-            state = torch.load(args.resume, map_location=args.device, weights_only=True)
+            state = torch.load(
+                args.resume, map_location=args.device, weights_only=True
+            )
             if "optimizer" in state:
                 try:
                     optimizer.load_state_dict(state["optimizer"])
@@ -1318,336 +765,76 @@ def run_full(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 except Exception as exc:
                     print(f"optimizer state mismatch, starting fresh: {exc}")
             if "model_ema" in state:
-                if model_ema is None:
-                    model_ema = copy.deepcopy(model).to(args.device)
-                    model_ema.eval()
-                    for param in model_ema.parameters():
-                        param.requires_grad_(False)
-                try:
-                    ema_state = state["model_ema"]
-                    # Strip orphaned fused-projection keys emitted by old state_dict
-                    for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
-                        ema_state.pop(key, None)
-                    model_ema.load_state_dict(ema_state)
-                    print("loaded EMA state")
-                except Exception as exc:
-                    print(f"EMA state mismatch, starting fresh: {exc}")
+                ema_state = dict(state["model_ema"])
+                for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
+                    ema_state.pop(key, None)
+                resumed_ema_state = ema_state
+                print("found EMA state to restore")
 
-    for group in optimizer.param_groups:
-        group["initial_lr"] = group["lr"]
+    loop_cfg = _build_loop_config(cfg, args.ckpt_dir, max_steps)
 
-    args.ckpt_dir.mkdir(parents=True, exist_ok=True)
-    start_time = time.perf_counter()
-    tokens_since_log = 0
-    last_log_time = start_time
-    last_loss = float("nan")
-    last_components: dict[str, float] = {}
-    accum_loss_tensor: torch.Tensor | None = None
-
-    # Compression observability (opt-in). Stateless, not in checkpoint.
-    compression_monitor = None
-    cm_cfg = train_cfg.get("compression_monitor", {})
-    if cm_cfg.get("enabled", False):
-        from hagi.train.compression_metrics import CompressionMonitor
-
-        num_params = sum(p.numel() for p in model.parameters())
-        train_tokens_cm = int(data_cfg.get("train_tokens", 0))
-        compression_monitor = CompressionMonitor(
-            num_params=num_params, train_tokens=train_tokens_cm, cfg=cm_cfg
-        )
-        if getattr(model_cfg, "use_fused_ce", False):
-            print(
-                "WARNING: compression_monitor enabled with use_fused_ce; "
-                "logits are None on the fused path, dependent metrics skipped"
-            )
-
-    for step in range(start_step, max_steps):
-        if optimizer_kind == "schedule-free-adamw":
-            lr = learning_rate
-        else:
-            lr = lr_at(
-                step,
-                max_steps,
-                warmup_steps,
-                learning_rate,
-                min_lr_ratio,
-                schedule=str(train_cfg.get("schedule", "cosine")),
-                cooldown_frac=float(train_cfg.get("cooldown_frac", 0.05)),
-            )
-        ratio = lr / max(learning_rate, 1e-12)
-        for group in optimizer.param_groups:
-            group["lr"] = group["initial_lr"] * ratio
-        effective_weights = None
-        if composite_weights is not None:
-            effective_weights = dict(composite_weights)
-            effective_weights["w_aux"] = scheduled_weight(
-                step, w_aux_start, w_aux_final, aux_warmup_steps, loss_warmup_mode
-            )
-            effective_weights["w_iso"] = scheduled_weight(
-                step, w_iso_start, w_iso_final, iso_warmup_steps, loss_warmup_mode
-            )
-            effective_weights["w_moe"] = scheduled_weight(
-                step, w_moe_start, w_moe_final, moe_warmup_steps, loss_warmup_mode
-            )
-
-        optimizer.zero_grad(set_to_none=True)
-        accum_loss_tensor = None
-        accum_components: dict[str, torch.Tensor] = {}
-        need_components = log_interval > 0 and step % log_interval == 0
-        monitor_logits: torch.Tensor | None = None
-        monitor_targets: torch.Tensor | None = None
-        monitor_hidden: torch.Tensor | None = None
-        backward_count = 0
-        t_forward = 0.0
-        t_backward = 0.0
-        for _ in range(grad_accum_steps):
-            try:
-                batch, targets = next(data_iter)
-            except StopIteration:
-                data_iter = iter(dataloader)
-                batch, targets = next(data_iter)
-
-            batch = to_device(batch, args.device, pin_memory)
-            targets = targets.to(args.device, non_blocking=pin_memory)
-            targets = apply_prefix_mask(targets, batch)
-            tokens = batch.tokens if isinstance(batch, PrefixLMBatch) else batch
-            t_fwd_start = time.perf_counter()
-            with autocast_ctx(precision, args.device):
-                output = train_model(
-                    tokens,
-                    targets=targets,
-                    training_mode=effective_weights is not None,
-                    weights=effective_weights,
-                )
-                logits = unwrap_logits(output)
-                chunk_size = getattr(model_cfg, "ce_chunk_size", 0)
-                # Fast path: skip composite_loss when only CE is needed and components not logged
-                if (
-                    not need_components
-                    and isinstance(output, dict)
-                    and output.get("loss") is not None
-                    and effective_weights is not None
-                    and effective_weights.get("w_aux", 0) == 0
-                    and effective_weights.get("w_iso", 0) == 0
-                    and effective_weights.get("w_moe", 0) == 0
-                    and effective_weights.get("w_quality", 0) == 0
-                ):
-                    loss = output["loss"]
-                    components = {}
-                else:
-                    loss, components = compute_loss(
-                        logits,
-                        targets,
-                        output,
-                        effective_weights,
-                        chunk_size=chunk_size,
-                    )
-                raw_loss = loss.detach().float()
-                loss = loss / grad_accum_steps
-                if args.device.startswith("cuda") and need_components:
-                    torch.cuda.synchronize()
-                t_forward += time.perf_counter() - t_fwd_start
-            if not torch.isfinite(loss).all():
-                if log_interval > 0 and step % log_interval == 0:
-                    print(
-                        f"WARNING: non-finite loss at step {step}; skipping accum step"
-                    )
-                del output, loss, logits
-                continue
-            t_bwd_start = time.perf_counter()
-            if use_scaler:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-            t_backward += time.perf_counter() - t_bwd_start
-            backward_count += 1
-            accum_loss_tensor = (
-                raw_loss if accum_loss_tensor is None else accum_loss_tensor + raw_loss
-            )
-            if components and need_components:
-                for name, value in components.items():
-                    prev = accum_components.get(name)
-                    if prev is None:
-                        accum_components[name] = value
-                    else:
-                        accum_components[name] = prev + value
-            tokens_since_log += tokens.numel()
-            if compression_monitor is not None and need_components:
-                # Retain last micro-batch tensors (detached) for compression metrics.
-                monitor_logits = logits.detach() if logits is not None else None
-                monitor_targets = targets.detach()
-                hidden_probe = (
-                    output.get("pre_norm_hidden") if isinstance(output, dict) else None
-                )
-                monitor_hidden = (
-                    hidden_probe.detach() if hidden_probe is not None else None
-                )
-            del output, loss, logits
-
-        if backward_count == 0:
-            if log_interval > 0 and step % log_interval == 0:
-                print(
-                    f"WARNING: all {grad_accum_steps} accum steps skipped at step {step}; no optimizer step"
-                )
-            last_loss = float("nan")
-            last_components = {}
-            if log_interval > 0 and step % log_interval == 0:
-                now = time.perf_counter()
-                elapsed = max(now - last_log_time, 1e-9)
-                tok_per_sec = tokens_since_log / elapsed
-                component_text = ""
-                if last_components:
-                    component_text = " | " + " | ".join(
-                        f"{name} {value:.4f}" for name, value in last_components.items()
-                    )
-                print(
-                    f"step {step:6d} | loss nan{component_text} | lr {lr:.2e} | "
-                    f"tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)} | SKIPPED"
-                )
-                tokens_since_log = 0
-                last_log_time = now
-            continue
-
-        if args.device.startswith("cuda") and need_components:
-            torch.cuda.synchronize()
-        t_opt_start = time.perf_counter()
-        if use_scaler:
-            scaler.unscale_(optimizer)  # type: ignore[arg-type]
-
-        if grad_clip > 0:
-            full_grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), grad_clip
-            )
-            if log_interval > 0 and step % log_interval == 0:
-                full_grad_norm_val = float(full_grad_norm.item())
-                if (
-                    not math.isfinite(full_grad_norm_val)
-                    or full_grad_norm_val > 100.0
-                    or (0.0 < full_grad_norm_val < 1e-6)
-                ):
-                    print(
-                        f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}"
-                    )
-            else:
-                full_grad_norm_val = 0.0
-        else:
-            full_grad_norm_val = get_grad_norm(model)
-            if (
-                not math.isfinite(full_grad_norm_val)
-                or full_grad_norm_val > 100.0
-                or (0.0 < full_grad_norm_val < 1e-6)
-            ):
-                print(
-                    f"WARNING: extreme grad_norm {full_grad_norm_val:.2e} at step {step}"
-                )
-
-        magic_norm_max_grad = magic_norm_clip(model, magic_norm_max)
-        if use_scaler:
-            scaler.step(optimizer)  # type: ignore[arg-type]
-            scaler.update()
-        else:
-            optimizer.step()  # type: ignore[arg-type]
-        t_opt_end = time.perf_counter()
-        t_opt = t_opt_end - t_opt_start
-        if step >= ema_start_step and model_ema is not None:
-            update_ema(model, model_ema, ema_decay)
-
-        last_loss = float("nan")
-        last_components: dict[str, float] = {}
-        if log_interval > 0 and step % log_interval == 0:
-            last_loss = (
-                float((accum_loss_tensor / grad_accum_steps).cpu().item())
-                if accum_loss_tensor is not None
-                else float("nan")
-            )
-            if accum_components:
-                last_components = {
-                    name: (value / grad_accum_steps).item()
-                    for name, value in accum_components.items()
-                }
-            now = time.perf_counter()
-            elapsed = max(now - last_log_time, 1e-9)
-            tok_per_sec = tokens_since_log / elapsed
-            component_text = ""
-            if last_components:
-                component_text = " | " + " | ".join(
-                    f"{name} {value:.4f}" for name, value in last_components.items()
-                )
-            weight_text = ""
-            if effective_weights is not None:
-                weight_text = f" | w_aux {effective_weights['w_aux']:.4f} | w_iso {effective_weights['w_iso']:.4f}"
-            eval_model_tag = (
-                "ema" if (step >= ema_start_step and model_ema is not None) else "model"
-            )
-            mem_text = ""
-            if args.device.startswith("cuda"):
-                allocated = torch.cuda.memory_allocated(args.device) / (1024**3)
-                reserved = torch.cuda.memory_reserved(args.device) / (1024**3)
-                mem_text = f" | mem_allocated {allocated:.2f}GB | mem_reserved {reserved:.2f}GB"
-            compression_text = ""
-            if compression_monitor is not None and monitor_logits is not None:
-                cm = compression_monitor.compute(
-                    logits=monitor_logits,
-                    hidden=monitor_hidden,
-                    targets=monitor_targets,
-                    step=step,
-                )
-                compression_text = (
-                    f" | c_ratio {cm['compression_ratio']:.2f}"
-                    f" | entropy {cm.get('entropy', 0.0):.4f}"
-                    f" | ece {cm.get('calibration_error', 0.0):.4f}"
-                    f" | artifact {cm.get('artifact_ratio', 0.0):.2%}"
-                )
-                if "effective_rank" in cm:
-                    compression_text += f" | eff_rank {cm['effective_rank']:.2f}"
-            print(
-                f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text} | "
-                f"ema_decay {ema_decay:.4f} | eval_model {eval_model_tag} | grad_norm {full_grad_norm_val:.2e} | "
-                f"magic_norm_max_grad {magic_norm_max_grad.item():.4f} | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(args.device)}{mem_text} | "
-                f"fwd {t_forward*1000:.1f}ms | bwd {t_backward*1000:.1f}ms | opt {t_opt*1000:.1f}ms{compression_text}"
-            )
-            tokens_since_log = 0
-            last_log_time = now
-
-        if (
-            eval_interval > 0
-            and eval_loader is not None
-            and step > 0
-            and step % eval_interval == 0
-        ):
-            eval_model = (
-                model_ema
-                if (step >= ema_start_step and model_ema is not None)
-                else model
-            )
-            metrics = run_eval(
-                eval_model,
-                eval_loader,
-                args.device,
-                pin_memory,
-                precision,
-                composite_weights,
-                use_prefix_lm,
-            )
-            eval_tag = "ema" if step >= ema_start_step else "model"
-            print(
-                f"eval | step {step:6d} | ppl {metrics['ppl']:.2f} | acc {metrics['acc']:.1f}% | "
-                f"L_aux {metrics['L_aux']:.4f} | L_iso {metrics['L_iso']:.4f} | {eval_tag}"
-            )
-
-        if ckpt_interval > 0 and step > 0 and step % ckpt_interval == 0:
-            save_training_checkpoint(model, model_ema, optimizer, step, args.ckpt_dir)  # type: ignore[arg-type]
-
-    save_training_checkpoint(model, model_ema, optimizer, max_steps, args.ckpt_dir)  # type: ignore[arg-type]
-    total_tokens = (max_steps - start_step) * grad_accum_steps * batch_size * seq_len
-    total_elapsed = max(time.perf_counter() - start_time, 1e-9)
-    final_loss_val = (
-        float((accum_loss_tensor / grad_accum_steps).cpu().item())
-        if accum_loss_tensor is not None
-        else float("nan")
+    maybe_disable_gradient_checkpointing(
+        model,
+        args.device,
+        batch_size=max(1, int(train_cfg.get("batch_size", 8)) // 2),
+        seq_len=seq_len,
+        target_batch=int(train_cfg.get("batch_size", 8)),
+        safety=float(train_cfg.get("vram_probe", {}).get("safety", 1.0)),
+        headroom=float(train_cfg.get("vram_probe", {}).get("headroom", 0.85)),
+        explicit="gradient_checkpointing" in cfg.get("training", {}),
     )
-    print(
-        f"final_loss {final_loss_val:.4f} | avg_tokens/sec {total_tokens / total_elapsed:.0f}"
+    print_model_size(model)
+    print_vram_usage()
+
+    # Restore EMA weights from the resumed checkpoint so accumulation continues
+    # from the saved EMA model rather than the raw main weights. When EMA is
+    # enabled but no state is present, train() builds a fresh copy.
+    import copy
+
+    model_ema: torch.nn.Module | None = None
+    if loop_cfg.enable_ema:
+        model_ema = copy.deepcopy(model)
+        model_ema.eval()
+        for param in model_ema.parameters():
+            param.requires_grad_(False)
+        if resumed_ema_state is not None:
+            try:
+                model_ema.load_state_dict(resumed_ema_state, strict=False)
+                print("loaded EMA state")
+            except Exception as exc:
+                print(f"EMA state mismatch, EMA starts from main weights: {exc}")
+
+    # Full in-loop eval (ppl/acc) over the held-out loader every eval_interval.
+    def _on_eval(step: int) -> None:
+        if eval_loader is None:
+            return
+        eval_model = (
+            model_ema
+            if (step >= loop_cfg.ema_start_step and model_ema is not None)
+            else model
+        )
+        metrics = run_eval(
+            eval_model, eval_loader, args.device, pin_memory, train_cfg.get("precision", "bf16")
+        )
+        eval_tag = "ema" if step >= loop_cfg.ema_start_step else "model"
+        print(
+            f"eval | step {step:6d} | ppl {metrics['ppl']:.2f} | "
+            f"acc {metrics['acc']:.1f}% | {eval_tag}"
+        )
+
+    train(
+        model,
+        optimizer,
+        dataloader,
+        loop_cfg,
+        device=args.device,
+        start_step=start_step,
+        on_eval=_on_eval if (eval_interval > 0 and eval_loader is not None) else None,
+        model_ema=model_ema,
+        batched=True,
+        use_prefix_lm=use_prefix_lm,
+        to_device_fn=to_device,
+        apply_prefix_mask_fn=apply_prefix_mask,
     )
 
 
@@ -1682,12 +869,6 @@ def main() -> None:
         help="cycles per dataset in sequential mode (overrides config)",
     )
     parser.add_argument(
-        "--mode",
-        choices=["auto", "basic", "fast", "full"],
-        default="auto",
-        help="training mode (auto-detected from config)",
-    )
-    parser.add_argument(
         "--log-interval",
         type=int,
         default=None,
@@ -1698,18 +879,7 @@ def main() -> None:
     cfg = load_yaml(args.config)
     if args.log_interval is not None:
         cfg.setdefault("training", {})["log_interval"] = args.log_interval
-    mode = args.mode if args.mode != "auto" else detect_mode(cfg)
-    if args.dry_run and mode != "full":
-        raise ValueError("--dry-run is only supported in full mode")
-
-    if mode == "basic":
-        run_basic(args, cfg)
-    elif mode == "fast":
-        run_fast(args, cfg)
-    elif mode == "full":
-        run_full(args, cfg)
-    else:
-        raise ValueError(f"unknown training mode: {mode}")
+    run(args, cfg)
 
 
 if __name__ == "__main__":

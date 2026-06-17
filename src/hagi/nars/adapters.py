@@ -202,14 +202,16 @@ class NarsHrmController:
     ) -> tuple[float, float]:
         """Return truth-weighted gating coefficients for z_H and z_L.
 
-        Default gate 1.0 — HRM always contributes fully. NARS observation
-        can still dampen if training is highly unstable, but minimum is 0.5.
+        Truth strength in [0,1]: high = stable training -> full gate (1.0),
+        low -> attenuated (floored at 0.5 so HRM never fully zeroes). The
+        previous `max(1.0, ...)` clamp made the gate a no-op (it could never
+        fall below 1.0); this keeps attenuation working when use_nars=true.
         """
         loss_tv = self.control_truths.get("loss_low", _DEFAULT_TV_00)
         grad_tv = self.control_truths.get("grad_stable", _DEFAULT_TV_00)
         # Combined truth strength: high = stable training -> full gate
-        h_gate = max(1.0, float(loss_tv.frequency * grad_tv.frequency))
-        l_gate = max(1.0, float(grad_tv.frequency))
+        h_gate = max(0.5, min(1.0, float(loss_tv.frequency * grad_tv.frequency)))
+        l_gate = max(0.5, min(1.0, float(grad_tv.frequency)))
         return h_gate, l_gate
 
 
@@ -301,35 +303,44 @@ class NarsMsaReasoner:
         if keys.device != query_t.device or keys.dtype != query_t.dtype:
             keys = keys.to(device=query_t.device, dtype=query_t.dtype)
 
-        # Normalised dot-product scores
+        # Fast path: with no learned beliefs/recency the NARS blend reduces to a
+        # constant (default freq=0.5, recency=0) plus dot_weight*dot_norm. The
+        # constant does not affect arg-topk, so routing is identical to pure
+        # dot-product topk — skip the per-slot listcomps and normalisation.
         dot_scores = torch.matmul(keys, query_t)  # [N]
-        dot_min = dot_scores.min()
-        dot_max = dot_scores.max()
-        dot_scores_norm = (dot_scores - dot_min) / (dot_max - dot_min + 1e-8)
+        if not self.slot_beliefs and not self.recency_weights:
+            scores = dot_scores
+        else:
+            dot_min = dot_scores.min()
+            dot_max = dot_scores.max()
+            dot_scores_norm = (dot_scores - dot_min) / (dot_max - dot_min + 1e-8)
+            N = len(slot_ids)
+            freq_tensor = torch.as_tensor(
+                [
+                    self.slot_beliefs.get(sid, _DEFAULT_TV_00).frequency
+                    for sid in slot_ids
+                ],
+                dtype=torch.float32,
+                device=query_t.device,
+            )
+            recency_tensor = torch.as_tensor(
+                [self.recency_weights.get(sid, 0.0) for sid in slot_ids],
+                dtype=torch.float32,
+                device=query_t.device,
+            )
+            scores = (
+                nars_weight * freq_tensor
+                + recency_weight * recency_tensor
+                + dot_weight * dot_scores_norm[:N]
+            )
 
-        # Vectorized: build tensors for frequency, recency, and dot scores
-        N = len(slot_ids)
-        freq_list = [
-            self.slot_beliefs.get(sid, _DEFAULT_TV_00).frequency for sid in slot_ids
-        ]
-        recency_list = [self.recency_weights.get(sid, 0.0) for sid in slot_ids]
-        freq_tensor = torch.as_tensor(freq_list, dtype=torch.float32).to(query_t.device)
-        recency_tensor = torch.as_tensor(recency_list, dtype=torch.float32).to(
-            query_t.device
-        )
-        blended_tensor = (
-            nars_weight * freq_tensor
-            + recency_weight * recency_tensor
-            + dot_weight * dot_scores_norm[:N]
-        )
-        top_k = min(top_k, N)
-        top_values, top_indices = torch.topk(blended_tensor, k=top_k)
+        top_k = min(top_k, len(slot_ids))
+        top_values, top_indices = torch.topk(scores, k=top_k)
         top_k_ids = torch.index_select(
             torch.as_tensor(slot_ids, dtype=torch.long, device=query_t.device),
             0,
             top_indices,
         )
-
         return top_k_ids, top_values
 
     def compute_attention_weights(self, slot_ids: torch.Tensor) -> torch.Tensor | None:

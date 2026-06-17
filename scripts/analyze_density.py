@@ -46,7 +46,7 @@ def weight_stats(name: str, t: torch.Tensor) -> dict:
             stats["tail_energy"] = float(
                 (s[half:] ** 2).sum().item() / (s**2).sum().item()
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort per-tensor metric; skip on failure
             pass
     return stats
 

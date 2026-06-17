@@ -103,7 +103,7 @@ _TORCH_MAJOR_MINOR = tuple(
     int(p) for p in torch.__version__.split("+")[0].split(".")[:2]
 )
 _SDPA_SUPPORTS_GQA = _TORCH_MAJOR_MINOR >= (2, 5)
-_FLASH_AVAILABLE: bool | None = None
+_flash_available: bool | None = None
 
 
 def _use_enable_gqa(q: torch.Tensor) -> bool:
@@ -114,17 +114,17 @@ def _use_enable_gqa(q: torch.Tensor) -> bool:
     which can halve training throughput. The expand fallback keeps backend
     choice free (mem-efficient kernel) and is faster in that case.
     """
-    global _FLASH_AVAILABLE
+    global _flash_available
     if not _SDPA_SUPPORTS_GQA or not q.is_cuda:
         return False
     if q.dtype not in (torch.float16, torch.bfloat16):
         return False
-    if _FLASH_AVAILABLE is None:
+    if _flash_available is None:
         try:
-            _FLASH_AVAILABLE = bool(torch.backends.cuda.is_flash_attention_available())
+            _flash_available = bool(torch.backends.cuda.is_flash_attention_available())
         except (AttributeError, RuntimeError):
-            _FLASH_AVAILABLE = False
-    return _FLASH_AVAILABLE
+            _flash_available = False
+    return _flash_available
 
 
 def _update_kv(k, v, past_key_value, use_cache: bool, attn_mask):

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from collections.abc import Iterator
 
 import numpy as np
 
-try:
+if TYPE_CHECKING:
     import torch
     import torch.nn.functional as _f
-except ImportError:  # pragma: no cover - torch is an optional runtime fallback
-    torch = None  # type: ignore[assignment]
-    _f = None  # type: ignore[assignment]
+else:
+    try:
+        import torch
+        import torch.nn.functional as _f
+    except ImportError:  # pragma: no cover - torch is an optional runtime fallback
+        torch = None
+        _f = None
 
 
 @dataclass
@@ -93,7 +97,8 @@ def confidence_score(logits: Any) -> float:
         vals, _ = torch.topk(logits, k=2, dim=-1)
         gap = vals[..., 0] - vals[..., 1]
         return float(gap.clamp(-10.0, 10.0).mean().item() * 0.1)
-    vals = np.partition(-logits, 2, axis=-1)[..., :2]
+    # 2 smallest of -logits == 2 largest logits. kth=1 is valid for vocab size >= 2.
+    vals = np.partition(-logits, 1, axis=-1)[..., :2]
     gap = -vals[..., 0] + vals[..., 1]
     return float(np.clip(gap, -10.0, 10.0) * 0.1)
 
@@ -190,6 +195,38 @@ def _maybe_static_cache(
     return CacheKeyValues(layers)
 
 
+def _prepare_torch_inputs(
+    model: Any,
+    prompt_ids: Any,
+    max_new_tokens: int,
+    cache: CacheKeyValues | None,
+    use_cache: bool,
+    use_static_cache: bool,
+) -> tuple[Any, Any, CacheKeyValues | None]:
+    """Coerce the prompt to a batched long tensor on the model device, then build
+    the static KV cache (if requested) and pick the first forward input.
+
+    Returns (generated, next_input, active_cache). Pure — no model side-effects.
+    """
+    assert torch is not None  # callers run this only on the torch path
+    generated = (
+        prompt_ids
+        if torch.is_tensor(prompt_ids)
+        else torch.tensor(prompt_ids, dtype=torch.long)
+    )
+    if generated.dim() == 1:
+        generated = generated.unsqueeze(0)
+    device = _model_device(model)
+    if device is not None:
+        generated = generated.to(device)
+    cache = _maybe_static_cache(
+        model, generated, max_new_tokens, cache, use_cache, use_static_cache
+    )
+    # An empty (fresh static) cache still needs the full prompt for prefill.
+    next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
+    return generated, next_input, cache
+
+
 def _forward(
     model: Any,
     input_ids: Any,
@@ -253,21 +290,9 @@ def generate(
     model = _maybe_compile(model, compile_model)
 
     if torch is not None:
-        generated = prompt_ids
-        if not torch.is_tensor(generated):
-            generated = torch.tensor(generated, dtype=torch.long)
-        if generated.dim() == 1:
-            generated = generated.unsqueeze(0)
-        device = _model_device(model)
-        if device is not None:
-            generated = generated.to(device)
-
-        cache = _maybe_static_cache(
-            model, generated, max_new_tokens, cache, use_cache, use_static_cache
+        generated, next_input, active_cache = _prepare_torch_inputs(
+            model, prompt_ids, max_new_tokens, cache, use_cache, use_static_cache
         )
-        # An empty (fresh static) cache still needs the full prompt for prefill.
-        next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
-        active_cache = cache
         generated_tokens: list[Any] = []
         for _ in range(max_new_tokens):
             logits, active_cache = _forward(
@@ -352,22 +377,9 @@ def stream_generate(
         pin_model_weights(model)
 
     model = _maybe_compile(model, compile_model)
-    generated = (
-        prompt_ids
-        if torch.is_tensor(prompt_ids)
-        else torch.tensor(prompt_ids, dtype=torch.long)
+    _generated, next_input, active_cache = _prepare_torch_inputs(
+        model, prompt_ids, max_new_tokens, cache, use_cache, use_static_cache
     )
-    if generated.dim() == 1:
-        generated = generated.unsqueeze(0)
-    device = _model_device(model)
-    if device is not None:
-        generated = generated.to(device)
-    cache = _maybe_static_cache(
-        model, generated, max_new_tokens, cache, use_cache, use_static_cache
-    )
-    # An empty (fresh static) cache still needs the full prompt for prefill.
-    next_input = generated if _cache_is_empty(cache) else generated[:, -1:]
-    active_cache = cache
     for _ in range(max_new_tokens):
         logits, active_cache = _forward(
             model, next_input, active_cache, use_cache, external_msa_registry

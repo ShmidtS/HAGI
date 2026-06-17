@@ -10,7 +10,12 @@ import torch
 
 
 def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
+    """Clamp to [0,1]. Non-finite (NaN/inf) maps to 0.0 — a NaN would poison
+    every downstream consumer (e.g. NARS truth revision, which feeds int())."""
+    v = float(value)
+    if v != v or v in (float("inf"), float("-inf")):  # NaN or inf
+        return 0.0
+    return max(0.0, min(1.0, v))
 
 
 def _as_long_tensor(values: Any) -> Any:

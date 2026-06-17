@@ -34,7 +34,7 @@ def hagi_ipp(reasoning_scores: dict[str, float], active_params_b: float) -> floa
 def run_lm_eval(ckpt: str, tokenizer: str, benchmarks: list[str], device: str):
     """Run benchmarks through lm-eval-harness."""
     try:
-        from lm_eval import simple_evaluate
+        from lm_eval import simple_evaluate  # type: ignore[reportMissingImports]
     except ImportError as e:
         raise SystemExit(f"lm-eval not installed: `pip install lm-eval`. ({e})") from e
 
