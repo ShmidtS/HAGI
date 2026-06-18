@@ -38,7 +38,13 @@ class BinaryFactorizedLinear(nn.Module):
 
         Forward uses sign(x). Backward flows as if x itself.
         """
-        b = torch.where(x >= 0, 1.0, -1.0)
+        # torch.where with Python float scalars promotes to fp32 (torch default
+        # dtype), which breaks under manual_bf16 precision (no autocast): the
+        # model is cast to bf16 (loop.py:431) but the ±1 result is fp32, so the
+        # reconstructed weight w = (b1 @ b2).t() is fp32 and F.linear(x_bf16,
+        # w_fp32) raises a dtype-mismatch RuntimeError. Cast b back to x's dtype
+        # so the binarized matrix matches the (possibly low-precision) input.
+        b = torch.where(x >= 0, 1.0, -1.0).to(x.dtype)
         # STE: forward = sign, backward = identity
         return x + (b - x).detach()
 

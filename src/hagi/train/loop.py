@@ -500,6 +500,11 @@ def train(
     start_time = time.perf_counter()
     tokens_since_log = 0
     last_log_time = start_time
+    # Total tokens processed across all forward micro-batches this run.
+    # Accumulated from tokens.numel() per accum step so the final throughput
+    # line reports real tokens/sec (was 0: the old (end-start)*grad_accum
+    # expression counted optimiser steps, not tokens).
+    total_tokens_seen = 0
     data_iter: Any = iter(get_batch) if batched else None
 
     for step in range(start_step, end):
@@ -618,6 +623,7 @@ def train(
                     prev = accum_components.get(name)
                     accum_components[name] = value if prev is None else prev + value
             tokens_since_log += tokens.numel()
+            total_tokens_seen += tokens.numel()
 
         if backward_count == 0:
             last_loss = float("nan")
@@ -706,19 +712,6 @@ def train(
                 component_text = " | " + " | ".join(
                     f"{name} {value:.4f}" for name, value in last_components.items()
                 )
-            weight_text = ""
-            if effective_weights is not None:
-                weight_text = (
-                    f" | w_aux {effective_weights['w_aux']:.4f}"
-                    f" | w_iso {effective_weights['w_iso']:.4f}"
-                )
-            hrm_text = ""
-            hrm = getattr(model, "hrm", None)
-            if hrm is not None:
-                hrm_text = (
-                    f" | h={getattr(hrm, 'h_cycles', '?')}"
-                    f" l={getattr(hrm, 'l_cycles', '?')}"
-                )
             mem_text = ""
             if device.startswith("cuda"):
                 allocated = torch.cuda.memory_allocated(device) / 1024**3
@@ -738,9 +731,9 @@ def train(
                 on_log(metrics)
             else:
                 print(
-                    f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}{weight_text}"
+                    f"step {step:6d} | loss {last_loss:.4f}{component_text} | lr {lr:.2e}"
                     f" | grad_norm {grad_norm_val:.2e} | magic_norm {magic_grad.item():.4f}"
-                    f" | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(device)}{hrm_text}{mem_text}"
+                    f" | tokens/sec {tok_per_sec:.0f} | gpu_util {gpu_util(device)}{mem_text}"
                     f" | fwd {t_forward*1000:.1f}ms | bwd {t_backward*1000:.1f}ms | opt {t_opt*1000:.1f}ms"
                 )
             tokens_since_log = 0
@@ -791,11 +784,12 @@ def train(
             ),
         )
 
-    total_tokens = (end - start_step) * cfg.grad_accum_steps
-    if total_tokens > 0:
+    if total_tokens_seen > 0:
         total_elapsed = max(time.perf_counter() - start_time, 1e-9)
         print(
-            f"final_loss {last_loss:.4f} | avg_tokens/sec {total_tokens / total_elapsed:.0f}"
+            f"final_loss {last_loss:.4f} | avg_tokens/sec "
+            f"{total_tokens_seen / total_elapsed:.0f} | "
+            f"steps {(end - start_step)} | tokens {total_tokens_seen:,}"
         )
     return last_loss
 

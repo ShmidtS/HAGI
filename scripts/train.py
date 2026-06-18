@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import warnings
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
+
+# Expandable segments must be set before the CUDA caching allocator inits
+# (i.e. before any CUDA tensor is allocated). Without it, SequentialCycling's
+# per-dataset KV/registry allocations fragment the 8GB pool and
+# memory_reserved climbs past the 7.4GB budget (observed 8.09GB at step 5
+# vs a stable 7.15GB with this flag). No-op off-CUDA / already-set.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
 import torch

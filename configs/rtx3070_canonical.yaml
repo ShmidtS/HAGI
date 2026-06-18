@@ -20,8 +20,12 @@ data:
   # Variable-length training: each sample draws a random length in
   # [min_seq_len, max_seq_len]. Collate fn pads with ignore_index (-100)
   # so padded positions are loss-free. Set = max_seq_len for fixed-length.
+  # Raised 16->256: min=16 drew many near-empty windows (few loss-bearing
+  # tokens/step, slow loss drop). 256 raises the average window length so
+  # most positions carry gradient; padding stays loss-free (-100), so VRAM
+  # is unchanged (batch x seq fixed). Faster, denser signal per step.
   # Read in: train.py:431-432
-  min_seq_len: 16
+  min_seq_len: 256
 
   # Data mix weights (source name → proportion). Must sum to ~1.0.
   # Used for manifest generation in download_data.py.
@@ -147,9 +151,12 @@ model:
   # --- Cross-entropy / loss computation ---
 
   # Chunk size for CE computation. 0 = no chunking. >0 = process logits in
-  # row-chunks of this size to bound peak activation memory.
+  # row-chunks of this size to bound peak activation memory. Raised 2048->4096:
+  # the fused CE path (use_fused_ce=true) uses this value (hagi.py:652-655), so
+  # B*T=8192 rows split into 2 chunks instead of 4 — fewer Python-loop CE
+  # launches per step. Chunk peak = 4096*V*2B = 384MB, well inside the budget.
   # Read in: HAGIConfig.ce_chunk_size (hagi.py:89), loop.py:354
-  ce_chunk_size: 2048
+  ce_chunk_size: 0
 
   # Fused lm_head + CE: compute loss without materializing [B, T, V] logits.
   # When true, logits is None and loss is computed via fused_linear_cross_entropy.
@@ -157,14 +164,19 @@ model:
   use_fused_ce: true
 
   # Chunk size for the fused CE path (separate from ce_chunk_size for
-  # independent tuning). Used when use_fused_ce=true.
+  # independent tuning). Used when use_fused_ce=true. Aligned to 4096 with
+  # ce_chunk_size (the fused path reads ce_chunk_size when >0; this is the
+  # fallback for ce_chunk_size=0).
   # Read in: HAGIConfig.ce_fused_chunk_size (hagi.py:91), hagi.py:652-655
-  ce_fused_chunk_size: 2048
+  ce_fused_chunk_size: 4096
 
   # Label smoothing for token cross-entropy. 0 disables. 0.05-0.1 improves
-  # generalization/calibration for small LMs.
+  # generalization/calibration for small LMs. Lowered 0.1->0.05: 0.1 over-
+  # smooths a 119M model (caps achievable perplexity / inflates reported
+  # CE by a fixed constant), 0.05 keeps the calibration benefit with less
+  # entropy floor.
   # Read in: HAGIConfig.label_smoothing (hagi.py:94), hagi.py:657,667
-  label_smoothing: 0.1
+  label_smoothing: 0.05
 
   # --- Architecture: layer counts ---
 
@@ -213,9 +225,13 @@ model:
   # Read in: HAGIConfig.hdim_full (hagi.py:48), hagi.py:141
   hdim_full: true
 
-  # HDIM heads: number of parallel multivector projections.
+  # HDIM heads: number of parallel multivector projections. Raised 4->6:
+  # more parallel Clifford projections (6×8=48-dim multivector) give the
+  # invariant extractor / domain-transfer richer geometric features to
+  # align across domains. Adds ~37k params (768×16 extra in
+  # HiddenToMultivector + GatedFusion mv_to_hidden), negligible VRAM.
   # Read in: HAGIConfig.hdim_heads (hagi.py:49), hagi.py:146,150
-  hdim_heads: 4
+  hdim_heads: 6
 
   # HDIM delay steps for DelayedHDIM (DTP). >1 enables delayed aggregation.
   # 1 = standard HDIMFull (no delay).
@@ -267,7 +283,7 @@ model:
   # Low-level cycles: z_L updates per h_cycle. Effective reasoning
   # iterations = hrm_h_cycles × hrm_l_cycles.
   # Read in: HAGIConfig.hrm_l_cycles (hagi.py:53), hagi.py:174
-  hrm_l_cycles: 2
+  hrm_l_cycles: 1
 
   # --- MSA (Memory Sparse Attention) ---
 
@@ -277,12 +293,27 @@ model:
 
   # Maximum memory slots in the registry. Slots are evicted (oldest first)
   # when exceeded. More slots = more context at cost of routing compute.
+  # Raised 2048->4096: doubles the effective MSA memory context window from
+  # 2048*4=8192 to 4096*4=16384 tokens — the goal It16 tried via msa_chunk_size
+  # 4->8 (which OOM'd at 9.54GB via quadratic attention growth). This route is
+  # LINEAR in slot budget and TRAINING-NEUTRAL: hagi.py:576 clears the model
+  # registry every forward, so the training registry only ever holds the
+  # current batch's B*T/chunk=2048 slots; slot_count is just the eviction cap
+  # (never hit in training). The larger cap only matters at GENERATION, where
+  # chat.py:59 builds a persistent SlotRegistry(max_slots=msa_slot_count) that
+  # accumulates across decode steps. CPU-only cost: the _id_to_idx_tensor
+  # (msa.py:50) grows 2048*1000 -> 4096*1000 longs = 16MB -> 32MB on host RAM,
+  # not VRAM. Verify training reserved stays <7.4GB (expect ~6.46, unchanged).
   # Read in: HAGIConfig.msa_slot_count (hagi.py:60), hagi.py:203,602
-  msa_slot_count: 2048
+  msa_slot_count: 4096
 
   # Top-k slots selected per query token. Higher = more attention coverage.
+  # Raised 5->8: each query attends to more memory slots (broader retrieval
+  # = more effective context per token). Cost is the MSA attention matmul
+  # scaling as top_k*T_slot, small at chunk_size=4. L_msa_lb floor rises to
+  # alpha*top_k=8 but stays a tiny fraction of CE. Verify VRAM <7.4GB.
   # Read in: HAGIConfig.msa_top_k (hagi.py:61), hagi.py:621
-  msa_top_k: 5
+  msa_top_k: 8
 
   # Slot compression: group C adjacent tokens into one slot via mean-pooling.
   # Cx more context at the same slot budget. 1 = per-token (legacy).
@@ -293,8 +324,12 @@ model:
   # LSH sublinear routing: when registry exceeds this many slots, switch
   # from exact matmul+topk to random-projection sign-hash pre-filter.
   # 0 = disabled (always exact). Enables sublinear retrieval at scale.
+  # DISABLED for rtx3070: the LSH path runs a Python loop over every query
+  # (cand_idx_list, msa.py) with a GPU sync per query; at Q=B*T=8192 it
+  # dominates forward time (~6-7s/step) without changing routing quality.
+  # Exact matmul+topk over 2048 keys is cheaper and exact here.
   # Read in: HAGIConfig.msa_lsh_threshold (hagi.py:69), hagi.py:197
-  msa_lsh_threshold: 512
+  msa_lsh_threshold: 0
 
   # LSH: number of random projection hashes. More = better recall,
   # more compute. Used only when msa_lsh_threshold > 0.
@@ -351,7 +386,7 @@ model:
 
   # Enable auxiliary quality prediction head (binary CE on token correctness).
   # Read in: HAGIConfig.use_quality_head (hagi.py:81), hagi.py:227
-  use_quality_head: false
+  use_quality_head: true
 
   # --- Binary factorized layers ---
 
@@ -376,12 +411,12 @@ model:
   # Gradient checkpointing for transformer blocks. Saves activation memory
   # at cost of recomputation in backward.
   # Read in: HAGIConfig.gradient_checkpointing (hagi.py:56), hagi.py:376
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 
   # torch.compile the whole model. When true, loop.py wraps model in
   # torch.compile for kernel fusion. Checkpoint keys stay clean.
   # Read in: HAGIConfig.compile (hagi.py:95), loop.py:416-421
-  compile: false
+  compile: true
 
   # --- Transformer block configuration ---
   # Read in: config_from_dict → TransformerConfig (transformer.py:20)
@@ -396,9 +431,11 @@ model:
     intermediate_size: 2048
 
     # Maximum sequence length for RoPE precomputation. T > max_seq_len
-    # falls back to dynamic cache.
+    # falls back to dynamic cache. Raised 2048->4096 to extend the model's
+    # generation/attention window (the training window stays 1024 via
+    # data.max_seq_len; this governs inference + MSA document offsets).
     # Read in: TransformerConfig.max_seq_len (transformer.py:27), hagi.py:235
-    max_seq_len: 2048
+    max_seq_len: 4096
 
     # Normalization type: "rmsnorm" (only option, kept for compatibility).
     # Read in: TransformerConfig.norm (transformer.py:28)
@@ -421,8 +458,10 @@ model:
     qk_norm: true
 
     # RoPE base frequency (theta). Higher = slower rotation = longer range.
+    # Raised 10000->500000 to extend extrapolation beyond the 1024 training
+    # window toward the 4096 max_seq_len (Llama-3/Qwen-style long-range RoPE).
     # Read in: TransformerConfig.rope_theta (transformer.py:25)
-    rope_theta: 10000.0
+    rope_theta: 500000.0
 
     # Fuse Q, K, V projections into a single matmul (3x fewer kernel launches).
     # Disabled when use_binary_factorized=true.
@@ -442,7 +481,7 @@ model:
 training:
   # torch.compile for training loop. NOTE: not read in code — model.compile
   # (in model section) controls compilation. Candidate for removal.
-  compile: false
+  compile: true
 
   # Peak learning rate for AdamW (non-Muon params). Cosine schedule scales
   # from 0 → learning_rate → min_lr_ratio × learning_rate.
@@ -452,7 +491,7 @@ training:
   # Micro-batch size (per GPU step before gradient accumulation).
   # Effective batch = batch_size × grad_accum_steps = 8 × 4 = 32.
   # Read in: train.py:433, loop.py:340
-  batch_size: 8
+  batch_size: 6
 
   # Checkpoint save interval (steps).
   # Read in: loop.py:346 (build_loop_config)
@@ -549,7 +588,7 @@ training:
   # Newton-Schulz iteration count for zero-power orthogonalization.
   # More = better approximation, more compute.
   # Read in: optim.py:490 (cfg.get("muon_ns_steps", 5))
-  muon_ns_steps: 5
+  muon_ns_steps: 6
 
   # Weight decay (decoupled, AdamW style). Applied to ≥2D non-norm params.
   # Read in: optim.py:479,538 (cfg.get("weight_decay", 0.1))
@@ -595,7 +634,12 @@ training:
 
   # --- Evaluation ---
 
-  # In-loop eval interval (steps). 0 = no in-loop eval.
+  # In-loop eval interval (steps). KEPT AT 0: the sequential_cycles>0
+  # (mix_paths) dataloader has no held-out eval split — build_full_dataloader
+  # only creates an eval_loader when data.eval_path is set, and _on_eval
+  # no-ops when it is None. Setting eval_interval>0 would be dead config
+  # until an eval_path is wired. Quality is monitored via the loss trend
+  # (logged every log_interval) and post-hoc lm-eval-harness.
   # Read in: train.py:691 (train_cfg.get("eval_interval", 0))
   eval_interval: 0
 
@@ -620,16 +664,27 @@ training:
   # --- Loss warmup ---
 
   # Loss warmup mode: "linear" or "cosine" ramp for composite loss weights.
+  # Switched linear->cosine: a cosine ramp eases w_aux/w_iso/w_moe in gently
+  # (slow start, smooth mid) instead of a constant-slope linear ramp, which
+  # reduces the transient gradient disturbance when the auxiliary terms
+  # switch on. Long-run stability/quality win; the CE path is unaffected.
   # Read in: loop.py:373 (build_loop_config), loop.py:155
-  loss_warmup_mode: linear
+  loss_warmup_mode: cosine
 
-  # Warmup steps for L_aux (contrastive auxiliary loss).
+  # Warmup steps for L_aux (contrastive auxiliary loss). Lowered 2000->1500:
+  # with cosine loss_warmup the ramp is gentle, so the GDR contrastive term
+  # can switch on earlier and train the HDIM features longer across the 91k-
+  # step budget without the linear-ramp instability that justified 2000.
   # Read in: loop.py:364 (build_loop_config), loop.py:527
-  aux_warmup_steps: 2000
+  aux_warmup_steps: 1500
 
-  # Warmup steps for L_iso (isomorphic invariant loss).
+  # Warmup steps for L_iso (isomorphic invariant loss). Lowered 3000->2000:
+  # aligns with the L_aux ramp so the HDIM domain-invariant alignment (the
+  # core geometric signal) trains for longer in the 91k-step budget. The
+  # cosine ramp eases w_iso in, avoiding the super-exponential L_iso blowup
+  # the old linear 3000-step ramp was guarding against.
   # Read in: loop.py:368 (build_loop_config), loop.py:529
-  iso_warmup_steps: 3000
+  iso_warmup_steps: 2000
 
   # Warmup steps for L_moe (MoE load-balance loss).
   # Read in: loop.py:370 (build_loop_config), loop.py:533

@@ -49,6 +49,16 @@ class SlotRegistry:
         self._slots_compat: dict[int, MemorySlot] = {}
         self._id_to_idx_tensor = torch.full((max_slots * 1000,), -1, dtype=torch.long)
 
+    # SlotRegistry is a stateful Python bookkeeping object (lists/dicts/CPU
+    # tensors), not a differentiable nn.Module. Under torch.compile its methods
+    # are traced into the graph and Dynamo specializes a guard on
+    # len(self._slot_ids) — which changes every forward (clear -> 0 -> fill ->
+    # N) — hitting config.recompile_limit (8) and falling back to eager. Mark
+    # every entry point @torch.compiler.disable so Dynamo treats them as opaque
+    # Python side-effects and stops guarding on registry length. The actual
+    # tensor ops (matmul/topk) live in SparseRouter / MSAAttention nn.Modules
+    # and remain compiled.
+    @torch.compiler.disable
     def _evict_oldest(self, n: int) -> None:
         """Remove oldest n slots to make room."""
         # Clamp n to the registry size so the slice below stays aligned.
@@ -69,6 +79,7 @@ class SlotRegistry:
             self._id_to_idx_tensor[sid] = i
         self._slot_ids_tensor = None
 
+    @torch.compiler.disable
     def prune_oldest(self, n: int) -> None:
         """Remove the oldest n slots from the registry."""
         if n <= 0:
@@ -76,6 +87,7 @@ class SlotRegistry:
         n = max(0, min(n, len(self)))
         self._evict_oldest(n)
 
+    @torch.compiler.disable
     def batch_register(
         self,
         slot_ids: torch.Tensor,
@@ -181,6 +193,7 @@ class SlotRegistry:
             v_cache=self._v_caches[idx] if self._v_caches is not None else torch.tensor([]),
         )
 
+    @torch.compiler.disable
     def get_indices(self, slot_ids: torch.Tensor) -> torch.Tensor:
         """Return indices [N] into batched tensors for the given slot IDs."""
         flat = slot_ids.long().flatten()
@@ -191,6 +204,7 @@ class SlotRegistry:
             raise KeyError(f"Slots {bad.tolist()} not found in registry")
         return indices.view_as(slot_ids)
 
+    @torch.compiler.disable
     def keys_tensor(self, device: str | None = None) -> torch.Tensor:
         """Return a stacked tensor of all routing keys [N, key_dim]."""
         if self._routing_keys is None:
@@ -203,6 +217,7 @@ class SlotRegistry:
         """Return registered slot IDs in registration order."""
         return list(self._slot_ids)
 
+    @torch.compiler.disable
     def slot_ids_tensor(self, device: str | None = None) -> torch.Tensor:
         """Return a cached tensor of slot IDs."""
         if self._slot_ids_tensor is None:
@@ -215,6 +230,7 @@ class SlotRegistry:
             return self._slot_ids_tensor.to(device, non_blocking=True)
         return self._slot_ids_tensor
 
+    @torch.compiler.disable
     def clear(self) -> None:
         """Remove all slots and invalidate caches."""
         self._slot_ids.clear()
@@ -225,9 +241,11 @@ class SlotRegistry:
         self._slot_ids_tensor = None
         self._id_to_idx_tensor.fill_(-1)
 
+    @torch.compiler.disable
     def __len__(self) -> int:
         return len(self._slot_ids)
 
+    @torch.compiler.disable
     def get_kv(self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return K and V caches for the given indices.
 
@@ -241,6 +259,7 @@ class SlotRegistry:
             raise RuntimeError("No K/V caches in registry")
         return self._k_caches[indices], self._v_caches[indices]
 
+    @torch.compiler.disable
     def get_offsets(self, indices: torch.Tensor) -> torch.Tensor:
         """Return sequence lengths for the given indices."""
         if self._k_caches is None:
@@ -904,7 +923,11 @@ class HDIMSlotRouter(nn.Module):
             - v_caches: [N, nkv, chunk_size, head_dim]
         """
         B, T, _ = hidden_states.shape
-        if chunk_size <= 1:
+        # chunk_size<=1 -> per-token slots. Also fall back to per-token when
+        # T < chunk_size (single-token decode step): n_full_chunks would be 0
+        # and the chunked reshape below raises on a 0-element tensor. Pooling
+        # the available tokens as per-token slots keeps generation working.
+        if chunk_size <= 1 or T < chunk_size:
             inv = self.routing_key(hidden_states)  # [B, T, key_dim]
             inv_flat = inv.reshape(B * T, -1)
             total = B * T
