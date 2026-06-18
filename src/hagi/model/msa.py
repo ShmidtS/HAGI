@@ -47,6 +47,12 @@ class SlotRegistry:
         self._max_slots = max_slots
         self._slots_compat: dict[int, MemorySlot] = {}
         self._id_to_idx_tensor = torch.full((max_slots * 1000,), -1, dtype=torch.long)
+        # Per-slot real K/V length along the time axis. The dense stack pads
+        # every slot to the max T_slot seen so far (generation mixes prefill
+        # chunk_size slots with decode per-token slots), so the buffer width is
+        # the max but each slot's valid range is its own length. MSAAttention
+        # uses this to mask padded positions out of the softmax. None when empty.
+        self._slot_lens: torch.Tensor | None = None
 
     # SlotRegistry is a stateful Python bookkeeping object (lists/dicts/CPU
     # tensors), not a differentiable nn.Module. Under torch.compile its methods
@@ -74,6 +80,10 @@ class SlotRegistry:
             self._k_caches = self._k_caches[n:] if n < self._k_caches.size(0) else None
         if self._v_caches is not None:
             self._v_caches = self._v_caches[n:] if n < self._v_caches.size(0) else None
+        if self._slot_lens is not None:
+            self._slot_lens = (
+                self._slot_lens[n:] if n < self._slot_lens.size(0) else None
+            )
         self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
         self._id_to_idx_tensor.fill_(-1)
         for i, sid in enumerate(self._slot_ids):
@@ -117,6 +127,9 @@ class SlotRegistry:
             self._routing_keys = routing_keys
             self._k_caches = k_caches
             self._v_caches = v_caches
+            self._slot_lens = torch.full(
+                (n,), k_caches.shape[-2], dtype=torch.long, device=k_caches.device
+            )
             # One vectorized scatter instead of N scalar writes.
             idx_t = self._id_to_idx_tensor
             if slot_ids.device != idx_t.device:
@@ -175,17 +188,50 @@ class SlotRegistry:
             if self._routing_keys is None
             else torch.cat([self._routing_keys, routing_keys], dim=0)
         )
-        self._k_caches = (
-            k_caches
-            if self._k_caches is None
-            else torch.cat([self._k_caches, k_caches], dim=0)
+        # K/V caches are a dense [N, nkv, T_slot, head_dim] stack, so cat along
+        # dim=0 needs identical T_slot (dim=-2). Generation mixes slots of
+        # different T_slot (prefill chunk_size vs decode per-token fallback,
+        # msa.py batch_create_slots), so pad the shorter cache's time axis to
+        # the max T_slot. The pad tail is masked out of attention via the
+        # per-slot real length in _slot_lens (MSAAttention valid-len mask).
+        t_max = max(
+            self._k_caches.shape[-2] if self._k_caches is not None else 0,
+            k_caches.shape[-2],
         )
-        self._v_caches = (
-            v_caches
-            if self._v_caches is None
-            else torch.cat([self._v_caches, v_caches], dim=0)
+        self._k_caches = self._cat_kv_pad(self._k_caches, k_caches, t_max)
+        self._v_caches = self._cat_kv_pad(self._v_caches, v_caches, t_max)
+        incoming_lens = torch.full(
+            (n,), k_caches.shape[-2], dtype=torch.long, device=k_caches.device
+        )
+        self._slot_lens = (
+            incoming_lens
+            if self._slot_lens is None
+            else torch.cat([self._slot_lens, incoming_lens], dim=0)
         )
         self._slot_ids_tensor = None
+
+    @staticmethod
+    def _cat_kv_pad(
+        existing: torch.Tensor | None, incoming: torch.Tensor, t_max: int
+    ) -> torch.Tensor:
+        """Cat two [N, nkv, T_slot, head_dim] caches, zero-padding T_slot to t_max."""
+        if existing is None:
+            return (
+                incoming
+                if incoming.shape[-2] == t_max
+                else F.pad(incoming, (0, 0, 0, t_max - incoming.shape[-2]))
+            )
+        pad_existing = (
+            existing
+            if existing.shape[-2] == t_max
+            else F.pad(existing, (0, 0, 0, t_max - existing.shape[-2]))
+        )
+        pad_incoming = (
+            incoming
+            if incoming.shape[-2] == t_max
+            else F.pad(incoming, (0, 0, 0, t_max - incoming.shape[-2]))
+        )
+        return torch.cat([pad_existing, pad_incoming], dim=0)
 
     def register(self, slot: MemorySlot) -> None:
         """Register a single slot (backward compatibility)."""
@@ -265,6 +311,7 @@ class SlotRegistry:
         self._routing_keys = None
         self._k_caches = None
         self._v_caches = None
+        self._slot_lens = None
         self._slot_ids_tensor = None
         self._id_to_idx_tensor.fill_(-1)
 
@@ -288,17 +335,24 @@ class SlotRegistry:
 
     @torch.compiler.disable
     def get_offsets(self, indices: torch.Tensor) -> torch.Tensor:
-        """Return sequence lengths for the given indices."""
+        """Return the real per-slot K/V length (time dim) for the given indices.
+
+        Slots can carry different real lengths (prefill chunk_size vs decode
+        per-token) inside one padded dense [N, nkv, T_slot_max, head_dim] stack.
+        The RoPE position base and the attention valid-len mask both use this
+        real length, NOT the buffer width, so padded positions stay inert.
+        """
         if self._k_caches is None:
             raise RuntimeError("No K caches in registry")
-        # All registered slots share one uniform T_slot (the registry stores a
-        # dense [N, nkv, T_slot, head_dim] stack), so the per-slot offset is a
-        # single broadcast scalar. The prior per-slot Python list comprehension
-        # had a variable length each step → torch.compile recompile_limit.
-        t_slot = self._k_caches.size(-2)
-        return torch.full(
-            indices.shape, t_slot, dtype=torch.long, device=indices.device
-        )
+        if self._slot_lens is None:
+            # Legacy fallback (registry populated before _slot_lens existed):
+            # uniform T_slot, no padding.
+            t_slot = self._k_caches.size(-2)
+            return torch.full(
+                indices.shape, t_slot, dtype=torch.long, device=indices.device
+            )
+        lens = self._slot_lens.to(device=indices.device)
+        return lens[indices.long().flatten()].view_as(indices)
 
     def state_dict(self) -> dict[str, Any]:
         """Return serializable state."""
@@ -913,6 +967,16 @@ class MSAAttention(nn.Module):
             )
             scores = torch.matmul(qk_mat, kk_mat.transpose(-2, -1)) / scale
             scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(4))
+            # Valid-len mask: padded K positions (>= real slot length) get -inf
+            # so mixed-T_slot generation (prefill chunk_size vs decode per-token)
+            # does not bleed attention mass onto zero-padded tail rows. Training
+            # has uniform T_slot == real_len, so the mask is all-True (no-op).
+            T_slot = kk.size(4)
+            if T_slot > 1:
+                # offsets: [B, T, top_k] -> broadcast against scores [B, nq, T, top_k, T_slot]
+                pos = torch.arange(T_slot, device=scores.device)
+                valid = pos[None, None, None, None, :] < offsets[:, None, :, :, None]
+                scores = scores.masked_fill(~valid, float("-inf"))
             if attn_mask is not None:
                 scores = scores + attn_mask
             attn = F.softmax(scores, dim=-1).to(q.dtype)
@@ -949,6 +1013,13 @@ class MSAAttention(nn.Module):
             scores = torch.matmul(qk_mat, kk_mat.transpose(-2, -1)) / scale
             scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(3))
             scores = scores.permute(0, 1, 3, 2, 4)  # [B, nq, top_k, T, T_slot]
+            # Valid-len mask (mirror of is_3d branch): pad positions >= real
+            # slot length get -inf. No-op when all slots share T_slot == lens.
+            T_slot = kk.size(3)
+            if T_slot > 1:
+                pos = torch.arange(T_slot, device=scores.device)
+                valid = pos[None, None, None, None, :] < offsets[:, None, :, None, None]
+                scores = scores.masked_fill(~valid, float("-inf"))
             if attn_mask is not None:
                 scores = scores + attn_mask
             attn = F.softmax(scores, dim=-1).to(q.dtype)

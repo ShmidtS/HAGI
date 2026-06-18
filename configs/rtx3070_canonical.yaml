@@ -381,8 +381,14 @@ model:
   # --- Quality head ---
 
   # Enable auxiliary quality prediction head (binary CE on token correctness).
+  # DISABLED true->false: w_quality is 0.0 (the head never contributes to loss)
+  # and use_fused_ce=true makes logits=None in the training forward, so the
+  # quality-target branch (hagi.py:682-693) never fires. The head still gets
+  # built (hagi.py:227) and forces pre_logits_hidden = a full [B,T,H] copy of h
+  # (hagi.py:636-638) retained through the rest of forward — a dead activation
+  # held in VRAM for nothing. Turning it off drops that copy and the head params.
   # Read in: HAGIConfig.use_quality_head (hagi.py:81), hagi.py:227
-  use_quality_head: true
+  use_quality_head: false
 
   # --- Binary factorized layers ---
 
@@ -487,7 +493,7 @@ training:
   # Micro-batch size (per GPU step before gradient accumulation).
   # Effective batch = batch_size × grad_accum_steps = 8 × 4 = 32.
   # Read in: train.py:433, loop.py:340
-  batch_size: 3
+  batch_size: 8
 
   # Checkpoint save interval (steps).
   # Read in: loop.py:346 (build_loop_config)
@@ -602,7 +608,7 @@ training:
   # Newton-Schulz iteration count for zero-power orthogonalization.
   # More = better approximation, more compute.
   # Read in: optim.py:490 (cfg.get("muon_ns_steps", 5))
-  muon_ns_steps: 6
+  muon_ns_steps: 5
 
   # Weight decay (decoupled, AdamW style). Applied to ≥2D non-norm params.
   # Read in: optim.py:479,538 (cfg.get("weight_decay", 0.1))
