@@ -418,7 +418,12 @@ def train(
     ):
         if hasattr(torch, "compile"):
             _patch_inductor_decoder()
-            run_model = torch.compile(model)
+            # dynamic=True: variable-length training (data.min_seq_len=256 ->
+            # max_seq_len=1024) draws a fresh T every batch, so Dynamo would
+            # specialize a guard on targets.shape[1] and hit recompile_limit(8)
+            # -> eager fallback (wasted step-0 compile). dynamic shapes let one
+            # graph cover the whole T range with no recompiles.
+            run_model = torch.compile(model, dynamic=True)
 
     precision = cfg.precision
     use_scaler = precision == "fp16" and device.startswith("cuda")
