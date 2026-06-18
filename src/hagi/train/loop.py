@@ -91,6 +91,12 @@ def _enable_ampere_flags(device: str, tf32: bool) -> None:
     torch.set_float32_matmul_precision("high")
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    # cudnn autotuner: data.min_seq_len==max_seq_len (fixed T=1024) means every
+    # step feeds identical conv/attention shapes, so benchmark=True caches the
+    # fastest kernel per shape once instead of the default heuristic. This is the
+    # parity gap that made profile_steps.py (which sets it) measure faster than
+    # the real loop (which did not). Harmless when shapes vary — just suboptimal.
+    torch.backends.cudnn.benchmark = True
     # Ampere fp16/bf16 accumulation reductions — harmless on older HW.
     try:
         torch.backends.cuda.matmul.allow_fp16_accumulation = True
@@ -448,6 +454,10 @@ def train(
             # specialize a guard on targets.shape[1] and hit recompile_limit(8)
             # -> eager fallback (wasted step-0 compile). dynamic shapes let one
             # graph cover the whole T range with no recompiles.
+            # mode left default (NOT "max-autotune"): the inductor Triton autotuner
+            # segfaults (0xC0000005 access violation) in bf16 backward on this
+            # Windows/torch build — the autotuned GEMM kernel is ABI-incompatible.
+            # default mode uses the stable eager-fallback kernels.
             run_model = torch.compile(model, dynamic=True)
 
     precision = cfg.precision

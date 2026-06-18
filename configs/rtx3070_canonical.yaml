@@ -619,12 +619,23 @@ training:
 
   # Muon peak LR for reasoning-core 2D weights. Muon orthogonalizes updates
   # via Newton-Schulz, so LR is independent of grad_clip.
+  # Raised 0.008->0.012: hrm_l_cycles=2 doubles the reasoning recurrence depth,
+  # so the shared reasoning blocks see ~2x the per-step gradient signal of the
+  # 1-cycle config. A larger Muon LR converts that denser signal into faster
+  # convergence of the geometric reasoning core (Muon's orthogonalized update
+  # is scale-invariant, so a higher LR does not blow up the way AdamW's would).
+  # 0.012 is still well below the Muon canonical 0.02 ceiling for 2D weights.
   # Read in: optim.py:488 (cfg.get("muon_lr", 0.02))
-  muon_lr: 0.008
+  muon_lr: 0.012
 
   # Muon momentum (Nesterov-style).
+  # Raised 0.95->0.97: a longer momentum EMA smooths the per-step update
+  # direction, which matters more now that hrm_l_cycles=2 stacks two reasoning
+  # passes' gradients into one update — the noise from the doubled pass count
+  # is dampened rather than amplified. 0.97 is the standard Muon momentum for
+  # multi-billion-token runs (Keller Jordan recipe).
   # Read in: optim.py:489 (cfg.get("muon_momentum", 0.95))
-  muon_momentum: 0.95
+  muon_momentum: 0.97
 
   # Newton-Schulz iteration count for zero-power orthogonalization.
   # More = better approximation, more compute.
