@@ -75,6 +75,7 @@ def cross_entropy_loss(
     return fn(logits, targets, ignore_index, chunk_size, label_smoothing)
 
 
+@torch.compiler.disable
 def fused_linear_cross_entropy(
     hidden: torch.Tensor,
     weight: torch.Tensor,
@@ -91,6 +92,16 @@ def fused_linear_cross_entropy(
     tensor is the dominant activation-memory term; this path cuts it by a factor
     of N / chunk_size. Numerically identical to the unchunked path (sum over
     chunks / valid-token count == mean).
+
+    ``@torch.compiler.disable``: this is called from inside the compiled model
+    graph (hagi.py:647), and the chunk loop ``for i in range(0, flat_h.size(0),
+    chunk_size)`` has a data-dependent trip count (variable-length training ->
+    B*T varies -> ceil(B*T/chunk_size) is 1..3). Dynamo specializes a guard on
+    the trip count and hits recompile_limit(8) -> eager fallback, wasting the
+    step-0 compile. Disabling keeps the eager chunk loop (it is just
+    F.linear + F.cross_entropy on a [chunk, V] slab — the CUDA kernels are
+    already optimal, compile adds nothing) and stops the guard. Mirrors the
+    SlotRegistry disable pattern (msa.py).
     """
     flat_h = hidden.reshape(-1, hidden.size(-1))
     flat_t = targets.reshape(-1)
