@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import math
 import os
 import warnings
@@ -362,7 +363,9 @@ def _shift_collate(
         array = np.stack(items)
         x = array[:, :-1]
         y = array[:, 1:]
-        return torch.as_tensor(x, dtype=torch.long), torch.as_tensor(y, dtype=torch.long)
+        return torch.as_tensor(x, dtype=torch.long), torch.as_tensor(
+            y, dtype=torch.long
+        )
     # Variable lengths: pad each row to max_len. Output length is max_len-1.
     out_len = max_len - 1
     x = np.full((len(items), out_len), pad_id, dtype=np.int64)
@@ -687,9 +690,8 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         )
 
     use_prefix_lm = bool(train_cfg.get("use_prefix_lm", False))
-    dataset_mode = (
-        getattr(args, "dataset_mode", None)
-        or str(data_cfg.get("dataset_mode", "memmap"))
+    dataset_mode = getattr(args, "dataset_mode", None) or str(
+        data_cfg.get("dataset_mode", "memmap")
     )
     train_path = (
         resolve_train_path(cfg, args.train_path, args.data_dir)
@@ -720,7 +722,9 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         num_datasets = len(data_cfg.get("mix_paths", []))
         if num_datasets > 0:
             total_batches = max_steps * grad_accum_steps
-            steps_per_cycle = max(1, total_batches // (num_datasets * sequential_cycles))
+            steps_per_cycle = max(
+                1, total_batches // (num_datasets * sequential_cycles)
+            )
 
     dataloader, eval_loader, batch_size, seq_len, pin_memory = build_full_dataloader(
         cfg,
@@ -736,7 +740,13 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
 
     print_model_summary(model, model_cfg, args.device)
     if args.dry_run:
-        run_dry_profile(model, dataloader, args.device, use_prefix_lm, train_cfg.get("precision", "bf16"))
+        run_dry_profile(
+            model,
+            dataloader,
+            args.device,
+            use_prefix_lm,
+            train_cfg.get("precision", "bf16"),
+        )
         return
 
     optimizer = build_optimizer(model, train_cfg)
@@ -749,7 +759,7 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     optimizer.load_state_dict(
                         torch.load(
                             optimizer_path,
-                            map_location=args.device,
+                            map_location="cpu",
                             weights_only=True,
                         )
                     )
@@ -760,7 +770,7 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             if ema_path.exists():
                 try:
                     ema_state = torch.load(
-                        ema_path, map_location=args.device, weights_only=True
+                        ema_path, map_location="cpu", weights_only=True
                     )
                     for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
                         ema_state.pop(key, None)
@@ -769,9 +779,7 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 except Exception as exc:
                     print(f"EMA state unreadable, starting fresh: {exc}")
         else:
-            state = torch.load(
-                args.resume, map_location=args.device, weights_only=True
-            )
+            state = torch.load(args.resume, map_location="cpu", weights_only=True)
             if "optimizer" in state:
                 try:
                     optimizer.load_state_dict(state["optimizer"])
@@ -784,6 +792,18 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                     ema_state.pop(key, None)
                 resumed_ema_state = ema_state
                 print("found EMA state to restore")
+            del state  # free checkpoint tensors from CPU RAM
+
+    # Move optimizer state to the target device (loaded from CPU to save
+    # VRAM during resume) and release CUDA cache accumulated during loading.
+    if args.resume is not None and args.resume.exists():
+        for _st in optimizer.state.values():
+            for _k, _v in _st.items():
+                if isinstance(_v, torch.Tensor):
+                    _st[_k] = _v.to(args.device)
+        gc.collect()
+        if args.device.startswith("cuda"):
+            torch.cuda.empty_cache()
 
     loop_cfg = _build_loop_config(cfg, args.ckpt_dir, max_steps)
 
@@ -828,7 +848,11 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             else model
         )
         metrics = run_eval(
-            eval_model, eval_loader, args.device, pin_memory, train_cfg.get("precision", "bf16")
+            eval_model,
+            eval_loader,
+            args.device,
+            pin_memory,
+            train_cfg.get("precision", "bf16"),
         )
         eval_tag = "ema" if step >= loop_cfg.ema_start_step else "model"
         print(

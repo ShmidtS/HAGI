@@ -285,32 +285,44 @@ def _resolve_loss(
         logits,
         targets,
         auxiliary_output=(
-            model_output.get("auxiliary_output") if isinstance(model_output, dict) else None
+            model_output.get("auxiliary_output")
+            if isinstance(model_output, dict)
+            else None
         ),
         model_output=model_output if isinstance(model_output, dict) else None,
         weights=weights,
         invariant_src=(
-            model_output.get("invariant_src") if isinstance(model_output, dict) else None
+            model_output.get("invariant_src")
+            if isinstance(model_output, dict)
+            else None
         ),
         invariant_tgt=(
-            model_output.get("invariant_tgt") if isinstance(model_output, dict) else None
+            model_output.get("invariant_tgt")
+            if isinstance(model_output, dict)
+            else None
         ),
         precomputed_loss=precomputed_loss,
         moe_aux_loss=(
             model_output.get("moe_aux_loss") if isinstance(model_output, dict) else None
         ),
         num_moe_layers=(
-            model_output.get("num_moe_layers") if isinstance(model_output, dict) else None
+            model_output.get("num_moe_layers")
+            if isinstance(model_output, dict)
+            else None
         ),
         msa_aux_loss=(
             model_output.get("msa_aux_loss") if isinstance(model_output, dict) else None
         ),
         chunk_size=chunk_size,
         quality_score=(
-            model_output.get("quality_score") if isinstance(model_output, dict) else None
+            model_output.get("quality_score")
+            if isinstance(model_output, dict)
+            else None
         ),
         quality_targets=(
-            model_output.get("quality_target") if isinstance(model_output, dict) else None
+            model_output.get("quality_target")
+            if isinstance(model_output, dict)
+            else None
         ),
     )
     total_loss = losses["L_total"]
@@ -329,9 +341,7 @@ def build_loop_config(
     train_cfg = full_cfg.get("training", {})
     ema_cfg = train_cfg.get("ema", {})
     composite_cfg = train_cfg.get("composite_loss")
-    composite_weights = (
-        dict(composite_cfg) if isinstance(composite_cfg, dict) else {}
-    )
+    composite_weights = dict(composite_cfg) if isinstance(composite_cfg, dict) else {}
     return LoopConfig(
         max_steps=int(max_steps),
         warmup_steps=int(train_cfg.get("warmup_steps", 1000)),
@@ -534,16 +544,32 @@ def train(
         if composite_weights is not None:
             effective_weights = dict(composite_weights)
             effective_weights["w_aux"] = scheduled_weight(
-                step, cfg.w_aux_start, final_aux, cfg.aux_warmup_steps, cfg.loss_warmup_mode
+                step,
+                cfg.w_aux_start,
+                final_aux,
+                cfg.aux_warmup_steps,
+                cfg.loss_warmup_mode,
             )
             effective_weights["w_iso"] = scheduled_weight(
-                step, cfg.w_iso_start, final_iso, cfg.iso_warmup_steps, cfg.loss_warmup_mode
+                step,
+                cfg.w_iso_start,
+                final_iso,
+                cfg.iso_warmup_steps,
+                cfg.loss_warmup_mode,
             )
             effective_weights["w_moe"] = scheduled_weight(
-                step, cfg.w_moe_start, final_moe, cfg.moe_warmup_steps, cfg.loss_warmup_mode
+                step,
+                cfg.w_moe_start,
+                final_moe,
+                cfg.moe_warmup_steps,
+                cfg.loss_warmup_mode,
             )
             effective_weights["w_msa_lb"] = scheduled_weight(
-                step, cfg.w_msa_lb_start, final_msa_lb, cfg.moe_warmup_steps, cfg.loss_warmup_mode
+                step,
+                cfg.w_msa_lb_start,
+                final_msa_lb,
+                cfg.moe_warmup_steps,
+                cfg.loss_warmup_mode,
             )
 
         optimizer.zero_grad(set_to_none=True)
@@ -567,11 +593,7 @@ def train(
                 if apply_prefix_mask_fn is not None:
                     targets = apply_prefix_mask_fn(targets, batch)
                 # batch may be a PrefixLMBatch exposing .tokens, else a tensor.
-                tokens = (
-                    batch.tokens
-                    if hasattr(batch, "tokens")
-                    else batch
-                )
+                tokens = batch.tokens if hasattr(batch, "tokens") else batch
             else:
                 x, y = get_batch()
                 tokens, targets = x, y
@@ -610,7 +632,9 @@ def train(
 
             if not torch.isfinite(loss).all():
                 if need_components:
-                    print(f"WARNING: non-finite loss at step {step}; skipping accum step")
+                    print(
+                        f"WARNING: non-finite loss at step {step}; skipping accum step"
+                    )
                 continue
 
             t_bwd_start = time.perf_counter()
@@ -651,7 +675,9 @@ def train(
 
         grad_norm_val = 0.0
         if cfg.grad_clip > 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), cfg.grad_clip
+            )
             grad_norm_val = float(grad_norm.item())
             if need_components and (
                 not math.isfinite(grad_norm_val)
@@ -722,7 +748,11 @@ def train(
                 allocated = torch.cuda.memory_allocated(device) / 1024**3
                 reserved = torch.cuda.memory_reserved(device) / 1024**3
                 mem_text = f" | mem_allocated {allocated:.2f}GB | mem_reserved {reserved:.2f}GB"
-            eval_tag = "ema" if (step >= cfg.ema_start_step and model_ema is not None) else "model"
+            eval_tag = (
+                "ema"
+                if (step >= cfg.ema_start_step and model_ema is not None)
+                else "model"
+            )
             metrics = {
                 "step": step,
                 "loss": last_loss,
@@ -761,9 +791,7 @@ def train(
                 optimizer,
                 step,
                 cfg.ckpt_dir,
-                ema_state=(
-                    model_ema.state_dict() if model_ema is not None else None
-                ),
+                ema_state=(model_ema.state_dict() if model_ema is not None else None),
                 on_checkpoint=on_checkpoint,
             )
 
@@ -773,9 +801,7 @@ def train(
             optimizer,
             end,
             cfg.ckpt_dir,
-            ema_state=(
-                model_ema.state_dict() if model_ema is not None else None
-            ),
+            ema_state=(model_ema.state_dict() if model_ema is not None else None),
             on_checkpoint=on_checkpoint,
         )
     elif session_steps is not None:
@@ -784,9 +810,7 @@ def train(
             optimizer,
             end,
             cfg.ckpt_dir,
-            ema_state=(
-                model_ema.state_dict() if model_ema is not None else None
-            ),
+            ema_state=(model_ema.state_dict() if model_ema is not None else None),
         )
 
     if total_tokens_seen > 0:
@@ -859,6 +883,11 @@ def load_checkpoint(
 ) -> tuple[HAGI, int, dict[str, Any] | None]:
     """Rebuild a HAGI model from a checkpoint.
 
+    All tensors are loaded to CPU first (``map_location="cpu"``) to avoid
+    pinning the full checkpoint — model + optimizer + EMA — in VRAM during
+    resume.  ``model.to(device)`` then moves only the model weights to the
+    target device.
+
     Returns:
         (model, step, ema_state | None)
     """
@@ -874,7 +903,7 @@ def load_checkpoint(
         )
         cfg = config_from_dict(meta["config"])
         model = HAGI(cfg)
-        state_dict = torch.load(p / "model.pt", map_location=device, weights_only=True)
+        state_dict = torch.load(p / "model.pt", map_location="cpu", weights_only=True)
         if any(k.startswith("hrm._orig_mod.") for k in state_dict):
             state_dict = {
                 k.replace("hrm._orig_mod.", "hrm.", 1): v for k, v in state_dict.items()
@@ -882,16 +911,24 @@ def load_checkpoint(
         for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
             state_dict.pop(key, None)
         model.load_state_dict(state_dict)
+        del state_dict
         model.to(device)
         ema_state = None
         if (use_ema or load_ema) and (p / "ema.pt").exists():
-            ema_state = torch.load(p / "ema.pt", map_location=device, weights_only=True)
+            ema_state = torch.load(p / "ema.pt", map_location="cpu", weights_only=True)
             if use_ema:
                 model.load_state_dict(ema_state)
                 ema_state = None
-        return model, int(meta.get("step", 0)), ema_state
+        step = int(meta.get("step", 0))
+        del meta
+        import gc
 
-    state = torch.load(path, map_location=device, weights_only=True)
+        gc.collect()
+        if device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return model, step, ema_state
+
+    state = torch.load(path, map_location="cpu", weights_only=True)
     for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
         state.pop(key, None)
     cfg = config_from_dict(state["config"])
@@ -941,7 +978,14 @@ def load_checkpoint(
         model.nars_msa.load_state_dict(state["nars_msa"])
 
     ema_state = state.get("model_ema") if (use_ema or load_ema) else None
+    step = int(state.get("step", 0))
     if use_ema and ema_state is not None:
         model.load_state_dict(ema_state)
         ema_state = None
-    return model, int(state.get("step", 0)), ema_state
+    del state
+    import gc
+
+    gc.collect()
+    if device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return model, step, ema_state

@@ -134,10 +134,13 @@ def fused_linear_cross_entropy(
     return (total / valid).to(hidden.dtype)
 
 
-def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
+def compute_auxiliary_loss(aux_output, max_samples: int = 256, temperature: float = 0.1) -> torch.Tensor:
     """Compute supervised contrastive auxiliary loss when pair labels are available.
 
     Subsamples to ``max_samples`` tokens to keep the O(N^2) similarity matrix bounded.
+    ``temperature`` scales the cosine-similarity logits (SimCLR default 0.1);
+    the prior hardcoded 0.07 was too sharp, over-weighting hard negatives and
+    pinning L_aux above its batch-size floor.
     """
     if aux_output is None:
         return torch.tensor(0.0)
@@ -155,6 +158,11 @@ def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
             if value is not None:
                 labels = value
                 break
+        # Per-call temperature override (lets the model forward thread it through
+        # without changing every call site).
+        temp_override = aux_output.get("temperature")
+        if isinstance(temp_override, (int, float)):
+            temperature = float(temp_override)
     elif isinstance(aux_output, tuple):
         if len(aux_output) >= 1:
             features = aux_output[0]
@@ -184,7 +192,7 @@ def compute_auxiliary_loss(aux_output, max_samples: int = 256) -> torch.Tensor:
         labels = labels[idx]
 
     flat_norm = F.normalize(flat, dim=-1)
-    logits = torch.mm(flat_norm, flat_norm.t()) / 0.07
+    logits = torch.mm(flat_norm, flat_norm.t()) / temperature
     logits = logits - logits.max(dim=1, keepdim=True).values.detach()
     self_mask = torch.eye(logits.size(0), dtype=torch.bool, device=logits.device)
     positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & ~self_mask
@@ -307,7 +315,7 @@ def composite_loss(
             and "auxiliary_output" in auxiliary_output
         ):
             aux_payload = auxiliary_output["auxiliary_output"]
-        l_aux = compute_auxiliary_loss(aux_payload).to(
+        l_aux = compute_auxiliary_loss(aux_payload, max_samples=512).to(
             device=ref_tensor.device, dtype=ref_tensor.dtype
         )
         l_total = l_total + merged_weights["w_aux"] * l_aux

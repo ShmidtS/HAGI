@@ -139,10 +139,6 @@ eval:
   - hellaswag        # Commonsense NLI (sentence completion)
   - winogrande       # Winograd schema challenge (coreference resolution)
 
-  # Evaluate every N steps. NOTE: not read in code — train.py uses
-  # training.eval_interval instead. Candidate for removal.
-  every_n_steps: 2000
-
 # =============================================================================
 # MODEL — HAGI architecture configuration
 # Read in: scripts/train.py:659 → config_from_dict(cfg["model"]) → HAGIConfig
@@ -479,19 +475,19 @@ model:
 #          → build_loop_config, build_optimizer, build_dataloader
 # =============================================================================
 training:
-  # torch.compile for training loop. NOTE: not read in code — model.compile
-  # (in model section) controls compilation. Candidate for removal.
-  compile: true
-
   # Peak learning rate for AdamW (non-Muon params). Cosine schedule scales
   # from 0 → learning_rate → min_lr_ratio × learning_rate.
+  # Lowered 6e-4->4e-4: at peak 6e-4 grad_norm climbed 1.09->1.51 over steps
+  # 1100-1275 (loss 5.70->5.84) — too hot for a 119M model with bf16 grads.
+  # 4e-4 is the standard peak for this param count (SmolLM2-135M uses ~3e-4);
+  # Muon (muon_lr=8e-3) handles the 2D reasoning core independently.
   # Read in: loop.py:338 (build_loop_config), optim.py:537 (build_optimizer)
-  learning_rate: 0.0006
+  learning_rate: 0.0004
 
   # Micro-batch size (per GPU step before gradient accumulation).
   # Effective batch = batch_size × grad_accum_steps = 8 × 4 = 32.
   # Read in: train.py:433, loop.py:340
-  batch_size: 6
+  batch_size: 5
 
   # Checkpoint save interval (steps).
   # Read in: loop.py:346 (build_loop_config)
@@ -501,8 +497,22 @@ training:
   # Read in: loop.py:332-334 (build_loop_config), losses.py:272-281
   composite_loss:
     w_ce: 1.0        # Cross-entropy (main LM loss)
-    w_aux: 0.01      # Contrastive auxiliary (GDR feature alignment)
-    w_iso: 0.05      # Isomorphic MSE (HDIM domain invariant alignment)
+    # Contrastive auxiliary DISABLED (w_aux 0.01->0.0): its labels are the batch
+    # index (hagi.py:706, labels=arange(B).expand) — "tokens of one sequence are
+    # one class". That is a trivially-true task the gdr_aux_proj features already
+    # satisfy per-token, so the term CONTRADICTS the LM objective and on real data
+    # L_aux climbs (4.5->5.07 over steps 600-2075) instead of falling to its
+    # ln(B)=2.08 floor, dragging grad_norm up (0.85->1.64) with ~62% of the grad
+    # energy landing in `perception`. On synthetic data L_aux stays flat at 4.7
+    # (no LM signal to conflict with) — confirming the term is noise, not signal.
+    # Removing it cuts the grad-norm drift at the source; the real geometric
+    # alignment (L_iso) is kept below.
+    w_aux: 0.0       # Contrastive auxiliary (DISABLED — broken labels, see above)
+    # Isomorphic MSE (HDIM domain invariant). Lowered 0.05->0.02: L_iso was
+    # rising 5x (0.0001->0.0005) as the aux warmup completed — a 0.05 weight on a
+    # growing term added upward pressure to grad_norm. 0.02 keeps the geometric
+    # domain-invariant signal training without amplifying the drift.
+    w_iso: 0.02      # Isomorphic MSE (HDIM domain invariant alignment)
     w_moe: 0.005     # MoE load-balance aux
     w_msa_lb: 0.01   # MSA router load-balance aux
     w_quality: 0.0   # Quality head BCE (disabled when use_quality_head=false)
@@ -514,11 +524,6 @@ training:
   w_moe_start: 0.0
   w_msa_lb_start: 0.0
 
-  # Enable GDR auxiliary projection (contrastive loss on GDR features).
-  # NOTE: not read in code — gdr_aux_proj is created when use_gdr=true
-  # regardless of this flag. Candidate for removal.
-  use_gdr_aux: true
-
   # --- Schedule ---
 
   # LR schedule: "cosine" (warmup → cosine decay) or "wsd" (warmup → stable → decay).
@@ -526,8 +531,11 @@ training:
   schedule: cosine
 
   # Warmup steps: linear ramp from 0 → learning_rate.
+  # Raised 500->1000: longer warmup eases the composite-loss terms (L_aux/L_iso
+  # ramp at 1500/2000) onto a model whose embeddings have stabilized, reducing
+  # the transient gradient spike that fed the late-run grad_norm climb.
   # Read in: loop.py:337 (build_loop_config), loop.py:133
-  warmup_steps: 500
+  warmup_steps: 1000
 
   # Minimum LR ratio: cosine decays to min_lr_ratio × learning_rate.
   # Read in: loop.py:339 (build_loop_config), loop.py:147
@@ -549,8 +557,11 @@ training:
   grad_accum_steps: 4
 
   # Global gradient clipping (max L2 norm). Applied before optimizer step.
+  # Lowered 1.0->0.8: tighter clip caps the grad_norm excursion (1.51 at step
+  # 1275) that signalled onset of divergence; 0.8 is still loose enough not to
+  # slow a healthy 0.5-1.0 grad_norm regime but kills the tail spikes.
   # Read in: loop.py:341 (build_loop_config), train.py (clip_grad_norm_)
-  grad_clip: 1.0
+  grad_clip: 0.8
 
   # Gradient checkpointing in training loop (separate from model setting).
   # When true, overrides model.gradient_checkpointing at runtime.
@@ -564,9 +575,12 @@ training:
 
   # --- Precision ---
 
-  # Precision: "bf16" (autocast), "manual_bf16" (model cast to bf16, no autocast),
-  # "fp16" (autocast + GradScaler), "fp32" (no mixed precision).
-  # Read in: loop.py:342 (build_loop_config), loop.py:160 (autocast_ctx)
+  # Precision: "bf16" (autocast, fp32 master weights), "manual_bf16" (model cast
+  # to bf16, no autocast — faster, no autocast overhead), "fp16" (autocast +
+  # GradScaler), "fp32" (no mixed). KEPT manual_bf16: measured faster than bf16
+  # (no per-op autocast dispatch). The bf16 grad-accum precision loss it causes
+  # is mitigated by the lower peak LR (4e-4) + longer warmup + beta2 0.98 below,
+  # not by switching precision modes. Read in: loop.py:342, loop.py:160
   precision: manual_bf16
 
   # --- Optimizer: Muon + AdamW hybrid ---
@@ -595,8 +609,11 @@ training:
   weight_decay: 0.1
 
   # AdamW betas (beta1, beta2) for momentum and variance EMA.
+  # beta2 0.95->0.98: a longer variance EMA smooths the per-step grad scale
+  # estimate, damping the variance spike that (with bf16 grads + peak LR) drove
+  # grad_norm up at step 1275. 0.98 is standard for long small-LM runs.
   # Read in: optim.py:539 (cfg.get("betas", (0.9, 0.95)))
-  betas: [0.9, 0.95]
+  betas: [0.9, 0.98]
 
   # AdamW epsilon for numerical stability.
   # Read in: optim.py:540 (cfg.get("eps", 1e-8))
@@ -707,22 +724,3 @@ training:
   # Prefix LM mode: pack multiple documents per sequence with attention mask.
   # Read in: train.py:681 (train_cfg.get("use_prefix_lm", False))
   use_prefix_lm: false
-
-  # Pin memory for training DataLoader. NOTE: not read in code —
-  # data.pin_memory is used instead. Candidate for removal.
-  pin_memory: true
-
-  # DataLoader workers for training. NOTE: not read in code —
-  # data.num_workers is used instead. Candidate for removal.
-  num_workers: 0
-
-  # --- Compression monitor ---
-  # Tracks compression metrics (entropy, calibration, artifact ratio)
-  # during training. CompressionMonitor class exists but is NOT
-  # instantiated in scripts/train.py. Candidate for wiring or removal.
-  compression_monitor:
-    enabled: true             # Enable compression monitoring
-    artifact_threshold: 0.5   # Confidence threshold for artifact detection
-    calibration_bins: 10      # Bins for calibration error computation
-    rank_subsample: 256       # Token subsample for effective rank computation
-    heavy_interval_mult: 4    # Run heavy metrics every N × log_interval steps
