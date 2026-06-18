@@ -7,7 +7,6 @@ invariants (scalar part of the geometric product).  K/V caches are append-only.
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,7 +67,9 @@ class SlotRegistry:
             self._id_to_idx.pop(oldest, None)
         # After popping the oldest n IDs, the surviving data is rows [n:].
         if self._routing_keys is not None:
-            self._routing_keys = self._routing_keys[n:] if n < self._routing_keys.size(0) else None
+            self._routing_keys = (
+                self._routing_keys[n:] if n < self._routing_keys.size(0) else None
+            )
         if self._k_caches is not None:
             self._k_caches = self._k_caches[n:] if n < self._k_caches.size(0) else None
         if self._v_caches is not None:
@@ -135,9 +136,15 @@ class SlotRegistry:
         if existing:
             keep = [i for i, sid in enumerate(self._slot_ids) if sid not in existing]
             self._slot_ids = [self._slot_ids[i] for i in keep]
-            self._routing_keys = self._routing_keys[keep] if self._routing_keys is not None else None
-            self._k_caches = self._k_caches[keep] if self._k_caches is not None else None
-            self._v_caches = self._v_caches[keep] if self._v_caches is not None else None
+            self._routing_keys = (
+                self._routing_keys[keep] if self._routing_keys is not None else None
+            )
+            self._k_caches = (
+                self._k_caches[keep] if self._k_caches is not None else None
+            )
+            self._v_caches = (
+                self._v_caches[keep] if self._v_caches is not None else None
+            )
             self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
             self._id_to_idx_tensor.fill_(-1)
             for i, sid in enumerate(self._slot_ids):
@@ -163,9 +170,21 @@ class SlotRegistry:
         for i, sid in enumerate(ids_list):
             self._id_to_idx[sid] = start + i
 
-        self._routing_keys = routing_keys if self._routing_keys is None else torch.cat([self._routing_keys, routing_keys], dim=0)
-        self._k_caches = k_caches if self._k_caches is None else torch.cat([self._k_caches, k_caches], dim=0)
-        self._v_caches = v_caches if self._v_caches is None else torch.cat([self._v_caches, v_caches], dim=0)
+        self._routing_keys = (
+            routing_keys
+            if self._routing_keys is None
+            else torch.cat([self._routing_keys, routing_keys], dim=0)
+        )
+        self._k_caches = (
+            k_caches
+            if self._k_caches is None
+            else torch.cat([self._k_caches, k_caches], dim=0)
+        )
+        self._v_caches = (
+            v_caches
+            if self._v_caches is None
+            else torch.cat([self._v_caches, v_caches], dim=0)
+        )
         self._slot_ids_tensor = None
 
     def register(self, slot: MemorySlot) -> None:
@@ -188,9 +207,17 @@ class SlotRegistry:
         return MemorySlot(
             slot_id=slot_id,
             domain_id=0,
-            routing_key=self._routing_keys[idx] if self._routing_keys is not None else torch.tensor([]),
-            k_cache=self._k_caches[idx] if self._k_caches is not None else torch.tensor([]),
-            v_cache=self._v_caches[idx] if self._v_caches is not None else torch.tensor([]),
+            routing_key=(
+                self._routing_keys[idx]
+                if self._routing_keys is not None
+                else torch.tensor([])
+            ),
+            k_cache=(
+                self._k_caches[idx] if self._k_caches is not None else torch.tensor([])
+            ),
+            v_cache=(
+                self._v_caches[idx] if self._v_caches is not None else torch.tensor([])
+            ),
         )
 
     @torch.compiler.disable
@@ -277,9 +304,17 @@ class SlotRegistry:
         """Return serializable state."""
         return {
             "slot_ids": self._slot_ids,
-            "routing_keys": self._routing_keys.cpu().tolist() if self._routing_keys is not None else [],
-            "k_caches": self._k_caches.cpu().tolist() if self._k_caches is not None else [],
-            "v_caches": self._v_caches.cpu().tolist() if self._v_caches is not None else [],
+            "routing_keys": (
+                self._routing_keys.cpu().tolist()
+                if self._routing_keys is not None
+                else []
+            ),
+            "k_caches": (
+                self._k_caches.cpu().tolist() if self._k_caches is not None else []
+            ),
+            "v_caches": (
+                self._v_caches.cpu().tolist() if self._v_caches is not None else []
+            ),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -337,11 +372,15 @@ class SparseRouter(nn.Module):
         [..., n_hashes] long bucket ids in [0, 2**bucket_bits).
         """
         lsh_proj = getattr(self, "_lsh_proj", None)
-        assert isinstance(lsh_proj, torch.Tensor), "LSH projection planes not initialised"
+        assert isinstance(
+            lsh_proj, torch.Tensor
+        ), "LSH projection planes not initialised"
         proj = keys @ lsh_proj.transpose(-2, -1)  # [..., n_hashes*bits]
         proj = proj.view(*keys.shape[:-1], self.n_hashes, self.bucket_bits)
         bits = (proj > 0).long()
-        weights = (1 << torch.arange(self.bucket_bits - 1, -1, -1, device=bits.device)).long()
+        weights = (
+            1 << torch.arange(self.bucket_bits - 1, -1, -1, device=bits.device)
+        ).long()
         return (bits * weights).sum(dim=-1)  # [..., n_hashes]
 
     def route_top_k_lsh(
@@ -373,9 +412,7 @@ class SparseRouter(nn.Module):
             cand_mask[i].nonzero(as_tuple=False).squeeze(-1) for i in range(Q)
         ]
         maxc = max((c.numel() for c in cand_idx_list), default=0)
-        cand_idx = torch.full(
-            (Q, maxc), -1, dtype=torch.long, device=query.device
-        )
+        cand_idx = torch.full((Q, maxc), -1, dtype=torch.long, device=query.device)
         for i, c in enumerate(cand_idx_list):
             if c.numel() > 0:
                 cand_idx[i, : c.numel()] = c
@@ -392,7 +429,9 @@ class SparseRouter(nn.Module):
         tk_weights, tk_local = torch.topk(cand_scores, k=top_k, dim=-1, sorted=False)
         # Map local candidate index -> global slot index -> slot id.
         tk_global = safe_idx.gather(-1, tk_local)
-        tk_global = torch.where(torch.isfinite(tk_weights), tk_global, torch.zeros_like(tk_global))
+        tk_global = torch.where(
+            torch.isfinite(tk_weights), tk_global, torch.zeros_like(tk_global)
+        )
         top_k_ids = slot_ids[tk_global]
         weights = F.softmax(tk_weights, dim=-1)
         return top_k_ids, tk_weights, weights
@@ -503,7 +542,9 @@ class SparseRouter(nn.Module):
                 )
                 flat_tk = torch.topk(full_scores, k=top_k, dim=-1, sorted=False).indices
                 lb_loss = self.load_balance_loss(
-                    full_scores.reshape(*query.shape[:-1], -1), flat_tk.reshape(*query.shape[:-1], top_k), lb_alpha
+                    full_scores.reshape(*query.shape[:-1], -1),
+                    flat_tk.reshape(*query.shape[:-1], top_k),
+                    lb_alpha,
                 )
             return top_k_ids, top_k_weights, weights, lb_loss
 
@@ -531,27 +572,25 @@ class DocumentWiseRoPE(nn.Module):
     memory domains do not share the same rotation angles.
     """
 
+    _cos: torch.Tensor
+    _sin: torch.Tensor
+
     def __init__(self, head_dim: int, max_seq_len: int = 4096, theta: float = 10000.0):
         super().__init__()
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
         self.theta = theta
-        self._cache: OrderedDict[tuple[int, torch.dtype, torch.device], tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
-
-    def _get_cache(self, seq_len: int, dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-        key = (seq_len, dtype, device)
-        if key not in self._cache:
-            inv_freq = 1.0 / (self.theta ** (torch.arange(0, self.head_dim, 2, device=device).float() / self.head_dim))
-            t = torch.arange(end=seq_len, device=device).float()
-            freqs = torch.outer(t, inv_freq)
-            cos = freqs.cos().to(dtype)
-            sin = freqs.sin().to(dtype)
-            self._cache[key] = (cos, sin)
-            if len(self._cache) > 100:
-                self._cache.popitem(last=False)
-        else:
-            self._cache.move_to_end(key)
-        return self._cache[key]
+        # Precompute cos/sin as non-persistent buffers. The prior Python dict
+        # cache (_get_cache) stored tensors that CUDAGraphs captured and then
+        # overwrote on replay, causing "accessing tensor output of CUDAGraphs
+        # that has been overwritten by a subsequent run" under torch.compile.
+        # Buffers are part of the module's state and are properly managed by
+        # CUDAGraphs — no stale references.
+        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2) / head_dim))
+        t = torch.arange(end=max_seq_len)
+        freqs = torch.outer(t, inv_freq)
+        self.register_buffer("_cos", freqs.cos(), persistent=False)
+        self.register_buffer("_sin", freqs.sin(), persistent=False)
 
     def forward(
         self,
@@ -569,10 +608,12 @@ class DocumentWiseRoPE(nn.Module):
             Rotated tensor with same shape as ``x``.
         """
         B, H, T, D = x.shape
-        # Fixed-size cache: always use max_seq_len to avoid GPU sync from .item()
-        # The cache is computed once and reused. Memory overhead is negligible.
         seq_len = self.max_seq_len
-        cos, sin = self._get_cache(seq_len, x.dtype, x.device)
+        # Cast to input dtype — creates a fresh tensor when dtypes differ, or
+        # returns the buffer itself when already matching. Either way, the
+        # buffer is not a CUDAGraph output, so it cannot be stale.
+        cos = self._cos.to(x.dtype)
+        sin = self._sin.to(x.dtype)
 
         # slot_offsets must be [B, T]
         if slot_offsets.dim() == 3:
@@ -601,7 +642,12 @@ class HostKvCache:
     overwritten in-place.  Pre-allocates a buffer to avoid O(n²) memory copies.
     """
 
-    def __init__(self, k_cache: torch.Tensor | MemorySlot, v_cache: torch.Tensor | None = None, max_len: int = 4096) -> None:
+    def __init__(
+        self,
+        k_cache: torch.Tensor | MemorySlot,
+        v_cache: torch.Tensor | None = None,
+        max_len: int = 4096,
+    ) -> None:
         self.max_len = max_len
         self._slot: MemorySlot | None = None
         if isinstance(k_cache, MemorySlot):
@@ -611,12 +657,18 @@ class HostKvCache:
         assert v_cache is not None
         nkv, _, head_dim = k_cache.shape
         self._k = torch.empty(
-            nkv, max_len, head_dim,
-            dtype=k_cache.dtype, device=k_cache.device,
+            nkv,
+            max_len,
+            head_dim,
+            dtype=k_cache.dtype,
+            device=k_cache.device,
         )
         self._v = torch.empty(
-            nkv, max_len, head_dim,
-            dtype=v_cache.dtype, device=v_cache.device,
+            nkv,
+            max_len,
+            head_dim,
+            dtype=v_cache.dtype,
+            device=v_cache.device,
         )
         self._len = k_cache.size(-2)
         self._k[..., : self._len, :] = k_cache
@@ -672,16 +724,23 @@ class MSAAttention(nn.Module):
         self.hidden_size = hidden_size
         self.num_query_heads = num_query_heads
         self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim if head_dim is not None else hidden_size // num_query_heads
-        assert num_query_heads % num_kv_heads == 0, "query heads must be divisible by kv heads"
+        self.head_dim = (
+            head_dim if head_dim is not None else hidden_size // num_query_heads
+        )
+        assert (
+            num_query_heads % num_kv_heads == 0
+        ), "query heads must be divisible by kv heads"
 
         def _make(i: int, o: int) -> nn.Module:
             if use_binary_factorized:
                 return BinaryFactorizedLinear(i, o, binary_factorized_rank)
             return nn.Linear(i, o, bias=False)
+
         self.q_proj = _make(hidden_size, num_query_heads * self.head_dim)
         if not use_binary_factorized:
-            self.kv_proj = nn.Linear(hidden_size, 2 * num_kv_heads * self.head_dim, bias=False)
+            self.kv_proj = nn.Linear(
+                hidden_size, 2 * num_kv_heads * self.head_dim, bias=False
+            )
         else:
             self.k_proj = _make(hidden_size, num_kv_heads * self.head_dim)
             self.v_proj = _make(hidden_size, num_kv_heads * self.head_dim)
@@ -700,7 +759,16 @@ class MSAAttention(nn.Module):
             state.pop(f"{prefix}kv_proj.weight", None)
         return state
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
         kv_key = prefix + "kv_proj.weight"
         k_key = prefix + "k_proj.weight"
         v_key = prefix + "v_proj.weight"
@@ -709,7 +777,15 @@ class MSAAttention(nn.Module):
             v = state_dict[v_key]
             state_dict[kv_key] = torch.cat([k, v], dim=0)
             del state_dict[k_key], state_dict[v_key]
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def _fetch_kv_from_slots(
         self,
@@ -778,7 +854,11 @@ class MSAAttention(nn.Module):
         top_k = slot_ids.size(-1)
         is_3d = slot_ids.dim() == 3
 
-        q = self.q_proj(hidden_states).view(B, T, self.num_query_heads, self.head_dim).transpose(1, 2)
+        q = (
+            self.q_proj(hidden_states)
+            .view(B, T, self.num_query_heads, self.head_dim)
+            .transpose(1, 2)
+        )
         # q: [B, nq, T, head_dim]
 
         # Fetch K/V from slots
@@ -807,18 +887,30 @@ class MSAAttention(nn.Module):
             v_all = v_all.view(B, top_k, nkv, -1, self.head_dim)
 
         # Vectorized attention using matmul (avoids einsum bugs with singleton dims)
-        scale = self.head_dim ** 0.5
+        scale = self.head_dim**0.5
 
         if is_3d:
             # GQA: broadcast KV heads instead of repeat_interleave (zero-copy)
             # k_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, nq, T, top_k, T_slot, head_dim]
-            kk = k_all.unsqueeze(3).expand(-1, -1, -1, rep, -1, -1, -1).reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 3, 1, 2, 4, 5)
+            kk = (
+                k_all.unsqueeze(3)
+                .expand(-1, -1, -1, rep, -1, -1, -1)
+                .reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim)
+                .permute(0, 3, 1, 2, 4, 5)
+            )
             # v_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, nq, T, top_k, T_slot, head_dim]
-            vk = v_all.unsqueeze(3).expand(-1, -1, -1, rep, -1, -1, -1).reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 3, 1, 2, 4, 5)
+            vk = (
+                v_all.unsqueeze(3)
+                .expand(-1, -1, -1, rep, -1, -1, -1)
+                .reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim)
+                .permute(0, 3, 1, 2, 4, 5)
+            )
 
             qk = q.unsqueeze(3)  # [B, nq, T, 1, head_dim]
             qk_mat = qk.reshape(B * self.num_query_heads * T, 1, self.head_dim)
-            kk_mat = kk.reshape(B * self.num_query_heads * T, top_k * kk.size(4), self.head_dim)
+            kk_mat = kk.reshape(
+                B * self.num_query_heads * T, top_k * kk.size(4), self.head_dim
+            )
             scores = torch.matmul(qk_mat, kk_mat.transpose(-2, -1)) / scale
             scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(4))
             if attn_mask is not None:
@@ -828,18 +920,32 @@ class MSAAttention(nn.Module):
                 w = nars_weights.unsqueeze(1).unsqueeze(-1)  # [B, 1, T, top_k, 1]
                 attn = attn * w
             attn_mat = attn.reshape(B * self.num_query_heads * T, 1, top_k * kk.size(4))
-            vk_mat = vk.reshape(B * self.num_query_heads * T, top_k * vk.size(4), self.head_dim)
+            vk_mat = vk.reshape(
+                B * self.num_query_heads * T, top_k * vk.size(4), self.head_dim
+            )
             out_k = torch.matmul(attn_mat, vk_mat)  # [B*nq*T, 1, head_dim]
             out_k = out_k.view(B, self.num_query_heads, T, self.head_dim)
         else:
             # GQA: broadcast KV heads instead of repeat_interleave
             # k_all: [B, top_k, nkv, T_slot, head_dim] -> [B, nq, top_k, T_slot, head_dim]
-            kk = k_all.unsqueeze(2).expand(-1, -1, rep, -1, -1, -1).reshape(B, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 2, 1, 3, 4)
-            vk = v_all.unsqueeze(2).expand(-1, -1, rep, -1, -1, -1).reshape(B, top_k, self.num_query_heads, -1, self.head_dim).permute(0, 2, 1, 3, 4)
+            kk = (
+                k_all.unsqueeze(2)
+                .expand(-1, -1, rep, -1, -1, -1)
+                .reshape(B, top_k, self.num_query_heads, -1, self.head_dim)
+                .permute(0, 2, 1, 3, 4)
+            )
+            vk = (
+                v_all.unsqueeze(2)
+                .expand(-1, -1, rep, -1, -1, -1)
+                .reshape(B, top_k, self.num_query_heads, -1, self.head_dim)
+                .permute(0, 2, 1, 3, 4)
+            )
 
             qk = q.unsqueeze(2)  # [B, nq, 1, T, head_dim]
             qk_mat = qk.reshape(B * self.num_query_heads, T, self.head_dim)
-            kk_mat = kk.reshape(B * self.num_query_heads, top_k * kk.size(3), self.head_dim)
+            kk_mat = kk.reshape(
+                B * self.num_query_heads, top_k * kk.size(3), self.head_dim
+            )
             scores = torch.matmul(qk_mat, kk_mat.transpose(-2, -1)) / scale
             scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(3))
             scores = scores.permute(0, 1, 3, 2, 4)  # [B, nq, top_k, T, T_slot]
@@ -847,10 +953,21 @@ class MSAAttention(nn.Module):
                 scores = scores + attn_mask
             attn = F.softmax(scores, dim=-1).to(q.dtype)
             if nars_weights is not None:
-                w = nars_weights.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # [B, 1, top_k, 1, 1]
+                w = (
+                    nars_weights.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+                )  # [B, 1, top_k, 1, 1]
                 attn = attn * w
-            attn_mat = attn.permute(0, 1, 3, 2, 4).reshape(B * self.num_query_heads * T, 1, top_k * kk.size(3))
-            vk_mat = vk.reshape(B * self.num_query_heads, top_k * vk.size(3), self.head_dim).unsqueeze(1).expand(-1, T, -1, -1).reshape(B * self.num_query_heads * T, top_k * vk.size(3), self.head_dim)
+            attn_mat = attn.permute(0, 1, 3, 2, 4).reshape(
+                B * self.num_query_heads * T, 1, top_k * kk.size(3)
+            )
+            vk_mat = (
+                vk.reshape(B * self.num_query_heads, top_k * vk.size(3), self.head_dim)
+                .unsqueeze(1)
+                .expand(-1, T, -1, -1)
+                .reshape(
+                    B * self.num_query_heads * T, top_k * vk.size(3), self.head_dim
+                )
+            )
             out_k = torch.matmul(attn_mat, vk_mat)  # [B*nq*T, 1, head_dim]
             out_k = out_k.squeeze(1)  # [B*nq*T, head_dim]
             out_k = out_k.view(B, self.num_query_heads, T, self.head_dim)
@@ -868,7 +985,9 @@ class HDIMSlotRouter(nn.Module):
     rotor with the hidden state.
     """
 
-    def __init__(self, hidden_size: int, blade_count: int = BLADE_COUNT, key_dim: int = 64):
+    def __init__(
+        self, hidden_size: int, blade_count: int = BLADE_COUNT, key_dim: int = 64
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.blade_count = blade_count

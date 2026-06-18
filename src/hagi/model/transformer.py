@@ -91,6 +91,8 @@ _TORCH_MAJOR_MINOR = tuple(
     int(p) for p in torch.__version__.split("+")[0].split(".")[:2]
 )
 _SDPA_SUPPORTS_GQA = _TORCH_MAJOR_MINOR >= (2, 5)
+
+
 # Eagerly probe flash-attention availability at import so torch.compile does
 # not recompile when the lazy `_flash_available is None` branch fires on the
 # first forward pass (a global-mutation guard).

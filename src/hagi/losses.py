@@ -86,12 +86,13 @@ def fused_linear_cross_entropy(
 ) -> torch.Tensor:
     """Chunked lm_head projection + cross-entropy without materializing [N, V] logits.
 
-    Each row-chunk is projected and reduced under activation checkpointing, so at
-    most ``chunk_size x V`` logits exist at any time (in forward AND backward; the
-    chunk is recomputed during backward). With V = 32k and N = B*T the full logits
-    tensor is the dominant activation-memory term; this path cuts it by a factor
-    of N / chunk_size. Numerically identical to the unchunked path (sum over
-    chunks / valid-token count == mean).
+    Each row-chunk is projected and reduced via plain row-chunking (no activation
+    checkpointing — see comment below), so at most ``chunk_size x V`` logits exist
+    at any time in forward (the chunk's logits are held for the reduction, then
+    dropped). With V = 32k and N = B*T the full logits tensor is the dominant
+    activation-memory term; this path cuts it by a factor of N / chunk_size.
+    Numerically identical to the unchunked path (sum over chunks / valid-token
+    count == mean).
 
     ``@torch.compiler.disable``: this is called from inside the compiled model
     graph (hagi.py:647), and the chunk loop ``for i in range(0, flat_h.size(0),
@@ -134,7 +135,9 @@ def fused_linear_cross_entropy(
     return (total / valid).to(hidden.dtype)
 
 
-def compute_auxiliary_loss(aux_output, max_samples: int = 256, temperature: float = 0.1) -> torch.Tensor:
+def compute_auxiliary_loss(
+    aux_output, max_samples: int = 256, temperature: float = 0.1
+) -> torch.Tensor:
     """Compute supervised contrastive auxiliary loss when pair labels are available.
 
     Subsamples to ``max_samples`` tokens to keep the O(N^2) similarity matrix bounded.

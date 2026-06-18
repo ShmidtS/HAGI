@@ -636,7 +636,6 @@ class HAGI(nn.Module):
         pre_logits_hidden = (
             h if need_quality and self.quality_head is not None else None
         )
-        pre_norm_hidden = h  # pre-norm hidden for compression observability
         h = self.final_norm(h)
 
         logits = None
@@ -663,7 +662,11 @@ class HAGI(nn.Module):
                     logits.reshape(-1, logits.size(-1)),
                     targets.reshape(-1),
                     ignore_index=ignore_index,
-                    chunk_size=self.cfg.ce_chunk_size,
+                    chunk_size=(
+                        self.cfg.ce_chunk_size
+                        if self.cfg.ce_chunk_size > 0
+                        else self.cfg.ce_fused_chunk_size
+                    ),
                     label_smoothing=getattr(self.cfg, "label_smoothing", 0.0),
                 )
 
@@ -737,7 +740,6 @@ class HAGI(nn.Module):
                     result["invariant_tgt"] = inv_tgt
             if pre_logits_hidden is not None:
                 result["model_output"] = pre_logits_hidden
-            result["pre_norm_hidden"] = pre_norm_hidden
             if msa_slot_ids is not None:
                 result["msa_slot_ids"] = msa_slot_ids
                 result["msa_scores"] = msa_scores

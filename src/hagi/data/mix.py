@@ -45,9 +45,7 @@ class WeightedMemmapDataset(Dataset):  # type: ignore[type-arg, misc]
         # length, backward-compatible). When < seq_len, __getitem__ samples a
         # window in [min_seq_len, seq_len]; the collate fn right-pads with
         # ignore_index so shorter samples train loss-free under causal attn.
-        self.min_seq_len = (
-            int(min_seq_len) if min_seq_len is not None else self.seq_len
-        )
+        self.min_seq_len = int(min_seq_len) if min_seq_len is not None else self.seq_len
         if not (1 <= self.min_seq_len <= self.seq_len):
             raise ValueError(
                 f"min_seq_len must be in [1, seq_len={self.seq_len}], "

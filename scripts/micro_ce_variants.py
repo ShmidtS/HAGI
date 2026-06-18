@@ -21,11 +21,13 @@ tgt = torch.randint(0, V, (N,), device=device)
 CHUNK = 2048
 
 def fused_chunk(hp, wp, tp, cs=CHUNK):
-    flat_h = hp.reshape(-1, hp.size(-1)); flat_t = tp.reshape(-1)
+    flat_h = hp.reshape(-1, hp.size(-1))
+    flat_t = tp.reshape(-1)
     valid = (flat_t != -100).sum().clamp(min=1)
     total = torch.zeros((), dtype=torch.float32, device=hp.device)
     for i in range(0, flat_h.size(0), cs):
-        hc = flat_h[i:i+cs]; tc = flat_t[i:i+cs]
+        hc = flat_h[i:i+cs]
+        tc = flat_t[i:i+cs]
         def cl(hc, tc):
             return F.cross_entropy(F.linear(hc, wp), tc, ignore_index=-100, reduction="sum")
         total = total + ckpt(cl, hc, tc, use_reentrant=False)
@@ -36,11 +38,13 @@ def plain_ce(hp, wp, tp):
     return F.cross_entropy(logits, tp, ignore_index=-100)
 
 def fused_nockpt(hp, wp, tp, cs=CHUNK):
-    flat_h = hp.reshape(-1, hp.size(-1)); flat_t = tp.reshape(-1)
+    flat_h = hp.reshape(-1, hp.size(-1))
+    flat_t = tp.reshape(-1)
     valid = (flat_t != -100).sum().clamp(min=1)
     total = torch.zeros((), dtype=torch.float32, device=hp.device)
     for i in range(0, flat_h.size(0), cs):
-        hc = flat_h[i:i+cs]; tc = flat_t[i:i+cs]
+        hc = flat_h[i:i+cs]
+        tc = flat_t[i:i+cs]
         total = total + F.cross_entropy(F.linear(hc, wp), tc, ignore_index=-100, reduction="sum")
     return total / valid
 

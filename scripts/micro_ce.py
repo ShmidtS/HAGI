@@ -10,7 +10,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import train as train_script  # noqa: E402
+import train as train_script  # noqa: E402,F401  # side-effect: sets PYTORCH_CUDA_ALLOC_CONF before CUDA init
 from hagi.model import HAGI  # noqa: E402
 from hagi.train.config import config_from_dict  # noqa: E402
 from hagi.train.loop import _resolve_loss, autocast_ctx  # noqa: E402
@@ -25,7 +25,9 @@ torch.set_float32_matmul_precision("high")
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 
-bs = train_cfg["batch_size"]; sl = data_cfg["max_seq_len"]; ga = train_cfg["grad_accum_steps"]
+bs = train_cfg["batch_size"]
+sl = data_cfg["max_seq_len"]
+ga = train_cfg["grad_accum_steps"]
 chunk = model_cfg.ce_chunk_size
 model = HAGI(model_cfg).to(device).to(torch.bfloat16)
 model.cfg.gradient_checkpointing = bool(train_cfg.get("gradient_checkpointing", model_cfg.gradient_checkpointing))
@@ -35,7 +37,8 @@ cw = dict(train_cfg["composite_loss"])
 def bench(weights, n=10, warm=5):
     tm = weights is not None
     for _ in range(warm):
-        x = torch.randint(0, 49152, (bs, sl), device=device); y = torch.randint(0, 49152, (bs, sl), device=device)
+        x = torch.randint(0, 49152, (bs, sl), device=device)
+        y = torch.randint(0, 49152, (bs, sl), device=device)
         with autocast_ctx("manual_bf16", device):
             out = model(x, targets=y, training_mode=tm, weights=weights)
             if tm:
@@ -56,7 +59,8 @@ def bench(weights, n=10, warm=5):
     torch.cuda.synchronize()
     t0=time.perf_counter()
     for _ in range(n):
-        x = torch.randint(0, 49152, (bs, sl), device=device); y = torch.randint(0, 49152, (bs, sl), device=device)
+        x = torch.randint(0, 49152, (bs, sl), device=device)
+        y = torch.randint(0, 49152, (bs, sl), device=device)
         with autocast_ctx("manual_bf16", device):
             out = model(x, targets=y, training_mode=tm, weights=weights)
             if tm:

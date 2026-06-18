@@ -99,20 +99,24 @@ def _prime_caches() -> None:
         _STRUCT_CACHE[(dev, dt)] = _STRUCT_TRITON.to(device=dev, dtype=dt)
         _REVERSE_SIGNS_CACHE[(dev, dt)] = torch.tensor(
             [(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)],
-            dtype=dt, device=dev,
+            dtype=dt,
+            device=dev,
         )
         _BV_MASK_CACHE[(dev, dt)] = torch.tensor(
             [1.0 if GRADE[i] == 2 else 0.0 for i in range(BLADE_COUNT)],
-            dtype=dt, device=dev,
+            dtype=dt,
+            device=dev,
         )
         _OTHER_MASK_CACHE[(dev, dt)] = torch.tensor(
             [1.0 if GRADE[i] not in (0, 2) else 0.0 for i in range(BLADE_COUNT)],
-            dtype=dt, device=dev,
+            dtype=dt,
+            device=dev,
         )
         for grade in (0, 2):
             _GRADE_MASK_CACHE[(dev, dt, grade)] = torch.tensor(
                 [1.0 if GRADE[i] == grade else 0.0 for i in range(BLADE_COUNT)],
-                dtype=dt, device=dev,
+                dtype=dt,
+                device=dev,
             )
 
 

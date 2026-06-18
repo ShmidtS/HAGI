@@ -22,7 +22,22 @@ from typing import Any, TYPE_CHECKING, cast
 
 import torch
 
-from hagi.train.config import config_from_dict, config_to_dict
+import warnings
+
+# Benign, unactionable warnings on this RTX 3070 / Windows setup. Filtered
+# centrally here so scripts/train.py, scripts/profile_steps.py, and
+# hagi.train.cli all inherit the suppression (they all import this module
+# before any CUDA tensor is allocated).
+warnings.filterwarnings(
+    "ignore",
+    message="expandable_segments not supported",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Online softmax is disabled",
+)
+
+from hagi.train.config import config_from_dict, config_to_dict  # noqa: E402
 
 if TYPE_CHECKING:
     from hagi.model import HAGI

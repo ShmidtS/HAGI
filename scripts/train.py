@@ -9,11 +9,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
-# Expandable segments must be set before the CUDA caching allocator inits
-# (i.e. before any CUDA tensor is allocated). Without it, SequentialCycling's
-# per-dataset KV/registry allocations fragment the 8GB pool and
-# memory_reserved climbs past the 7.4GB budget (observed 8.09GB at step 5
-# vs a stable 7.15GB with this flag). No-op off-CUDA / already-set.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
@@ -636,7 +631,7 @@ def run_dry_profile(
             logits = output["logits"] if isinstance(output, dict) else output
         else:
             x, targets = batch
-            output = model(x, targets=targets)
+            output = model(x, targets=targets, training_mode=True)
             logits = output["logits"] if isinstance(output, dict) else output[0]
         loss = output.get("loss") if isinstance(output, dict) else None
         if loss is None and logits is not None:

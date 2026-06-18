@@ -167,7 +167,9 @@ class SequentialCyclingIterator:
         if self.num_workers > 0:
             kwargs["prefetch_factor"] = 4
             kwargs["persistent_workers"] = True
-        loader = DataLoader(dataset, **kwargs)  # pyright: ignore[reportOptionalCall, reportArgumentType]
+        loader = DataLoader(  # pyright: ignore[reportOptionalCall]
+            dataset, **kwargs  # pyright: ignore[reportArgumentType]
+        )
         self._loader_cache[cache_key] = loader
         return loader
 

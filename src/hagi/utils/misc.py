@@ -51,9 +51,7 @@ def _pad_shift_collate(
     return _as_long_tensor(x), _as_long_tensor(y)
 
 
-def _pad_batch(
-    arrays: list[Any], pad_value: int = -100
-) -> Any:
+def _pad_batch(arrays: list[Any], pad_value: int = -100) -> Any:
     """Right-pad a list of variable-length 1-D arrays to a dense 2-D tensor.
 
     Used by collate fns that receive already-split arrays (no shift here):
