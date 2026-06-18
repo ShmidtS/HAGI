@@ -127,6 +127,7 @@ class ChatSession:
                 use_cache=True,
                 compile_model=self.compile_model,
                 external_msa_registry=self._msa_session_registry,
+                use_static_cache=True,
             )
         new_ids = generated_ids[0, len(prompt_ids) :].tolist()
         text = self.tokenizer.decode(new_ids)
@@ -164,6 +165,7 @@ class ChatSession:
             use_cache=True,
             compile_model=self.compile_model,
             external_msa_registry=self._msa_session_registry,
+            use_static_cache=True,
         ):
             token_ids = token.tolist() if hasattr(token, "tolist") else token
             if isinstance(token_ids, int):

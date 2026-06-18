@@ -42,7 +42,7 @@ class MoESwiGLU(nn.Module):
         self.intermediate_size = cfg.moe_intermediate_size or (
             cfg.intermediate_size // cfg.num_experts
         )
-        self.router_temperature = getattr(cfg, "moe_router_temperature", 1.0)
+        self.router_temperature = cfg.moe_router_temperature
         self.alpha = getattr(cfg, "moe_alpha", 0.01)
 
         self.router = nn.Linear(cfg.hidden_size, cfg.num_experts, bias=False)

@@ -4,16 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any, cast
-
-import yaml
-
-
-def load_config(path: str | Path) -> dict[str, Any]:
-    """Load a YAML config file into a plain nested dictionary."""
-    with Path(path).open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
 
 
 def config_to_dict(cfg: Any) -> Any:

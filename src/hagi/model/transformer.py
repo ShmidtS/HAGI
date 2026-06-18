@@ -36,6 +36,7 @@ class TransformerConfig:
     moe_top_k: int = 2
     moe_intermediate_size: int | None = None
     moe_alpha: float = 0.01
+    moe_router_temperature: float = 1.0
 
     def __post_init__(self):
         assert (

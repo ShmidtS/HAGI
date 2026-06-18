@@ -47,6 +47,10 @@ class HAGIConfig:
     use_gdr: bool = True
     hdim_full: bool = True
     hdim_heads: int = 4
+    # Number of parallel domain rotors in HDIM (DomainRotor). Each rotor is a
+    # distinct cross-domain invariant-transfer schedule; more rotors = richer
+    # geometric alignment but more rotor-bookkeeping params. See hdim_full.py.
+    hdim_num_rotors: int = 4
     hdim_delay_steps: int = 1
     hrm: bool = True
     hrm_h_cycles: int = 1
@@ -86,6 +90,10 @@ class HAGIConfig:
     moe_top_k: int = 1
     moe_intermediate_size: int | None = None
     moe_alpha: float = 0.01
+    # Temperature dividing router logits before softmax/top-k. 1.0 = sharp
+    # (legacy); <1.0 flattens the expert distribution (more exploration/load
+    # balance), >1.0 sharpens (stickier routing). See moe.py MoESwiGLU.
+    moe_router_temperature: float = 1.0
     ce_chunk_size: int = 0
     use_fused_ce: bool = False
     ce_fused_chunk_size: int = 4096
@@ -105,6 +113,7 @@ class HAGIConfig:
         self.transformer.moe_top_k = self.moe_top_k
         self.transformer.moe_intermediate_size = self.moe_intermediate_size
         self.transformer.moe_alpha = self.moe_alpha
+        self.transformer.moe_router_temperature = self.moe_router_temperature
         if self.use_moe and self.transformer.moe_intermediate_size is None:
             self.transformer.moe_intermediate_size = (
                 self.transformer.intermediate_size // self.num_experts
@@ -143,6 +152,7 @@ class HAGI(nn.Module):
                     DelayedHDIM(
                         hidden_size=cfg.hidden_size,
                         heads=cfg.hdim_heads,
+                        num_rotors=cfg.hdim_num_rotors,
                         delay_steps=cfg.hdim_delay_steps,
                         grades=cfg.grades,
                     )
@@ -150,6 +160,7 @@ class HAGI(nn.Module):
                     else HDIMFull(
                         hidden_size=cfg.hidden_size,
                         heads=cfg.hdim_heads,
+                        num_rotors=cfg.hdim_num_rotors,
                         grades=cfg.grades,
                     )
                 )
@@ -437,7 +448,7 @@ class HAGI(nn.Module):
         gdr_type = "none"
         if self.gdr is not None:
             if training_mode and hasattr(self.gdr, "rotors"):
-                num_rotors = getattr(self.gdr.rotors, "num_rotors", 4)
+                num_rotors = self.gdr.rotors.num_rotors
                 tgt_idx = _pick_rotor_idx(
                     self.cfg.rotor_seed,
                     self._step,

@@ -15,20 +15,6 @@ Two paths:
 from __future__ import annotations
 
 import argparse
-import math
-
-
-def geomean(values: list[float]) -> float:
-    values = [max(v, 1e-9) for v in values]
-    return math.exp(sum(math.log(v) for v in values) / len(values))
-
-
-def hagi_iq(reasoning_scores: dict[str, float], model_size_gb: float) -> float:
-    return geomean(list(reasoning_scores.values())) / max(model_size_gb, 1e-9)
-
-
-def hagi_ipp(reasoning_scores: dict[str, float], active_params_b: float) -> float:
-    return geomean(list(reasoning_scores.values())) / max(active_params_b, 1e-9)
 
 
 def run_lm_eval(ckpt: str, tokenizer: str, benchmarks: list[str], device: str):

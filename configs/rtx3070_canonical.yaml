@@ -20,12 +20,12 @@ data:
   # Variable-length training: each sample draws a random length in
   # [min_seq_len, max_seq_len]. Collate fn pads with ignore_index (-100)
   # so padded positions are loss-free. Set = max_seq_len for fixed-length.
-  # Raised 16->256: min=16 drew many near-empty windows (few loss-bearing
-  # tokens/step, slow loss drop). 256 raises the average window length so
-  # most positions carry gradient; padding stays loss-free (-100), so VRAM
-  # is unchanged (batch x seq fixed). Faster, denser signal per step.
+  # Fixed at 1024 (= max_seq_len): every position carries gradient (densest
+  # signal/step), and the single T kills the compile recompile-spikes that
+  # variable-length (256->1024) triggers via Dynamo shape guards. VRAM is
+  # unchanged (batch x seq fixed); only window diversity is sacrificed.
   # Read in: train.py:431-432
-  min_seq_len: 256
+  min_seq_len: 1024
 
   # Data mix weights (source name → proportion). Must sum to ~1.0.
   # Used for manifest generation in download_data.py.
@@ -229,6 +229,14 @@ model:
   # Read in: HAGIConfig.hdim_heads (hagi.py:49), hagi.py:146,150
   hdim_heads: 6
 
+  # Number of parallel domain rotors in HDIM (DomainRotor). Each rotor is a
+  # distinct cross-domain invariant-transfer schedule picked per step via
+  # _pick_rotor_idx. More rotors = richer geometric alignment across domains
+  # but more rotor params. Default 4 reproduces legacy behavior.
+  # Read in: HAGIConfig.hdim_num_rotors (hagi.py), hagi.py rotor schedule,
+  #          hdim_full.py DomainRotor
+  hdim_num_rotors: 4
+
   # HDIM delay steps for DelayedHDIM (DTP). >1 enables delayed aggregation.
   # 1 = standard HDIMFull (no delay).
   # Read in: HAGIConfig.hdim_delay_steps (hagi.py:50), hagi.py:143,149
@@ -277,9 +285,15 @@ model:
   hrm_h_cycles: 1
 
   # Low-level cycles: z_L updates per h_cycle. Effective reasoning
-  # iterations = hrm_h_cycles × hrm_l_cycles.
+  # iterations = hrm_h_cycles × hrm_l_cycles. Raised 1->2: a single
+  # reasoning pass under-trains the recurrent core (loss plateaus ~5.0,
+  # the reasoning blocks are shared weights reused once). Two l_cycles
+  # double the recurrence depth — the z_L state refines across passes,
+  # giving the reasoning stage gradient signal on both passes instead of
+  # one. ~1.5x reasoning-stage FLOPS (perception/expression unchanged);
+  # activation memory rises one reasoning pass worth — verify VRAM <8GB.
   # Read in: HAGIConfig.hrm_l_cycles (hagi.py:53), hagi.py:174
-  hrm_l_cycles: 1
+  hrm_l_cycles: 2
 
   # --- MSA (Memory Sparse Attention) ---
 
@@ -370,6 +384,13 @@ model:
   # MoE load-balance aux loss coefficient.
   # Read in: HAGIConfig.moe_alpha (hagi.py:88), hagi.py:107, moe.py:46
   moe_alpha: 0.01
+
+  # Router temperature: divides router logits before softmax/top-k. 1.0 = sharp
+  # (legacy default); <1.0 flattens the expert distribution (more exploration and
+  # load balance), >1.0 sharpens (stickier expert routing).
+  # Read in: HAGIConfig.moe_router_temperature (hagi.py), transformer.py,
+  #          moe.py MoESwiGLU.router_temperature
+  moe_router_temperature: 1.0
 
   # --- NARS (Non-Axiomatic Reasoning System) ---
 

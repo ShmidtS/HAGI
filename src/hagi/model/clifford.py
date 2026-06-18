@@ -81,8 +81,6 @@ _STRUCT_TRITON = _STRUCT.permute(2, 0, 1).contiguous()
 _STRUCT_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _GRADE_MASK_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
 _REVERSE_SIGNS_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
-_BV_MASK_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
-_OTHER_MASK_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
 
 def _prime_caches() -> None:
@@ -99,16 +97,6 @@ def _prime_caches() -> None:
         _STRUCT_CACHE[(dev, dt)] = _STRUCT_TRITON.to(device=dev, dtype=dt)
         _REVERSE_SIGNS_CACHE[(dev, dt)] = torch.tensor(
             [(-1.0) ** (GRADE[i] * (GRADE[i] - 1) // 2) for i in range(BLADE_COUNT)],
-            dtype=dt,
-            device=dev,
-        )
-        _BV_MASK_CACHE[(dev, dt)] = torch.tensor(
-            [1.0 if GRADE[i] == 2 else 0.0 for i in range(BLADE_COUNT)],
-            dtype=dt,
-            device=dev,
-        )
-        _OTHER_MASK_CACHE[(dev, dt)] = torch.tensor(
-            [1.0 if GRADE[i] not in (0, 2) else 0.0 for i in range(BLADE_COUNT)],
             dtype=dt,
             device=dev,
         )
@@ -154,28 +142,6 @@ def _get_reverse_signs(device: torch.device, dtype: torch.dtype) -> torch.Tensor
     return _REVERSE_SIGNS_CACHE[key]
 
 
-def _get_bv_mask(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    key = (device, dtype)
-    if key not in _BV_MASK_CACHE:
-        _BV_MASK_CACHE[key] = torch.tensor(
-            [1.0 if GRADE[i] == 2 else 0.0 for i in range(BLADE_COUNT)],
-            dtype=dtype,
-            device=device,
-        )
-    return _BV_MASK_CACHE[key]
-
-
-def _get_other_mask(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    key = (device, dtype)
-    if key not in _OTHER_MASK_CACHE:
-        _OTHER_MASK_CACHE[key] = torch.tensor(
-            [1.0 if GRADE[i] not in (0, 2) else 0.0 for i in range(BLADE_COUNT)],
-            dtype=dtype,
-            device=device,
-        )
-    return _OTHER_MASK_CACHE[key]
-
-
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Geometric product of two batched multivectors.
 
@@ -211,70 +177,3 @@ def reverse(mv: torch.Tensor) -> torch.Tensor:
     """Clifford reverse: sign (-1)^(k(k-1)/2) per grade k. Returns [..., 8]."""
     signs = _get_reverse_signs(mv.device, mv.dtype)
     return mv * signs
-
-
-def wedge_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Exterior (antisymmetric) product: (xy - yx) / 2 restricted to grade 2.
-
-    For pure vector inputs returns the bivector ab = (xy - yx) / 2 (e.g.
-    e1 ∧ e2 = e12). The result is always grade-2 regardless of input
-    grades (the grade-rising part for scalars or higher-grade inputs is
-    degenerate in Cl(3,0,0), so we project to bivector consistently).
-    """
-    assert x.shape[-1] == BLADE_COUNT
-    assert y.shape[-1] == BLADE_COUNT
-    diff = geometric_product(x, y) - geometric_product(y, x)
-    return 0.5 * grade_projection(diff, 2)
-
-
-def inner_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Inner (symmetric) product: scalar part of (xy + yx) / 2.
-
-    Returns a scalar (the grade-0 component). For pure vector inputs this
-    is the Euclidean inner product. Higher-grade inputs return the scalar
-    part of the symmetric product.
-    """
-    assert x.shape[-1] == BLADE_COUNT
-    assert y.shape[-1] == BLADE_COUNT
-    sym = geometric_product(x, y) + geometric_product(y, x)
-    return 0.5 * grade_projection(sym, 0)[..., 0]
-
-
-def commutator(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Lie commutator [x, y] = (xy - yx) / 2. Bivector-valued for vectors."""
-    return 0.5 * (geometric_product(x, y) - geometric_product(y, x))
-
-
-def anticommutator(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Jordan anticommutator {x, y} = (xy + yx) / 2."""
-    return 0.5 * (geometric_product(x, y) + geometric_product(y, x))
-
-
-def bivector_exp(mv: torch.Tensor) -> torch.Tensor:
-    """Exponentiate a bivector: R = exp(-B/2) where B is the grade-2 part of mv.
-
-    Closed form: in Cl(3,0,0) a bivector B satisfies B^2 = -|B|^2 (negative
-    scalar), so exp(-B/2) = cos(theta/2) - (B / theta) * sin(theta/2)
-    with theta = |B|. Grade-0 and grade-2 components of the result
-    contribute; the input's other grades pass through unchanged.
-
-    For |B| -> 0, falls back to first-order Taylor: 1 - B/2.
-    """
-    assert mv.shape[-1] == BLADE_COUNT
-    bv_mask = _get_bv_mask(mv.device, mv.dtype)
-    bivector = mv * bv_mask
-    b_sq = -geometric_product(bivector, bivector)[..., :1]
-    b_sq = b_sq.clamp_min(0.0)
-    theta = torch.sqrt(b_sq.squeeze(-1))
-    half = 0.5 * theta
-    cos_half = torch.cos(half)
-    sin_half = torch.sin(half)
-    safe_theta = torch.sqrt(b_sq.squeeze(-1) + 1e-6)
-    coeff = -(sin_half / safe_theta)
-    rotor_bv = coeff.unsqueeze(-1) * bivector
-    out = torch.zeros_like(mv)
-    out[..., :1] = cos_half.unsqueeze(-1)
-    out = out + rotor_bv
-    other_mask = _get_other_mask(mv.device, mv.dtype)
-    out = out + mv * other_mask
-    return out

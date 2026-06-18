@@ -4,7 +4,6 @@ import argparse
 import gc
 import math
 import os
-import warnings
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -109,121 +108,6 @@ def print_vram_usage() -> None:
     )
 
 
-def synthetic_batcher(
-    vocab_size: int,
-    batch_size: int,
-    seq_len: int,
-    device: str,
-    generator: torch.Generator,
-):
-    def get_batch() -> tuple[torch.Tensor, torch.Tensor]:
-        x = torch.randint(
-            vocab_size, (batch_size, seq_len), generator=generator, device=device
-        )
-        y = torch.randint(
-            vocab_size, (batch_size, seq_len), generator=generator, device=device
-        )
-        return x, y
-
-    return get_batch
-
-
-def memmap_batcher(
-    path: Path,
-    batch_size: int,
-    seq_len: int,
-    device: str,
-    dtype: str,
-    generator: torch.Generator,
-):
-    dataset = MemmapDataset(path, block_size=seq_len, dtype=dtype, preload=True)
-    if len(dataset) <= 0:
-        raise ValueError(f"memmap dataset is too small for seq_len={seq_len}: {path}")
-
-    def get_batch() -> tuple[torch.Tensor, torch.Tensor]:
-        indices = torch.randint(
-            len(dataset), (batch_size,), generator=generator
-        ).tolist()
-        xs, ys = zip(*(dataset[index] for index in indices), strict=True)
-        x = torch.from_numpy(np.stack(xs)).to(
-            device=device, dtype=torch.long, non_blocking=device.startswith("cuda")
-        )
-        y = torch.from_numpy(np.stack(ys)).to(
-            device=device, dtype=torch.long, non_blocking=device.startswith("cuda")
-        )
-        return x, y
-
-    return get_batch
-
-
-def build_basic_batcher(
-    cfg: dict[str, Any],
-    device: str,
-    train_path: Path | None,
-    data_dir: Path,
-    seq_len: int | None,
-):
-    model_cfg = cfg.get("model", {})
-    train_cfg = cfg.get("training", {})
-    data_cfg = cfg.get("data", {})
-    vocab_size = int(model_cfg.get("vocab_size", 49152))
-    batch_size = int(train_cfg.get("batch_size", 1))
-    seq_len = int(
-        seq_len
-        if seq_len is not None
-        else data_cfg.get(
-            "max_seq_len", model_cfg.get("transformer", {}).get("max_seq_len", 2048)
-        )
-    )
-    seed = int(train_cfg.get("seed", 42))
-
-    if train_path is None:
-        configured_path = data_cfg.get("train_path") or data_cfg.get("path")
-        train_path = Path(configured_path) if configured_path else None
-    if train_path is None and data_dir.exists():
-        bin_files = sorted(data_dir.glob("*.bin"))
-        train_path = bin_files[0] if bin_files else None
-    if train_path is not None and train_path.exists():
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(seed)
-        return memmap_batcher(
-            train_path,
-            batch_size,
-            seq_len,
-            device,
-            data_cfg.get("dtype", "uint16"),
-            generator,
-        )
-    warnings.warn(
-        "no memmap .bin data found; falling back to synthetic data",
-        RuntimeWarning,
-        stacklevel=2,
-    )
-    generator = torch.Generator(device=device if device.startswith("cuda") else "cpu")
-    generator.manual_seed(seed)
-    return synthetic_batcher(vocab_size, batch_size, seq_len, device, generator)
-
-
-def load_resume(model: HAGI, resume: Path, device: str) -> int:
-    if resume.is_dir():
-        model_path = resume / "model.pt"
-        if model_path.exists():
-            model.load_state_dict(
-                torch.load(model_path, map_location=device, weights_only=True)
-            )
-        meta_path = resume / "meta.pt"
-        if meta_path.exists():
-            meta = torch.load(meta_path, map_location=device, weights_only=True)
-            return int(meta.get("step", 0))
-        return 0
-    state = torch.load(resume, map_location=device, weights_only=True)
-    if "model" in state:
-        model.load_state_dict(state["model"])
-        return int(state.get("step", 0))
-    model.load_state_dict(state)
-    return 0
-
-
 def maybe_disable_gradient_checkpointing(
     model: HAGI,
     device: str,
@@ -294,22 +178,6 @@ def maybe_disable_gradient_checkpointing(
     finally:
         del test_model
         torch.cuda.empty_cache()
-
-
-def maybe_compile(model: HAGI, device: str) -> Any:
-    if (
-        hasattr(model.cfg, "compile")
-        and model.cfg.compile
-        and device.startswith("cuda")
-    ):
-        # MSVC cl.exe on a Russian Windows emits cp866; inductor's cp1251/utf-8
-        # decode of `cl /help` aborts torch.compile before any kernel builds.
-        from hagi.train.loop import _patch_inductor_decoder
-
-        _patch_inductor_decoder()
-        print("torch.compile enabled (mode=default)")
-        return torch.compile(model, mode="default")
-    return model
 
 
 def to_device(batch: Any, device: str, non_blocking: bool) -> Any:
