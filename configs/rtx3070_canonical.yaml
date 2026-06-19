@@ -454,7 +454,7 @@ model:
   # Gradient checkpointing for transformer blocks. Saves activation memory
   # at cost of recomputation in backward.
   # Read in: HAGIConfig.gradient_checkpointing (hagi.py:56), hagi.py:376
-  gradient_checkpointing: false
+  gradient_checkpointing: true
 
   # torch.compile the whole model. When true, loop.py wraps model in
   # torch.compile for kernel fusion. Checkpoint keys stay clean.
@@ -538,7 +538,7 @@ training:
   # Micro-batch size (per GPU step before gradient accumulation).
   # Effective batch = batch_size × grad_accum_steps = 8 × 4 = 32.
   # Read in: train.py:433, loop.py:340
-  batch_size: 8
+  batch_size: 16
 
   # Checkpoint save interval (steps).
   # Read in: loop.py:346 (build_loop_config)
@@ -607,19 +607,19 @@ training:
 
   # Gradient accumulation steps. Effective batch = batch_size × grad_accum.
   # Read in: loop.py:340 (build_loop_config), loop.py:547
-  grad_accum_steps: 5
+  grad_accum_steps: 6
 
   # Global gradient clipping (max L2 norm). Applied before optimizer step.
   # Lowered 1.0->0.8: tighter clip caps the grad_norm excursion (1.51 at step
   # 1275) that signalled onset of divergence; 0.8 is still loose enough not to
   # slow a healthy 0.5-1.0 grad_norm regime but kills the tail spikes.
   # Read in: loop.py:341 (build_loop_config), train.py (clip_grad_norm_)
-  grad_clip: 0.8
+  grad_clip: 1.0
 
   # Gradient checkpointing in training loop (separate from model setting).
   # When true, overrides model.gradient_checkpointing at runtime.
   # Read in: loop.py:343 (build_loop_config), loop.py:410
-  gradient_checkpointing: false
+  gradient_checkpointing: true
 
   # Per-blade gradient norm clip for GDR grade-decomposed weights.
   # 0 disables. Clips each 8-blade multivector view independently.
@@ -666,7 +666,7 @@ training:
   # Newton-Schulz iteration count for zero-power orthogonalization.
   # More = better approximation, more compute.
   # Read in: optim.py:490 (cfg.get("muon_ns_steps", 5))
-  muon_ns_steps: 5
+  muon_ns_steps: 10
 
   # Weight decay (decoupled, AdamW style). Applied to ≥2D non-norm params.
   # Read in: optim.py:479,538 (cfg.get("weight_decay", 0.1))
@@ -762,7 +762,7 @@ training:
   # can switch on earlier and train the HDIM features longer across the 91k-
   # step budget without the linear-ramp instability that justified 2000.
   # Read in: loop.py:364 (build_loop_config), loop.py:527
-  aux_warmup_steps: 1500
+  aux_warmup_steps: 1000
 
   # Warmup steps for L_iso (isomorphic invariant loss). Lowered 3000->2000:
   # aligns with the L_aux ramp so the HDIM domain-invariant alignment (the
@@ -770,11 +770,11 @@ training:
   # cosine ramp eases w_iso in, avoiding the super-exponential L_iso blowup
   # the old linear 3000-step ramp was guarding against.
   # Read in: loop.py:368 (build_loop_config), loop.py:529
-  iso_warmup_steps: 2000
+  iso_warmup_steps: 1000
 
   # Warmup steps for L_moe (MoE load-balance loss).
   # Read in: loop.py:370 (build_loop_config), loop.py:533
-  moe_warmup_steps: 2000
+  moe_warmup_steps: 1000
 
   # --- VRAM probe ---
 
