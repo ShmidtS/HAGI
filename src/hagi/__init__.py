@@ -17,3 +17,11 @@ _warnings.filterwarnings(
     "ignore",
     message=r"Online softmax is disabled",
 )
+# Inductor emits a multiline "Online softmax is disabled on the fly since
+# Inductor decides to split the reduction" warning from lowering.py when it
+# splits a softmax reduction (happens on the MSA attention path on this GPU).
+# Same benign root cause as the one above; filter the inductor-source variant.
+_warnings.filterwarnings(
+    "ignore",
+    message=r"split the reduction",
+)

@@ -521,8 +521,17 @@ class SparseRouter(nn.Module):
         )
         one_hot.scatter_(1, flat_idx, 1.0)
         fraction = one_hot.mean(dim=0).detach()  # [N], detached counter
-        return alpha * float(n) * (fraction * mean_prob).sum()
+        # Normalize by top_k (NOT n): the registry slot count n is VARIADIC —
+        # memory-aware HRM grows the registry every l_cycle (N -> 2N), so the
+        # Shazeer `alpha * N * sum(f_s * P_s)` term would scale with n and the
+        # loss would double across cycles / grow as slots accumulate, dragging
+        # grad_norm up (logged L_msa_lb 8.5 -> 9.6 over steps 25-75). top_k is
+        # fixed, so the loss minimum stays alpha*top_k at uniform use regardless
+        # of how many slots are registered. The gradient signal (push toward
+        # uniform slot use) is unchanged; only the spurious scale drift is gone.
+        return alpha * float(top_k_indices.size(-1)) * (fraction * mean_prob).sum()
 
+    @torch.compiler.disable
     def route_top_k(
         self,
         query_hidden: torch.Tensor,
@@ -547,6 +556,15 @@ class SparseRouter(nn.Module):
             scores:    same shape as top_k_ids, raw dot-product scores.
             weights:   same shape, softmax-normalised weights.
             lb_loss:   scalar load-balance loss when compute_lb, else None.
+
+        ``@torch.compiler.disable``: the routing keys tensor is [N, key_dim]
+        with VARIADIC N — memory-aware HRM grows the registry every l_cycle
+        (0 -> N -> 2N), so Dynamo would specialize a guard on N and hit
+        recompile_limit(8) -> eager fallback (the recompile storm logged as
+        `_fetch_kv_from_slots` / route matmul size mismatch). The matmul over a
+        variable-N key set recompiles regardless, so eager here is strictly
+        cheaper than the storm. ``query_proj`` (the only trained weight) still
+        gets its gradient — disable stops graph capture, not autograd.
         """
         if len(registry) == 0:
             raise RuntimeError("Cannot route: registry is empty")
@@ -841,6 +859,7 @@ class MSAAttention(nn.Module):
             error_msgs,
         )
 
+    @torch.compiler.disable
     def _fetch_kv_from_slots(
         self,
         slot_ids: torch.Tensor,
@@ -849,6 +868,16 @@ class MSAAttention(nn.Module):
         """Fetch K, V, and offsets for the selected slots.
 
         Deduplicates unique slot IDs to avoid O(B*T*top_k) redundant copies.
+
+        ``@torch.compiler.disable``: torch.unique returns a VARIADIC-size tensor
+        (unique slot count depends on the registry contents), and memory-aware
+        HRM grows the registry every l_cycle, so the unique-count changes
+        between forwards (0 -> N -> 2N across cycles). Dynamo specializes a
+        guard on that size and hits recompile_limit(8) -> eager fallback (wasted
+        compile, 68% gpu_util vs 90%). Disabling makes Dynamo treat this as an
+        opaque Python side-effect (the SlotRegistry methods it calls are already
+        disabled); the heavy tensor ops (matmul/softmax attention) stay in the
+        compiled ``forward``.
         """
         B = slot_ids.size(0)
         top_k = slot_ids.size(-1)
