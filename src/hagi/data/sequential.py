@@ -200,3 +200,28 @@ class SequentialCyclingIterator:
         print(
             f"[SequentialCycling] {name} (cycle {self.current_cycle + 1}/{self.cycles_per_dataset})"
         )
+
+    def state_dict(self) -> dict[str, int]:
+        """Persist the current dataset/cycle position for resume."""
+        return {"current_idx": self.current_idx, "current_cycle": self.current_cycle}
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore the dataset/cycle position.
+
+        ``self._current_iter`` is set to None so ``__next__`` re-advances from
+        the restored position (rebuilds the loader for the correct dataset/cycle
+        via ``_advance``).
+        """
+        if not self.entries:
+            return
+        self.current_idx = int(state.get("current_idx", 0))
+        self.current_idx = min(self.current_idx, len(self.entries) - 1)
+        self.current_cycle = int(state.get("current_cycle", 0))
+        self._current_iter = None
+        name = self.entries[self.current_idx].get(
+            "name", f"dataset_{self.current_idx}"
+        )
+        print(
+            f"[SequentialCycling] restored to {name} "
+            f"(cycle {self.current_cycle + 1}/{self.cycles_per_dataset})"
+        )

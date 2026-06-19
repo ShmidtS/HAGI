@@ -422,6 +422,7 @@ def train(
     use_prefix_lm: bool = False,
     to_device_fn: Callable[..., Any] | None = None,
     apply_prefix_mask_fn: Callable[..., Any] | None = None,
+    sequential_state_fn: Callable[[], dict[str, int] | None] | None = None,
 ) -> float:
     """Run the canonical training loop. Returns the final training loss.
 
@@ -433,6 +434,10 @@ def train(
             copy of ``model`` if ``cfg.enable_ema`` and None passed.
         to_device_fn / apply_prefix_mask_fn: optional hooks for the batched
             PrefixLM path; unused when ``batched=False``.
+        sequential_state_fn: optional zero-arg callable returning the
+            SequentialCyclingIterator position (current_idx/current_cycle) to
+            persist into checkpoints; None disables persistence. The caller
+            (scripts/train.py) passes a closure over its dataloader.
     """
     _enable_ampere_flags(device, cfg.tf32)
     model.to(device)
@@ -818,6 +823,9 @@ def train(
                 cfg.ckpt_dir,
                 ema_state=(model_ema.state_dict() if model_ema is not None else None),
                 on_checkpoint=on_checkpoint,
+                sequential_state=(
+                    sequential_state_fn() if sequential_state_fn else None
+                ),
             )
 
     if session_steps is not None and on_checkpoint is not None:
@@ -828,6 +836,9 @@ def train(
             cfg.ckpt_dir,
             ema_state=(model_ema.state_dict() if model_ema is not None else None),
             on_checkpoint=on_checkpoint,
+            sequential_state=(
+                sequential_state_fn() if sequential_state_fn else None
+            ),
         )
     elif session_steps is not None:
         save_checkpoint(
@@ -836,6 +847,9 @@ def train(
             end,
             cfg.ckpt_dir,
             ema_state=(model_ema.state_dict() if model_ema is not None else None),
+            sequential_state=(
+                sequential_state_fn() if sequential_state_fn else None
+            ),
         )
 
     if total_tokens_seen > 0:
@@ -870,6 +884,7 @@ def save_checkpoint(
     ckpt_dir: str,
     ema_state: dict[str, Any] | None = None,
     on_checkpoint: Callable[[str], None] | None = None,
+    sequential_state: dict[str, int] | None = None,
 ):
     """Write a checkpoint with config, optimizer, and optional EMA state."""
     out = Path(ckpt_dir)
@@ -881,6 +896,8 @@ def save_checkpoint(
         "config": config_to_dict(model.cfg),
         "optimizer": optimizer.state_dict(),
     }
+    if sequential_state is not None:
+        payload["sequential_state"] = sequential_state
     if ema_state is not None:
         payload["model_ema"] = {
             name: value.detach().cpu() for name, value in ema_state.items()
@@ -899,12 +916,59 @@ def save_checkpoint(
         on_checkpoint(str(path))
 
 
+def _resume_load_state_dict(
+    model: HAGI,
+    ckpt_state: dict[str, Any],
+    new_cfg: Any,
+    old_cfg: Any,
+) -> None:
+    """Load ``ckpt_state`` into ``model`` with ``strict=False`` and log the gaps.
+
+    Used on resume when the caller overrides the architecture via
+    ``model_cfg_override``: shared params load from the ckpt, new-architecture
+    params fresh-init, dropped ckpt params are skipped. The dangerous case is
+    params present in both with different shapes (e.g. hrm weights when
+    ``hrm_l_cycles`` changed): ``strict=False`` skips them silently, so they are
+    surfaced as a WARNING list so the user knows which params fresh-init.
+    """
+    model_state = model.state_dict()
+    # Detect shape mismatches BEFORE load: keys present in both with different
+    # shapes are silently skipped by strict=False, so surface them explicitly.
+    shape_mismatches = [
+        k
+        for k in ckpt_state
+        if k in model_state
+        and hasattr(ckpt_state[k], "shape")
+        and ckpt_state[k].shape != model_state[k].shape
+    ]
+    missing_keys, unexpected_keys = model.load_state_dict(ckpt_state, strict=False)
+    print(
+        f"[resume] loaded weights strict=False "
+        f"(override cfg vs ckpt config: "
+        f"{type(new_cfg).__name__} over {type(old_cfg).__name__ if old_cfg is not None else 'n/a'})"
+    )
+    print(
+        f"[resume] missing keys (fresh-init): {len(missing_keys)}, "
+        f"unexpected keys (dropped ckpt params): {len(unexpected_keys)}, "
+        f"shape-mismatch keys (skipped, fresh-init): {len(shape_mismatches)}"
+    )
+    if shape_mismatches:
+        preview = ", ".join(shape_mismatches[:20])
+        more = (
+            f" ... (+{len(shape_mismatches) - 20} more)"
+            if len(shape_mismatches) > 20
+            else ""
+        )
+        print(f"[resume] WARNING shape-mismatch keys: {preview}{more}")
+
+
 def load_checkpoint(
     path: str,
     device: str = "cpu",
     optimizer=None,
     load_ema: bool = False,
     use_ema: bool = False,
+    model_cfg_override: Any = None,
 ) -> tuple[HAGI, int, dict[str, Any] | None]:
     """Rebuild a HAGI model from a checkpoint.
 
@@ -912,6 +976,18 @@ def load_checkpoint(
     pinning the full checkpoint — model + optimizer + EMA — in VRAM during
     resume.  ``model.to(device)`` then moves only the model weights to the
     target device.
+
+    Args:
+        model_cfg_override: when not None, build the model from this config
+            instead of the (possibly stale) one baked into the checkpoint, and
+            load the saved weights with ``strict=False`` so architectural
+            changes (hrm_l_cycles, use_quality_head, hdim_heads, ...) carry
+            forward — shared params load from the ckpt, new/dropped params
+            fresh-init or are skipped. A shape-mismatch WARNING list is printed
+            for params present in both whose shapes differ (silently skipped by
+            ``strict=False`` but the dangerous case: e.g. hrm weights when
+            hrm_l_cycles changed). When None (chat.py / eval callers), keep the
+            exact current behavior: build from the ckpt config, ``strict=True``.
 
     Returns:
         (model, step, ema_state | None)
@@ -926,8 +1002,12 @@ def load_checkpoint(
             if (p / "meta.pt").exists()
             else {}
         )
-        cfg = config_from_dict(meta["config"])
-        model = HAGI(cfg)
+        if model_cfg_override is not None:
+            cfg = model_cfg_override
+            model = HAGI(cfg)
+        else:
+            cfg = config_from_dict(meta["config"])
+            model = HAGI(cfg)
         state_dict = torch.load(p / "model.pt", map_location="cpu", weights_only=True)
         if any(k.startswith("hrm._orig_mod.") for k in state_dict):
             state_dict = {
@@ -935,7 +1015,10 @@ def load_checkpoint(
             }
         for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
             state_dict.pop(key, None)
-        model.load_state_dict(state_dict)
+        if model_cfg_override is not None:
+            _resume_load_state_dict(model, state_dict, cfg, meta.get("config"))
+        else:
+            model.load_state_dict(state_dict)
         del state_dict
         model.to(device)
         ema_state = None
@@ -956,7 +1039,10 @@ def load_checkpoint(
     state = torch.load(path, map_location="cpu", weights_only=True)
     for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
         state.pop(key, None)
-    cfg = config_from_dict(state["config"])
+    if model_cfg_override is not None:
+        cfg = model_cfg_override
+    else:
+        cfg = config_from_dict(state["config"])
     model = HAGI(cfg)
 
     if state.get("_inference_opt"):
@@ -971,7 +1057,10 @@ def load_checkpoint(
         repack_qkv_for_contiguous(model)
         precompute_rope_tables(model, max_seq_len)
 
-    model.load_state_dict(state["model"])
+    if model_cfg_override is not None:
+        _resume_load_state_dict(model, state["model"], cfg, state.get("config"))
+    else:
+        model.load_state_dict(state["model"])
     model.to(device)
 
     if optimizer is not None and "optimizer" in state:

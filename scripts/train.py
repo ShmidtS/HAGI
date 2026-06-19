@@ -538,12 +538,31 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
 
     # Resolve resume BEFORE model construction so the checkpoint's config wins.
     start_step = 0
+    seq_state: dict[str, int] | None = None
     if args.resume is not None and args.resume.exists():
         from hagi.train.loop import load_checkpoint
 
-        model, start_step, _ = load_checkpoint(str(args.resume), args.device)
-        model_cfg = model.cfg
+        # model_cfg was built from YAML at line 533 (config_from_dict(cfg["model"])).
+        # Pass it as override so the resumed model uses the CURRENT architecture,
+        # not the stale config baked into the checkpoint. Weights load strict=False
+        # so architectural changes (hrm_l_cycles, use_quality_head, hdim_heads, ...)
+        # carry forward: shared params load from the ckpt, new params fresh-init.
+        model, start_step, _ = load_checkpoint(
+            str(args.resume), args.device, model_cfg_override=model_cfg
+        )
         print(f"resumed from {args.resume} at step {start_step}")
+        # Read the sequential-cycling iterator position separately (load_checkpoint
+        # already freed its state dict). Restored into the dataloader below.
+        if args.resume.is_dir():
+            meta_pt = args.resume / "meta.pt"
+            if meta_pt.exists():
+                _meta = torch.load(meta_pt, map_location="cpu", weights_only=True)
+                seq_state = _meta.get("sequential_state")
+                del _meta
+        else:
+            _state = torch.load(args.resume, map_location="cpu", weights_only=True)
+            seq_state = _state.get("sequential_state")
+            del _state
     else:
         model = HAGI(model_cfg).to(args.device)
 
@@ -600,6 +619,14 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         sequential_cycles=sequential_cycles,
         steps_per_cycle=steps_per_cycle,
     )
+
+    # Restore the sequential-cycling iterator position so resume continues from
+    # the saved dataset/cycle instead of resetting to dataset 0 / cycle 0.
+    if (
+        seq_state is not None
+        and isinstance(dataloader, SequentialCyclingIterator)
+    ):
+        dataloader.load_state_dict(seq_state)
 
     print_model_summary(model, model_cfg, args.device)
     if args.dry_run:
@@ -736,6 +763,11 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         use_prefix_lm=use_prefix_lm,
         to_device_fn=to_device,
         apply_prefix_mask_fn=apply_prefix_mask,
+        sequential_state_fn=(
+            (lambda: dataloader.state_dict())
+            if isinstance(dataloader, SequentialCyclingIterator)
+            else None
+        ),
     )
 
 
