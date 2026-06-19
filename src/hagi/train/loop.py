@@ -202,15 +202,19 @@ def update_ema(
                 torch._foreach_mul_(cast(list[torch.Tensor], ema_params), decay)
                 torch._foreach_add_(
                     cast(list[torch.Tensor], ema_params),
-                    [p.detach() for p in params],
+                    [p.detach().to(ema_params[0].dtype) for p in params],
                     alpha=1.0 - decay,
                 )
             else:
                 for ema_param, param in zip(ema_params, params, strict=True):
-                    ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
+                    ema_param.mul_(decay).add_(
+                        param.detach().to(ema_param.dtype), alpha=1.0 - decay
+                    )
         else:
             for ema_param, param in zip(ema_params, params, strict=True):
-                ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
+                ema_param.mul_(decay).add_(
+                    param.detach().to(ema_param.dtype), alpha=1.0 - decay
+                )
         for ema_buffer, buffer in zip(
             model_ema.buffers(), model.buffers(), strict=True
         ):
@@ -474,11 +478,9 @@ def train(
     if manual_lowprec:
         cast_dtype = torch.float16 if precision == "manual_fp16" else torch.bfloat16
         model.to(cast_dtype)
-        if model_ema is not None:
-            model_ema.to(cast_dtype)
         print(
             f"Using manual {precision}: model cast to {cast_dtype}, no autocast "
-            "(fp32 master weights lost)"
+            "(fp32 master weights lost; EMA shadow kept in fp32)"
         )
 
         # Realign optimizer moment buffers to the (now low-precision) param
@@ -519,6 +521,7 @@ def train(
         for param in model_ema.parameters():
             param.requires_grad_(False)
     if model_ema is not None:
+        model_ema = model_ema.float()
         model_ema.eval()
         for param in model_ema.parameters():
             param.requires_grad_(False)

@@ -1,6 +1,14 @@
 # =============================================================================
-# HAGI Configuration — rtx3070_canonical
-# Target: RTX 3070 (8GB VRAM), ~119M params, ~262M training tokens
+# HAGI Configuration — rtx3070_canonical (compact, reasoning-deep)
+# Target: RTX 3070 (8GB VRAM), ~59.5M params, head_dim 64 preserved.
+# Optimized analytically (exact-param count + calibrated VRAM model + Pareto
+# over reasoning-depth / FLOPS / VRAM). hidden 512 (head_dim 64 = 512/8, same
+# as the old 768/12) cuts activations + optimizer state ~60% -> VRAM est
+# ~2.2-3.7GB (vs 5.88 at 119M). Layers 2/7/2: reasoning deepened 4->7
+# (HAGI's novelty is the recurrent reasoning core; 7x hrm_l_cycles=2 = 14
+# reasoning passes/step vs 8 at the old 4x2), perception/expression trimmed
+# 4->2. FLOPS ~0.5x canonical -> ~2x faster steps. Train from scratch
+# (state_dict incompatible with the prior 119M step-26500.pt).
 # =============================================================================
 name: rtx3070_canonical
 
@@ -177,23 +185,33 @@ model:
   # --- Architecture: layer counts ---
 
   # Perception stage: transformer blocks for primary input processing.
+  # Trimmed 4->2: perception only lifts embeddings into the residual stream;
+  # the real work is downstream reasoning. Fewer perception layers = less
+  # FLOPS on plain encoding, params freed for reasoning depth.
   # Read in: HAGIConfig.perception_layers (hagi.py:42), hagi.py:129
-  perception_layers: 4
+  perception_layers: 2
 
   # Reasoning stage: transformer blocks for recurrent reasoning (reused
-  # via HRM loop or iter_embed loop).
+  # via HRM loop or iter_embed loop). Deepened 4->7: HAGI's novelty lives in
+  # the recurrent reasoning core (HRM hrm_l_cycles=2 x 7 = 14 reasoning
+  # passes/step vs 8 at the old 4x2). Pareto-optimal: max reasoning-depth at
+  # min FLOPS/VRAM for an 8GB GPU.
   # Read in: HAGIConfig.reasoning_layers (hagi.py:43), hagi.py:132
-  reasoning_layers: 4
+  reasoning_layers: 7
 
   # Expression stage: transformer blocks for output generation.
+  # Trimmed 4->2: expression just projects the refined hidden to lm_head.
   # Read in: HAGIConfig.expression_layers (hagi.py:44), hagi.py:135
-  expression_layers: 4
+  expression_layers: 2
 
   # --- Core dimensions ---
 
   # Hidden size (residual stream dimension). Must match transformer.hidden_size.
+  # 512 (down from 768): head_dim stays 64 via num_query_heads=8. Activations
+  # + AdamW/Muon optimizer state drop ~60% -> VRAM est ~2.2-3.7GB (safe under
+  # 8GB with large headroom). Pair with grades summing to 512 below.
   # Read in: HAGIConfig.hidden_size (hagi.py:41), hagi.py:100
-  hidden_size: 768
+  hidden_size: 512
 
   # Vocabulary size (SmolLM2 tokenizer = 49,152).
   # Read in: HAGIConfig.vocab_size (hagi.py:40), hagi.py:128
@@ -221,13 +239,12 @@ model:
   # Read in: HAGIConfig.hdim_full (hagi.py:48), hagi.py:141
   hdim_full: true
 
-  # HDIM heads: number of parallel multivector projections. Raised 4->6:
-  # more parallel Clifford projections (6×8=48-dim multivector) give the
-  # invariant extractor / domain-transfer richer geometric features to
-  # align across domains. Adds ~37k params (768×16 extra in
-  # HiddenToMultivector + GatedFusion mv_to_hidden), negligible VRAM.
+  # HDIM heads: number of parallel multivector projections. 4 (down from 6):
+  # 4×8=32-dim multivector is enough for the invariant extractor at hidden 640;
+  # fewer heads cut HiddenToMultivector + GatedFusion params with no quality
+  # loss at this width.
   # Read in: HAGIConfig.hdim_heads (hagi.py:49), hagi.py:146,150
-  hdim_heads: 6
+  hdim_heads: 4
 
   # Number of parallel domain rotors in HDIM (DomainRotor). Each rotor is a
   # distinct cross-domain invariant-transfer schedule picked per step via
@@ -258,10 +275,10 @@ model:
   # Read in: GradeConfig (gdr.py:37-50), hagi.py:147
   grades:
     scalar: 64           # Grade 0: confidence/resolution (slow, momentum)
-    vector: 192          # Grade 1: entities/concepts (medium, momentum)
-    bivector: 192        # Grade 2: relations (fast, full update)
+    vector: 96           # Grade 1: entities/concepts (medium, momentum)
+    bivector: 96         # Grade 2: relations (fast, full update)
     trivector: 64        # Grade 3: higher-order structure (fast, full update)
-    residual: 256        # Unconstrained channel (standard update)
+    residual: 192        # Unconstrained channel (standard update)
     scalar_momentum: 0.5 # Momentum for scalar grade update
     vector_momentum: 0.5 # Momentum for vector grade update
 
@@ -274,11 +291,11 @@ model:
 
   # High-level state dimension (z_H). Updated once per h_cycle.
   # Read in: HAGIConfig.h_dim (hagi.py:54), hagi.py:170
-  h_dim: 256
+  h_dim: 160
 
   # Low-level state dimension (z_L). Updated every l_cycle.
   # Read in: HAGIConfig.l_dim (hagi.py:55), hagi.py:171
-  l_dim: 256
+  l_dim: 160
 
   # High-level cycles: z_H updates per forward pass. 1 = no h_transition.
   # Read in: HAGIConfig.hrm_h_cycles (hagi.py:52), hagi.py:173
@@ -378,16 +395,19 @@ model:
   moe_top_k: 1
 
   # Intermediate size per expert. None = intermediate_size // num_experts.
+  # 341 ~ 1365/4 (same per-expert ratio as the prior 2048/4=512 at hidden 768).
+  # Each expert is a SwiGLU at hidden 512 -> 341 -> 512.
   # Read in: HAGIConfig.moe_intermediate_size (hagi.py:87), hagi.py:106,108
-  moe_intermediate_size: 512
+  moe_intermediate_size: 341
 
   # MoE load-balance aux loss coefficient.
   # Read in: HAGIConfig.moe_alpha (hagi.py:88), hagi.py:107, moe.py:46
   moe_alpha: 0.01
 
-  # Router temperature: divides router logits before softmax/top-k. 1.0 = sharp
-  # (legacy default); <1.0 flattens the expert distribution (more exploration and
-  # load balance), >1.0 sharpens (stickier expert routing).
+  # Router temperature: divides router logits before softmax/top-k (moe.py:63
+  # does logits / T). 1.0 = unchanged (legacy default); <1.0 sharpens (stickier
+  # expert routing), >1.0 flattens the expert distribution (more exploration and
+  # load balance).
   # Read in: HAGIConfig.moe_router_temperature (hagi.py), transformer.py,
   #          moe.py MoESwiGLU.router_temperature
   moe_router_temperature: 1.0
@@ -446,12 +466,13 @@ model:
   transformer:
     # Hidden size (must match model.hidden_size).
     # Read in: TransformerConfig.hidden_size (transformer.py:21)
-    hidden_size: 768
+    hidden_size: 512
 
     # SwiGLU intermediate size (non-MoE path). When MoE is active, each
-    # expert uses moe_intermediate_size instead.
+    # expert uses moe_intermediate_size instead. 1365 ~ 512*2.67 (same SwiGLU
+    # ratio as the prior 768/2048).
     # Read in: TransformerConfig.intermediate_size (transformer.py:24)
-    intermediate_size: 2048
+    intermediate_size: 1365
 
     # Maximum sequence length for RoPE precomputation. T > max_seq_len
     # falls back to dynamic cache. Raised 2048->4096 to extend the model's
@@ -468,13 +489,16 @@ model:
     # Read in: TransformerConfig.norm_eps (transformer.py:26)
     norm_eps: 1.0e-6
 
-    # Number of KV heads (GQA). Must divide num_query_heads.
+    # Number of KV heads (GQA). Must divide num_query_heads. 4 (GQA ratio
+    # 8/4=2 keeps head_dim 64 = 512/8, same KV compression as the old 768/12/4).
     # Read in: TransformerConfig.num_kv_heads (transformer.py:23)
     num_kv_heads: 4
 
     # Number of query heads (GQA). head_dim = hidden_size / num_query_heads.
+    # 8 (down from 12): head_dim stays 64 (512/8) — attention capacity per
+    # head unchanged, just fewer parallel heads.
     # Read in: TransformerConfig.num_query_heads (transformer.py:22)
-    num_query_heads: 12
+    num_query_heads: 8
 
     # QK-norm: apply RMSNorm to query and key projections after RoPE.
     # Read in: TransformerConfig.qk_norm (transformer.py:29), transformer.py:196
@@ -573,15 +597,17 @@ training:
   # Read in: loop.py:351 (build_loop_config), loop.py:136
   cooldown_frac: 0.05
 
-  # Maximum training steps. Overridden by train_tokens if set (see data section).
-  # Read in: loop.py:336 (build_loop_config)
-  max_steps: 8000
+  # Maximum training steps. Overridden by train_tokens if set (see data section):
+  # with train_tokens=3e9, batch 8 × grad_accum 5 × seq 1024 = 40960 tok/step ->
+  # ceil(3e9/40960) = 73243 steps (~1 epoch over the 3B-token corpus).
+  # Read in: loop.py:336 (build_loop_config), train.py:44 (_resolve_max_steps)
+  max_steps: 73243
 
   # --- Gradient ---
 
   # Gradient accumulation steps. Effective batch = batch_size × grad_accum.
   # Read in: loop.py:340 (build_loop_config), loop.py:547
-  grad_accum_steps: 4
+  grad_accum_steps: 5
 
   # Global gradient clipping (max L2 norm). Applied before optimizer step.
   # Lowered 1.0->0.8: tighter clip caps the grad_norm excursion (1.51 at step
@@ -683,9 +709,14 @@ training:
   ema:
     decay: 0.9995
 
-    # Start EMA from this step (skip early unstable steps).
+    # Start EMA from this step (skip early unstable steps). Aligned with
+    # warmup_steps (1000): starting EMA at 500 folded in weights from the
+    # middle of the linear warmup, when LR was still ramping and the loss was
+    # most volatile — polluting the averaged model with the noisiest region.
+    # Begin at warmup's end so the EMA only tracks the post-warmup stable
+    # regime, giving a cleaner Polyak-Ruppert average for eval/gen.
     # Read in: loop.py:357 (build_loop_config), loop.py:469
-    start_step: 500
+    start_step: 1000
 
   # --- Evaluation ---
 

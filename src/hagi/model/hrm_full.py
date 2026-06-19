@@ -186,7 +186,7 @@ class HRMCore(nn.Module):
         gdr_state = None
         pre_gdr_h = None
         for h_cycle in range(self.h_cycles):
-            if noise_sigma > 0.0:
+            if training_mode and noise_sigma > 0.0:
                 z_H = z_H + torch.randn_like(z_H) * noise_sigma
             # z_H is invariant across all l_cycles within an h_cycle (it only
             # updates after the l-cycle loop via h_transition). Lift its
@@ -196,7 +196,7 @@ class HRMCore(nn.Module):
                 # Loop reassignments can widen the inferred type back to the
                 # parameter union; narrow before each use.
                 z_L = cast(torch.Tensor, z_L)
-                if noise_sigma > 0.0:
+                if training_mode and noise_sigma > 0.0:
                     z_L = z_L + torch.randn_like(z_L) * noise_sigma
                 bias = h_term + self.z_l_to_hidden(z_L).unsqueeze(1)
                 for block in reasoning_blocks:
