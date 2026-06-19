@@ -6,7 +6,7 @@ from typing import Any
 try:
     import typer
 except ImportError:  # pragma: no cover - dependency fallback
-    typer = None
+    typer: Any = None
 
 import torch
 

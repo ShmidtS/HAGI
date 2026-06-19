@@ -144,14 +144,14 @@ def maybe_disable_gradient_checkpointing(
     total = torch.cuda.get_device_properties(device).total_memory
     test_model = HAGI(model.cfg).to(device)
     param_dtype = next(model.parameters()).dtype
-    if param_dtype != torch.float32:
+    if param_dtype != torch.float32:  # type: ignore[reportPrivateImportUsage]
         test_model = test_model.to(param_dtype)
     test_model.cfg.gradient_checkpointing = False
     test_model.train()
     try:
         vocab_size = getattr(model.cfg, "vocab_size", 49152)
-        x = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
-        y = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        x = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)  # type: ignore[reportPrivateImportUsage]
+        y = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)  # type: ignore[reportPrivateImportUsage]
         with torch.cuda.device(device):
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
@@ -195,8 +195,8 @@ def to_device(batch: Any, device: str, non_blocking: bool) -> Any:
 def apply_prefix_mask(targets: torch.Tensor, batch: Any) -> torch.Tensor:
     if not isinstance(batch, PrefixLMBatch):
         return targets
-    positions = torch.arange(targets.size(1), device=targets.device).unsqueeze(0)
-    return targets.masked_fill(positions < batch.partition.unsqueeze(1), -100)
+    positions = torch.arange(targets.size(1), device=targets.device).unsqueeze(0)  # type: ignore[reportPrivateImportUsage]
+    return targets.masked_fill(positions < batch.partition.unsqueeze(1), -100)  # type: ignore[reportCallIssue]
 
 
 def prefix_lm_collate(
@@ -204,8 +204,8 @@ def prefix_lm_collate(
 ) -> tuple[PrefixLMBatch, torch.Tensor]:
     array = np.stack([np.asarray(item, dtype=np.int64) for item in batch])
     tokens = array[:, :-1]
-    targets = torch.as_tensor(array[:, 1:], dtype=torch.long)
-    prefix_batch = create_prefix_lm_batch(tokens.tolist(), seq_len)
+    targets = torch.as_tensor(array[:, 1:], dtype=torch.long)  # type: ignore[reportPrivateImportUsage]
+    prefix_batch = create_prefix_lm_batch(tokens.tolist(), seq_len)  # type: ignore[reportCallIssue]
     return prefix_batch, targets
 
 
@@ -226,9 +226,9 @@ def _shift_collate(
         array = np.stack(items)
         x = array[:, :-1]
         y = array[:, 1:]
-        return torch.as_tensor(x, dtype=torch.long), torch.as_tensor(
+        return torch.as_tensor(x, dtype=torch.long), torch.as_tensor(  # type: ignore[reportPrivateImportUsage]
             y, dtype=torch.long
-        )
+        )  # type: ignore[reportPrivateImportUsage]
     # Variable lengths: pad each row to max_len. Output length is max_len-1.
     out_len = max_len - 1
     x = np.full((len(items), out_len), pad_id, dtype=np.int64)
@@ -683,6 +683,22 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
                 resumed_ema_state = ema_state
                 print("found EMA state to restore")
             del state  # free checkpoint tensors from CPU RAM
+
+    # load_state_dict restores param_groups from the checkpoint, which were
+    # saved before the Muon weight_decay key existed — they carry no
+    # "weight_decay" entry, so Muon.step would default to 0.0 (legacy, no
+    # decay) and the forward-magnitude divergence guard C goes inert on
+    # resume. Re-assert cfg.muon_weight_decay onto every Muon group so the
+    # decoupled shrink stays active across a resumed run. build_optimizer
+    # already set it on fresh groups; this only patches resumed ones.
+    _muon_wd = float(train_cfg.get("muon_weight_decay", 0.0))
+    if _muon_wd != 0.0:
+        from hagi.train.optim import Muon
+        for _opt in getattr(optimizer, "optimizers", [optimizer]):
+            if isinstance(_opt, Muon):
+                for _g in _opt.param_groups:
+                    _g["weight_decay"] = _muon_wd
+                print(f"re-applied muon_weight_decay={_muon_wd} to resumed Muon groups")
 
     # Move optimizer state to the target device (loaded from CPU to save
     # VRAM during resume) and release CUDA cache accumulated during loading.

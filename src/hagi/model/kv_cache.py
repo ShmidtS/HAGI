@@ -27,7 +27,7 @@ class StaticLayerCache:
         device=None,
         dtype=None,
     ):
-        self.k_buf = torch.zeros(
+        self.k_buf = torch.zeros(  # type: ignore[reportCallIssue]
             batch_size, num_kv_heads, max_seq_len, head_dim, device=device, dtype=dtype
         )
         self.v_buf = torch.zeros_like(self.k_buf)

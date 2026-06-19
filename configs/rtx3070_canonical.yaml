@@ -222,7 +222,7 @@ model:
   # Number of reasoning iterations. Used when use_loop=true and hrm=false.
   # When hrm=true, HRM controls iterations via hrm_h_cycles × hrm_l_cycles.
   # Read in: HAGIConfig.loop_count (hagi.py:45), hagi.py:213,527
-  loop_count: 10
+  loop_count: 5
 
   # Enable reasoning loop (iterative refinement through reasoning blocks).
   # Read in: HAGIConfig.use_loop (hagi.py:46), hagi.py:213,527
@@ -310,7 +310,7 @@ model:
   # one. ~1.5x reasoning-stage FLOPS (perception/expression unchanged);
   # activation memory rises one reasoning pass worth — verify VRAM <8GB.
   # Read in: HAGIConfig.hrm_l_cycles (hagi.py:53), hagi.py:174
-  hrm_l_cycles: 2
+  hrm_l_cycles: 1
 
   # --- MSA (Memory Sparse Attention) ---
 
@@ -449,6 +449,20 @@ model:
   # Read in: HAGIConfig.thinking_noise (hagi.py:80), hagi.py:471,556
   thinking_noise: 0.0
 
+  # Runtime magnitude cap on the residual stream before final_norm / lm_head.
+  # 0 disables (default, backward compatible). When >0, any token whose ||h||
+  # exceeds the cap is rescaled down to the cap during training. Safety net for
+  # the forward-magnitude divergence: 69 unscaled 2D hidden weights grow under
+  # Muon (no weight_decay) -> ||h|| in the residual stream rises exponentially
+  # -> weight-tied logits blow up -> softmax saturates -> L_CE climbs. The cap
+  # runs in forward so it guards BOTH fresh models and resumed checkpoints
+  # (the __init__ residual_scale is overwritten by load_state_dict on resume).
+  # 30.0 is a conservative ceiling: at hidden=512 a healthy ||h|| is O(sqrt(H))
+  # ~ 22; the cap only bites when divergence is already underway. Lower to
+  # tighten, raise to loosen, 0 to disable.
+  # Read in: HAGIConfig.hidden_mag_cap (hagi.py), hagi.py forward (post-expression)
+  hidden_mag_cap: 30.0
+
   # --- Memory / performance ---
 
   # Gradient checkpointing for transformer blocks. Saves activation memory
@@ -586,7 +600,7 @@ training:
   # ramp at 1500/2000) onto a model whose embeddings have stabilized, reducing
   # the transient gradient spike that fed the late-run grad_norm climb.
   # Read in: loop.py:337 (build_loop_config), loop.py:133
-  warmup_steps: 1000
+  warmup_steps: 3500
 
   # Minimum LR ratio: cosine decays to min_lr_ratio × learning_rate.
   # Read in: loop.py:339 (build_loop_config), loop.py:147
@@ -607,7 +621,7 @@ training:
 
   # Gradient accumulation steps. Effective batch = batch_size × grad_accum.
   # Read in: loop.py:340 (build_loop_config), loop.py:547
-  grad_accum_steps: 6
+  grad_accum_steps: 2
 
   # Global gradient clipping (max L2 norm). Applied before optimizer step.
   # Lowered 1.0->0.8: tighter clip caps the grad_norm excursion (1.51 at step
@@ -668,6 +682,21 @@ training:
   # Read in: optim.py:490 (cfg.get("muon_ns_steps", 5))
   muon_ns_steps: 10
 
+  # Decoupled (AdamW-style) weight decay applied INSIDE Muon to the 2D hidden
+  # weights. 0 disables (legacy behavior, reproduces pre-fix runs). Muon
+  # orthogonalizes the update direction, which is scale-invariant and has no
+  # built-in shrinkage — without decay the 2D hidden weight norm grows
+  # monotonically under repeated orthogonalized steps, inflating the residual-
+  # stream forward gain (the root cause of the ||h|| exponential blowup). A
+  # small wd (0.05-0.1) directly counteracts that growth at the source. Applied
+  # as p *= (1 - lr*wd) before the orthogonalized update, so it is decoupled
+  # from the gradient/momentum path (AdamW semantics, not L2-on-loss).
+  # 0.05 chosen as a gentle start (half the AdamW weight_decay=0.1 on the 1D
+  # /embed/head params); raise toward 0.1 if weight norm still drifts.
+  # Read in: optim.py Muon.__init__ (weight_decay default 0.0),
+  #          optim.py _build_muon_adamw (cfg.get("muon_weight_decay", 0.0))
+  muon_weight_decay: 0.05
+
   # Weight decay (decoupled, AdamW style). Applied to ≥2D non-norm params.
   # Read in: optim.py:479,538 (cfg.get("weight_decay", 0.1))
   weight_decay: 0.1
@@ -716,7 +745,7 @@ training:
     # Begin at warmup's end so the EMA only tracks the post-warmup stable
     # regime, giving a cleaner Polyak-Ruppert average for eval/gen.
     # Read in: loop.py:357 (build_loop_config), loop.py:469
-    start_step: 1000
+    start_step: 3500
 
   # --- Evaluation ---
 
@@ -762,7 +791,7 @@ training:
   # can switch on earlier and train the HDIM features longer across the 91k-
   # step budget without the linear-ramp instability that justified 2000.
   # Read in: loop.py:364 (build_loop_config), loop.py:527
-  aux_warmup_steps: 1000
+  aux_warmup_steps: 3500
 
   # Warmup steps for L_iso (isomorphic invariant loss). Lowered 3000->2000:
   # aligns with the L_aux ramp so the HDIM domain-invariant alignment (the
@@ -770,11 +799,11 @@ training:
   # cosine ramp eases w_iso in, avoiding the super-exponential L_iso blowup
   # the old linear 3000-step ramp was guarding against.
   # Read in: loop.py:368 (build_loop_config), loop.py:529
-  iso_warmup_steps: 1000
+  iso_warmup_steps: 3500
 
   # Warmup steps for L_moe (MoE load-balance loss).
   # Read in: loop.py:370 (build_loop_config), loop.py:533
-  moe_warmup_steps: 1000
+  moe_warmup_steps: 3500
 
   # --- VRAM probe ---
 

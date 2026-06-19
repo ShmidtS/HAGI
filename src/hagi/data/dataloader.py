@@ -11,7 +11,7 @@ try:
 
     Dataset = cast(Any, _TorchDataset)
 except ImportError:  # pragma: no cover - torch is required for DataLoader use
-    torch = None  # type: ignore[assignment]
+    torch: Any = None  # type: ignore[assignment]
 
     class Dataset:  # type: ignore[no-redef]
         pass
@@ -40,7 +40,7 @@ class MemmapDataset(Dataset):  # type: ignore[type-arg, misc]
         # compute. Defaults to seq_len (fixed length, backward-compatible).
         self.min_seq_len = int(min_seq_len) if min_seq_len is not None else self.seq_len
         self.dtype = dtype
-        self.mode = mode
+        self.mode: Any = mode
         self._data: np.memmap[Any, Any] | None = None
         self._preload: np.ndarray[Any, Any] | None = None
         if self.seq_len <= 0:
@@ -64,7 +64,7 @@ class MemmapDataset(Dataset):  # type: ignore[type-arg, misc]
             self._data = np.memmap(
                 self.path,
                 dtype=self.dtype,
-                mode=cast(Any, self.mode),
+                mode=self.mode,
             )
         return self._data
 

@@ -129,7 +129,7 @@ def _patch_inductor_decoder() -> None:
         return
     # (codec, errors) — cp866 matches MSVC's OEM output; replace tolerates any
     # other codepage a non-Russian locale might emit.
-    _cb.SUBPROCESS_DECODE_ARGS = ("cp866", "replace")
+    _cb.SUBPROCESS_DECODE_ARGS = cast(Any, ("cp866", "replace"))
     # HAGI reads self._step (a buffer) via .item() for the rotor schedule.
     # That .item() graph-breaks the compiled forward; capture_scalar_outputs
     # keeps it inside the graph as a single (cheap) device→host read.
@@ -185,7 +185,7 @@ def autocast_ctx(precision: str, device: str):
         "cuda"
     ):
         return nullcontext()
-    dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+    dtype = torch.bfloat16 if precision == "bf16" else torch.float16  # type: ignore[reportPrivateImportUsage]
     return torch.autocast(device_type="cuda", dtype=dtype)
 
 
@@ -199,12 +199,12 @@ def update_ema(
         if hasattr(torch, "_foreach_mul"):
             ema_device = ema_params[0].device if ema_params else None
             if ema_device == params[0].device:
-                torch._foreach_mul_(cast(list[torch.Tensor], ema_params), decay)
+                torch._foreach_mul_(cast(list[torch.Tensor], ema_params), decay)  # type: ignore[reportPrivateImportUsage]
                 torch._foreach_add_(
                     cast(list[torch.Tensor], ema_params),
                     [p.detach().to(ema_params[0].dtype) for p in params],
                     alpha=1.0 - decay,
-                )
+                )  # type: ignore[reportPrivateImportUsage]
             else:
                 for ema_param, param in zip(ema_params, params, strict=True):
                     ema_param.mul_(decay).add_(
@@ -227,12 +227,12 @@ def magic_norm_clip(
     """Per-blade gradient norm clip for GDR grade-decomposed weights."""
     gdr = getattr(model, "gdr", None)
     if gdr is None or max_norm <= 0:
-        return torch.tensor(
+        return torch.tensor(  # type: ignore[reportPrivateImportUsage]
             0.0, device=next(model.parameters()).device, dtype=torch.float32
         )
     first_param = next((p for p in gdr.parameters() if p.grad is not None), None)
     if first_param is None:
-        return torch.tensor(
+        return torch.tensor(  # type: ignore[reportPrivateImportUsage]
             0.0, device=next(model.parameters()).device, dtype=torch.float32
         )
     max_norm_t = first_param.new_full((), max_norm, dtype=torch.float32)

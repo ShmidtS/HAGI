@@ -21,7 +21,7 @@ from torch.utils.checkpoint import checkpoint
 from ..losses import cross_entropy_loss, fused_linear_cross_entropy
 from ..nars.adapters import NarsHdimReasoner, NarsHrmController, NarsMsaReasoner
 from .gdr import GradeConfig, GradeDecomposedRecurrence
-from .hdim_full import DelayedHDIM, HDIMFull
+from .hdim_full import DelayedHDIM, DomainRotor, HDIMFull
 from .hrm_full import HRMCore
 from .msa import HDIMSlotRouter, MSAAttention, SlotRegistry, SparseRouter
 from .transformer import RMSNorm, TransformerBlock, TransformerConfig, build_rope_cache
@@ -82,6 +82,17 @@ class HAGIConfig:
     msa_lb_alpha: float = 1.0
     use_nars: bool = True
     thinking_noise: float = 0.0
+    # Runtime magnitude cap on the residual stream before final_norm / lm_head.
+    # 0 disables (default, backward compatible). When >0, any token whose
+    # ||h|| exceeds the cap is rescaled down to the cap during training. This is
+    # a safety net for the forward-magnitude divergence: Muon (orthogonalized
+    # updates, no weight_decay on 2D hidden weights) grows the weight norm and
+    # the residual gain compounds across the recurrent reasoning stack, so ||h||
+    # rises exponentially -> weight-tied logits blow up -> softmax saturates ->
+    # L_CE climbs. The cap is applied in forward so it works on BOTH fresh
+    # models and resumed checkpoints (the __init__ residual_scale only runs at
+    # construction and is overwritten by load_state_dict on resume).
+    hidden_mag_cap: float = 0.0
     use_quality_head: bool = False
     use_binary_factorized: bool = False
     binary_factorized_rank: int = 8
@@ -226,7 +237,7 @@ class HAGI(nn.Module):
         # the recurrence loop the parameter is dead (created, never updated,
         # never read). From-scratch training lets us skip it cleanly.
         if cfg.hrm:
-            self.register_buffer("iter_embed", torch.empty(0), persistent=False)
+            self.register_buffer("iter_embed", torch.empty(0), persistent=False)  # type: ignore[reportPrivateImportUsage]
         else:
             self.iter_embed = nn.Parameter(torch.randn(loops, cfg.hidden_size) * 0.01)
 
@@ -246,8 +257,8 @@ class HAGI(nn.Module):
             tcfg.max_seq_len,
             head_dim,
             tcfg.rope_theta,
-            torch.device("cpu"),
-            torch.float32,
+            torch.device("cpu"),  # type: ignore[reportPrivateImportUsage]
+            torch.float32,  # type: ignore[reportPrivateImportUsage]
         )
         self.register_buffer("rope_cos", rope_cos, persistent=False)
         self.register_buffer("rope_sin", rope_sin, persistent=False)
@@ -258,20 +269,35 @@ class HAGI(nn.Module):
         # (see _load_from_state_dict). Stored as a non-persistent buffer so
         # torch.compile does not treat the per-forward increment as a static
         # module-attribute guard (which would force a recompile every step).
-        self.register_buffer("_step_buf", torch.zeros((), dtype=torch.long), persistent=False)
+        self.register_buffer("_step_buf", torch.zeros((), dtype=torch.long), persistent=False)  # type: ignore[reportPrivateImportUsage]
 
         self.apply(self._init_weights)
 
-        # GPT-2 style depth-scaled init: residual-branch output projections are
+        # GPT-2 style depth-scaled init: every residual-branch 2D weight is
         # scaled by 1/sqrt(2*L) so the residual stream variance stays bounded
-        # with depth (and with recurrent reasoning loops).
+        # with depth and recurrent reasoning loops. The previous suffix-based
+        # selector (o_proj.weight / down.weight) only covered 57 transformer
+        # output projections; the other 69 2D hidden weights (qkv in repacked
+        # attn, MoE experts up, hrm z_*_to_hidden / l_transition.up, gdr
+        # project/fuse, msa q/kv_proj, gdr_aux_proj, hrm h_init/l_init) received
+        # no scaling and grew unbounded under Muon (orthogonalized updates, no
+        # weight_decay) -> ||h|| in the residual stream blew up -> weight-tied
+        # logits -> softmax saturation -> L_CE climbed. Switch to an explicit
+        # exclude list mirroring optim._is_muon_param so ALL 2D hidden weights
+        # scale. Note: this only runs at __init__ (fresh models); resumed
+        # checkpoints load weights AFTER __init__ so residual_scale is not
+        # re-applied to them — the runtime hidden_mag_cap clamp + Muon
+        # weight_decay guard resumed weights instead.
         total_layers = (
             cfg.perception_layers + cfg.reasoning_layers + cfg.expression_layers
         )
         residual_scale = 1.0 / math.sqrt(2 * max(1, total_layers))
+        exclude_tokens = ("embed", "lm_head", "norm", "router", "gate", "iter_embed")
         with torch.no_grad():
             for name, p in self.named_parameters():
-                if name.endswith("o_proj.weight") or name.endswith("down.weight"):
+                if p.ndim == 2 and not any(
+                    tok in name.lower() for tok in exclude_tokens
+                ):
                     p.mul_(residual_scale)
         # Re-assert weight tying (init must not silently untie).
         self.lm_head.weight = self.embed.weight
@@ -299,7 +325,7 @@ class HAGI(nn.Module):
     def state_dict(self, *args, **kwargs):  # type: ignore[override]
         prefix = kwargs.get("prefix", "")
         state = super().state_dict(*args, **kwargs)
-        state[prefix + "_step"] = torch.tensor(self._step, dtype=torch.long)
+        state[prefix + "_step"] = torch.tensor(self._step, dtype=torch.long)  # type: ignore[reportPrivateImportUsage]
         return state
 
     def _load_from_state_dict(
@@ -447,12 +473,16 @@ class HAGI(nn.Module):
         tgt_idx = None
         gdr_type = "none"
         if self.gdr is not None:
-            if training_mode and hasattr(self.gdr, "rotors"):
+            if (
+                training_mode
+                and isinstance(self.gdr, HDIMFull)
+                and isinstance(self.gdr.rotors, DomainRotor)
+            ):
                 num_rotors = self.gdr.rotors.num_rotors
                 tgt_idx = _pick_rotor_idx(
                     self.cfg.rotor_seed,
                     self._step,
-                    num_rotors,  # type: ignore[arg-type]
+                    num_rotors,
                 )
             if (
                 training_mode
@@ -564,7 +594,7 @@ class HAGI(nn.Module):
                             h = self.gdr(h)
                     h = _run_stage(self.reasoning, h)
                 if self.training and self.cfg.thinking_noise > 0.0:
-                    h = h + torch.randn_like(h) * self.cfg.thinking_noise
+                    h = h + torch.randn_like(h) * self.cfg.thinking_noise  # type: ignore[reportPrivateImportUsage]
                 h = h + self.iter_embed[i]
 
         # MSA integration after reasoning / GDR
@@ -584,7 +614,7 @@ class HAGI(nn.Module):
                 active_registry = external_msa_registry
             else:
                 active_registry = self.msa_registry
-                active_registry.clear()
+                active_registry.clear()  # type: ignore[reportAttributeAccessIssue]
             b, t, _ = h.shape
             nkv = self.msa.num_kv_heads
             head_dim = self.msa.head_dim
@@ -608,7 +638,7 @@ class HAGI(nn.Module):
             )
             # batch_register already evicts to the registry's _max_slots; the
             # explicit prune below enforces the tighter cfg.msa_slot_count.
-            active_registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)
+            active_registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)  # type: ignore[reportAttributeAccessIssue]
 
             if len(active_registry) > self.cfg.msa_slot_count:
                 active_registry.prune_oldest(
@@ -643,6 +673,19 @@ class HAGI(nn.Module):
             h = h + msa_out
 
         h = _run_stage(self.expression, h)
+
+        # Runtime magnitude cap on the residual stream: any token whose ||h||
+        # exceeds cfg.hidden_mag_cap is rescaled down to the cap. Guards the
+        # forward-magnitude divergence (||h|| exponential growth from unscaled
+        # 2D hidden weights under Muon) at inference time of forward, so it
+        # works for fresh AND resumed checkpoints (unlike __init__ residual_scale,
+        # which load_state_dict overwrites on resume). 0 disables (default).
+        if (
+            self.training
+            and getattr(self.cfg, "hidden_mag_cap", 0.0) > 0.0
+        ):
+            hn = h.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            h = h * (hn.clamp(max=self.cfg.hidden_mag_cap) / hn)
 
         pre_logits_hidden = (
             h if need_quality and self.quality_head is not None else None

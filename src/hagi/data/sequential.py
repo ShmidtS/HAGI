@@ -17,7 +17,7 @@ try:
     Dataset = cast(Any, _TorchDataset)
     Sampler = cast(Any, _TorchSampler)
 except ImportError:
-    DataLoader = None  # type: ignore[assignment]
+    DataLoader: Any = None  # type: ignore[assignment]
 
     class Dataset:  # type: ignore[no-redef]
         pass

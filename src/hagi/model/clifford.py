@@ -53,8 +53,8 @@ def build_product_table() -> tuple[torch.Tensor, torch.Tensor]:
         out_index: [8, 8] long tensor, out_index[a, b] = resulting blade index.
         sign:      [8, 8] float tensor, sign[a, b] = +1 or -1.
     """
-    out_index = torch.zeros(BLADE_COUNT, BLADE_COUNT, dtype=torch.long)
-    sign = torch.zeros(BLADE_COUNT, BLADE_COUNT, dtype=torch.float32)
+    out_index = torch.zeros(BLADE_COUNT, BLADE_COUNT, dtype=torch.long)  # type: ignore[reportCallIssue]
+    sign = torch.zeros(BLADE_COUNT, BLADE_COUNT, dtype=torch.float32)  # type: ignore[reportCallIssue]
     for a in range(BLADE_COUNT):
         for b in range(BLADE_COUNT):
             out_index[a, b] = a ^ b
@@ -68,7 +68,7 @@ _OUT_INDEX, _SIGN = build_product_table()
 
 # [8, 8, 8] tensor: STRUCT[a, b, c] = sign[a, b] if a^b == c else 0.
 # Then the geometric product is one contraction: out[..., c] = sum_{a,b} x[..., a] * C[a, b, c] * y[..., b].
-_STRUCT = torch.zeros(BLADE_COUNT, BLADE_COUNT, BLADE_COUNT, dtype=torch.float32)
+_STRUCT = torch.zeros(BLADE_COUNT, BLADE_COUNT, BLADE_COUNT, dtype=torch.float32)  # type: ignore[reportCallIssue]
 for _a in range(BLADE_COUNT):
     for _b in range(BLADE_COUNT):
         _STRUCT[_a, _b, int(_OUT_INDEX[_a, _b])] = _SIGN[_a, _b]

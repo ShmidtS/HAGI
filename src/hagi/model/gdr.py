@@ -84,8 +84,8 @@ class GradeDecomposedRecurrence(nn.Module):
         # Geometric-product result projected back into scalar and bivector grades.
         self.geo_to_scalar = nn.Linear(cfg.vector, cfg.scalar, bias=False)
         self.geo_to_bivector = nn.Linear(cfg.vector, cfg.bivector, bias=False)
-        self.gate_scalar = nn.Parameter(torch.zeros(1))
-        self.gate_bivector = nn.Parameter(torch.zeros(1))
+        self.gate_scalar = nn.Parameter(torch.zeros(1))  # type: ignore[reportCallIssue]
+        self.gate_bivector = nn.Parameter(torch.zeros(1))  # type: ignore[reportCallIssue]
 
     def _build_legacy_mlps(self) -> None:
         """Recreate the pre-fusion per-grade MLP layout (for old checkpoints).

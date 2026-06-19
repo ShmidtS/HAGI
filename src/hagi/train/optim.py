@@ -12,15 +12,15 @@ from torch import nn
 @torch.no_grad()
 def _zeropower_impl(G: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
     a, b, c = (3.4445, -4.7750, 2.0315)
-    x = G if G.dtype == torch.bfloat16 else G.bfloat16()
+    x = G if G.dtype == torch.bfloat16 else G.bfloat16()  # type: ignore[reportPrivateImportUsage]
     transposed = G.size(0) > G.size(1)
     if transposed:
         x = x.T
     x = x / (x.norm() + eps)
     for _ in range(steps):
         A = x @ x.T
-        B = torch.addmm(A, A, A, beta=b, alpha=c)
-        x = torch.addmm(x, B, x, beta=a, alpha=1.0)
+        B = torch.addmm(A, A, A, beta=b, alpha=c)  # type: ignore[reportPrivateImportUsage]
+        x = torch.addmm(x, B, x, beta=a, alpha=1.0)  # type: ignore[reportPrivateImportUsage]
     if transposed:
         x = x.T
     return x if x.dtype == G.dtype else x.to(G.dtype)
@@ -44,7 +44,7 @@ def zeropower_via_newtonschulz5(
 @torch.no_grad()
 def _zeropower_batched_impl(G: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
     a, b, c = (3.4445, -4.7750, 2.0315)
-    x = G if G.dtype == torch.bfloat16 else G.bfloat16()
+    x = G if G.dtype == torch.bfloat16 else G.bfloat16()  # type: ignore[reportPrivateImportUsage]
     transposed = G.size(1) > G.size(2)
     if transposed:
         x = x.transpose(1, 2)
@@ -52,8 +52,8 @@ def _zeropower_batched_impl(G: torch.Tensor, steps: int, eps: float) -> torch.Te
     x = x / norms
     for _ in range(steps):
         A = x @ x.transpose(1, 2)
-        B = torch.baddbmm(A, A, A, beta=b, alpha=c)
-        x = torch.baddbmm(x, B, x, beta=a, alpha=1.0)
+        B = torch.baddbmm(A, A, A, beta=b, alpha=c)  # type: ignore[reportPrivateImportUsage]
+        x = torch.baddbmm(x, B, x, beta=a, alpha=1.0)  # type: ignore[reportPrivateImportUsage]
     if transposed:
         x = x.transpose(1, 2)
     return x if x.dtype == G.dtype else x.to(G.dtype)
@@ -93,8 +93,15 @@ class Muon(torch.optim.Optimizer):
         momentum: float = 0.95,
         nesterov: bool = True,
         ns_steps: int = 5,
+        weight_decay: float = 0.0,
     ):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_steps=ns_steps,
+            weight_decay=weight_decay,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -104,6 +111,7 @@ class Muon(torch.optim.Optimizer):
             momentum = group["momentum"]
             nesterov = group["nesterov"]
             ns_steps = group["ns_steps"]
+            weight_decay = group.get("weight_decay", 0.0)
             # Group by shape for fused foreach ops
             shape_groups: dict[tuple[int, ...], list[torch.Tensor]] = {}
             for p in group["params"]:
@@ -119,10 +127,19 @@ class Muon(torch.optim.Optimizer):
                     grads.append(g)
                     state = self.state[p]
                     if "momentum_buffer" not in state:
-                        state["momentum_buffer"] = torch.zeros_like(g)
+                        state["momentum_buffer"] = torch.zeros_like(g)  # type: ignore[reportPrivateImportUsage]
                     bufs.append(state["momentum_buffer"])
-                torch._foreach_mul_(bufs, momentum)
-                torch._foreach_add_(bufs, grads)
+                # Decoupled (AdamW-style) weight decay: shrink params by
+                # (1 - lr*wd) independently of the gradient/orthogonalized update.
+                # Muon orthogonalizes the update direction, which is scale-invariant
+                # and has no built-in shrinkage — without wd the 2D hidden weight
+                # norm grows monotonically under repeated orthogonalized steps,
+                # inflating the residual-stream forward gain. wd=0 reproduces the
+                # legacy behavior (no decay).
+                if weight_decay != 0.0:
+                    torch._foreach_mul_(params, 1.0 - lr * weight_decay)  # type: ignore[reportPrivateImportUsage]
+                torch._foreach_mul_(bufs, momentum)  # type: ignore[reportPrivateImportUsage]
+                torch._foreach_add_(bufs, grads)  # type: ignore[reportPrivateImportUsage]
                 if nesterov:
                     updates = [g.add(b, alpha=momentum) for g, b in zip(grads, bufs)]
                 else:
@@ -488,6 +505,7 @@ def _build_muon_ademamix(
         lr=float(cfg.get("muon_lr", 0.02)),
         momentum=float(cfg.get("muon_momentum", 0.95)),
         ns_steps=int(cfg.get("muon_ns_steps", 5)),
+        weight_decay=float(cfg.get("muon_weight_decay", 0.0)),
     )
     ademamix = AdEMAMix(
         [
@@ -516,6 +534,7 @@ def _build_muon_adamw(
         lr=float(cfg.get("muon_lr", 0.02)),
         momentum=float(cfg.get("muon_momentum", 0.95)),
         ns_steps=int(cfg.get("muon_ns_steps", 5)),
+        weight_decay=float(cfg.get("muon_weight_decay", 0.0)),
     )
     adam = torch.optim.AdamW(
         [

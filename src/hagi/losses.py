@@ -39,7 +39,7 @@ def _cross_entropy_impl(
     valid = (targets != ignore_index).sum().clamp(min=1)
     # fp32 accumulator: summing chunk losses in bf16 loses precision and the
     # native CE kernel already returns fp32 for bf16 input, so this matches.
-    total = torch.zeros((), dtype=torch.float32, device=logits.device)
+    total = torch.zeros((), dtype=torch.float32, device=logits.device)  # type: ignore[reportPrivateImportUsage]
     for i in range(0, logits.size(0), chunk_size):
         lg = logits[i : i + chunk_size]
         tg = targets[i : i + chunk_size]
@@ -127,7 +127,7 @@ def fused_linear_cross_entropy(
     # logits tensor is alive at a time. Checkpointing the chunk would recompute
     # the lm_head matmul + log_softmax on backward — ~30% slower here for no
     # memory benefit, since the chunk is already small (chunk_size * V * 2B).
-    total = flat_h.new_zeros((), dtype=torch.float32)
+    total = flat_h.new_zeros((), dtype=torch.float32)  # type: ignore[reportPrivateImportUsage]
     for i in range(0, flat_h.size(0), chunk_size):
         h_c = flat_h[i : i + chunk_size]
         t_c = flat_t[i : i + chunk_size]
@@ -146,7 +146,7 @@ def compute_auxiliary_loss(
     pinning L_aux above its batch-size floor.
     """
     if aux_output is None:
-        return torch.tensor(0.0)
+        return torch.tensor(0.0)  # type: ignore[reportPrivateImportUsage]
 
     labels = None
     features = aux_output
@@ -173,13 +173,13 @@ def compute_auxiliary_loss(
             labels = aux_output[1]
 
     if not isinstance(features, torch.Tensor):
-        return torch.tensor(0.0)
+        return torch.tensor(0.0)  # type: ignore[reportPrivateImportUsage]
     flat = features.reshape(-1, features.size(-1))
     if labels is None:
         logger.debug("auxiliary contrastive labels missing; L_aux set to 0")
         return flat.new_zeros(())
     if not isinstance(labels, torch.Tensor):
-        labels = torch.as_tensor(labels, device=features.device)
+        labels = torch.as_tensor(labels, device=features.device)  # type: ignore[reportPrivateImportUsage]
     else:
         labels = labels.to(device=features.device)
     labels = labels.reshape(-1)
@@ -190,14 +190,14 @@ def compute_auxiliary_loss(
 
     # Subsample if too many tokens
     if n > max_samples:
-        idx = torch.randperm(n, device=flat.device)[:max_samples]
+        idx = torch.randperm(n, device=flat.device)[:max_samples]  # type: ignore[reportPrivateImportUsage]
         flat = flat[idx]
         labels = labels[idx]
 
     flat_norm = F.normalize(flat, dim=-1)
-    logits = torch.mm(flat_norm, flat_norm.t()) / temperature
+    logits = torch.mm(flat_norm, flat_norm.t()) / temperature  # type: ignore[reportPrivateImportUsage]
     logits = logits - logits.max(dim=1, keepdim=True).values.detach()
-    self_mask = torch.eye(logits.size(0), dtype=torch.bool, device=logits.device)
+    self_mask = torch.eye(logits.size(0), dtype=torch.bool, device=logits.device)  # type: ignore[reportPrivateImportUsage]
     positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & ~self_mask
 
     exp_logits = torch.exp(logits).masked_fill(self_mask, 0.0)
@@ -283,13 +283,21 @@ def composite_loss(
     if invariant_tgt is None and isinstance(auxiliary_output, dict):
         invariant_tgt = auxiliary_output.get("invariant_tgt")
     if moe_aux_loss is None and isinstance(auxiliary_output, dict):
-        moe_aux_loss = auxiliary_output.get("moe_aux_loss")
+        _val = auxiliary_output.get("moe_aux_loss")
+        if isinstance(_val, torch.Tensor):
+            moe_aux_loss = _val
     if num_moe_layers is None and isinstance(auxiliary_output, dict):
-        num_moe_layers = auxiliary_output.get("num_moe_layers")
+        _val = auxiliary_output.get("num_moe_layers")
+        if isinstance(_val, (int, torch.Tensor)):
+            num_moe_layers = _val
     if msa_aux_loss is None and isinstance(auxiliary_output, dict):
-        msa_aux_loss = auxiliary_output.get("msa_aux_loss")
+        _val = auxiliary_output.get("msa_aux_loss")
+        if isinstance(_val, torch.Tensor):
+            msa_aux_loss = _val
     if msa_aux_loss is None and isinstance(model_output, dict):
-        msa_aux_loss = model_output.get("msa_aux_loss")
+        _val = model_output.get("msa_aux_loss")
+        if isinstance(_val, torch.Tensor):
+            msa_aux_loss = _val
 
     merged_weights = {
         "w_ce": 1.0,
@@ -313,11 +321,10 @@ def composite_loss(
     if merged_weights.get("w_aux", 0.0) != 0.0 and auxiliary_output is not None:
         # If auxiliary_output is a dict containing nested "auxiliary_output", unwrap it
         aux_payload = auxiliary_output
-        if (
-            isinstance(auxiliary_output, dict)
-            and "auxiliary_output" in auxiliary_output
-        ):
-            aux_payload = auxiliary_output["auxiliary_output"]
+        if isinstance(auxiliary_output, dict):
+            _nested = auxiliary_output.get("auxiliary_output")
+            if _nested is not None:
+                aux_payload = _nested
         l_aux = compute_auxiliary_loss(aux_payload, max_samples=512).to(
             device=ref_tensor.device, dtype=ref_tensor.dtype
         )

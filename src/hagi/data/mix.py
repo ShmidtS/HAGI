@@ -13,8 +13,8 @@ try:
         Dataset as _TorchDataset,
     )
 except ImportError:  # pragma: no cover - torch is required for DataLoader use
-    torch = None  # type: ignore[assignment]
-    DataLoader = None  # type: ignore[assignment]
+    torch: Any = None  # type: ignore[assignment]
+    DataLoader: Any = None  # type: ignore[assignment]
 
     class Dataset:  # type: ignore[no-redef]
         pass

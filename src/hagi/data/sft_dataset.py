@@ -15,10 +15,10 @@ try:
     import torch
     from torch.utils.data import Dataset as _TorchDataset
 except ImportError:  # pragma: no cover
-    torch = None  # type: ignore[assignment]
+    torch: Any = None  # type: ignore[assignment]
     Dataset = object  # type: ignore[misc,assignment]
 else:
-    Dataset = _TorchDataset
+    Dataset: Any = _TorchDataset  # type: ignore[assignment]
 
 
 @dataclass

@@ -12,8 +12,8 @@ try:
     import torch
     from torch.utils.data import DataLoader
 except ImportError:  # pragma: no cover - numpy fallback for non-torch environments
-    torch = None  # type: ignore[assignment]
-    DataLoader = None  # type: ignore[assignment]
+    torch: Any = None  # type: ignore[assignment]
+    DataLoader: Any = None  # type: ignore[assignment]
 
 from hagi.utils import _as_long_tensor
 

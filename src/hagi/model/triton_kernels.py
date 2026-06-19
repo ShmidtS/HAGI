@@ -33,8 +33,8 @@ try:
     _tl = tl
     _triton = triton
 except ImportError:
-    triton = None  # type: ignore[assignment]
-    tl = None  # type: ignore[assignment]
+    triton: Any = None  # type: ignore[assignment, reportPrivateImportUsage]
+    tl: Any = None  # type: ignore[assignment, reportPrivateImportUsage]
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ if _triton_available:
     assert _tl is not None
 
     @_triton.jit
-    def _geometric_product_kernel(  # type: ignore
+    def _geometric_product_kernel(
         x_ptr,
         y_ptr,
         table_ptr,
@@ -165,7 +165,7 @@ def geometric_product_triton(
 if _triton_available:
 
     @_triton.jit
-    def _sparse_attention_fwd_kernel(  # type: ignore
+    def _sparse_attention_fwd_kernel(
         q_ptr,
         k_ptr,
         v_ptr,
@@ -446,7 +446,7 @@ def sparse_attention_triton(
 if _triton_available:
 
     @_triton.jit
-    def _rmsnorm_kernel(  # type: ignore
+    def _rmsnorm_kernel(
         x_ptr,
         w_ptr,
         out_ptr,

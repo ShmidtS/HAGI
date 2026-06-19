@@ -11,7 +11,7 @@ import torch
 try:
     import typer
 except ImportError:  # pragma: no cover - dependency fallback
-    typer = None
+    typer: Any = None
 
 from hagi.model import HAGI
 from hagi.train.config import config_from_dict

@@ -74,6 +74,7 @@ class TokenizerWrapper:
         return getattr(self.tokenizer, "eos_token_id", None)
 
     def _ensure_padding_token(self) -> None:
+        assert self.tokenizer is not None
         if (
             getattr(self.tokenizer, "pad_token", None) is None
             and getattr(self.tokenizer, "eos_token", None) is not None
@@ -81,12 +82,15 @@ class TokenizerWrapper:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def __call__(self, texts, **kwargs: Any) -> Any:
+        assert self.tokenizer is not None
         return self.tokenizer.__call__(texts, **kwargs)
 
     def encode(self, text: str, **kwargs: Any) -> list[int]:
+        assert self.tokenizer is not None
         return list(self.tokenizer.encode(text, **kwargs))
 
     def decode(self, tokens: list[int], **kwargs: Any) -> str:
+        assert self.tokenizer is not None
         return str(self.tokenizer.decode(tokens, **kwargs))
 
     def batch_decode(self, batch_tokens: list[list[int]], **kwargs: Any) -> list[str]:
@@ -96,6 +100,7 @@ class TokenizerWrapper:
 
     def fast_batch_encode(self, texts: list[str], **kwargs: Any) -> list[list[int]]:
         """Use underlying Rust tokenizer directly — no BatchEncoding overhead."""
+        assert self.tokenizer is not None
         # FastTokenizer backend (PreTrainedTokenizerFast) exposes ._tokenizer
         fast = getattr(self.tokenizer, "_tokenizer", None)
         if fast is not None:

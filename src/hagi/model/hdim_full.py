@@ -35,7 +35,7 @@ class DomainRotor(nn.Module):
         self.heads = heads
         self.blade_count = blade_count
 
-        rotor_params = torch.zeros(num_rotors, heads, blade_count)
+        rotor_params = torch.zeros(num_rotors, heads, blade_count)  # type: ignore[reportCallIssue]
         rotor_params[..., 0] = 1.0
         if num_rotors > 1:
             rotor_params[1:] = torch.randn(num_rotors - 1, heads, blade_count) * 0.01

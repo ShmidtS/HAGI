@@ -58,7 +58,7 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                     ):
                         if isinstance(proj, nn.Linear):
                             with torch.no_grad():
-                                proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+                                proj.weight.data.mul_(gamma.view(1, -1))
                 object.__setattr__(module, "_attn_norm_eps", module.attn_norm.eps)
                 object.__setattr__(module, "attn_norm", nn.Identity())
                 folded_any = True
@@ -82,12 +82,12 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
                         for expert in experts:
                             for proj in (expert.gate, expert.up):
                                 if isinstance(proj, nn.Linear):
-                                    proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+                                    proj.weight.data.mul_(gamma.view(1, -1))
                 else:
                     for proj in (module.mlp.gate, module.mlp.up):
                         if isinstance(proj, nn.Linear):
                             with torch.no_grad():
-                                proj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+                                proj.weight.data.mul_(gamma.view(1, -1))
                 object.__setattr__(module, "_mlp_norm_eps", module.mlp_norm.eps)
                 object.__setattr__(module, "mlp_norm", nn.Identity())
                 folded_any = True
@@ -106,9 +106,9 @@ def fold_rmsnorm_into_weights(model: nn.Module) -> nn.Module:
             isinstance(model.final_norm, RMSNorm)
             and lm_head_obj.weight is not embed_obj.weight
         ):
-            gamma = model.final_norm.weight.data  # type: ignore
+            gamma = model.final_norm.weight.data
             with torch.no_grad():
-                lm_head_obj.weight.data.mul_(gamma.view(1, -1))  # type: ignore
+                lm_head_obj.weight.data.mul_(gamma.view(1, -1))
             model.final_norm = cast(Any, nn.Identity())
             folded_any = True
 
