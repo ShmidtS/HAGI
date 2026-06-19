@@ -664,9 +664,13 @@ training:
   grad_accum_steps: 3
 
   # Global gradient clipping (max L2 norm). Applied before optimizer step.
-  # Lowered 1.0->0.8: tighter clip caps the grad_norm excursion (1.51 at step
-  # 1275) that signalled onset of divergence; 0.8 is still loose enough not to
-  # slow a healthy 0.5-1.0 grad_norm regime but kills the tail spikes.
+  # KEPT AT 1.0: the prior 0.8 tightening targeted a grad_norm excursion in a
+  # pre-memory-aware config; with memory-aware HRM + learnable GDR capacity the
+  # gradient sources changed (MSA read/write every cycle, GradeRouter aux), so
+  # the old 0.8 calibration no longer applies. 1.0 is loose enough not to slow
+  # the healthy 0.5-1.0 grad_norm regime (logged grad_norm 3.7 at step 100)
+  # while the new hidden_mag_cap + muon_weight_decay guards divergence at the
+  # source. Re-tune downward only if grad_norm spikes recur.
   # Read in: loop.py:341 (build_loop_config), train.py (clip_grad_norm_)
   grad_clip: 1.0
 

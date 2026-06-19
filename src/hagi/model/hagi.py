@@ -522,21 +522,33 @@ class HAGI(nn.Module):
             self.msa_memory is not None and self.msa_registry is not None and self.hrm is not None
         )
         msa_lb_loss: torch.Tensor | None = None
+        # Registry the HRM (and the post-reasoning MSA final read) share. Set
+        # inside the HRM branch; the MSA block only reads it under that same
+        # branch's guard, so the unbound case is unreachable.
+        hrm_registry: Any = None
 
         if self.hrm is not None:
             # Memory-aware HRM: the registry accumulates across l_cycles WITHIN
-            # this forward (read/write inside each cycle), so clear it once at
-            # the start of reasoning. The post-reasoning MSA block below is
-            # skipped when memory-aware (HRM already interleaved memory); only a
-            # final read feeds expression. External (generation) registry stays
-            # intact when caching — it is only cleared for the model-owned path.
-            if mem_aware and not (external_msa_registry is not None and use_cache):
-                assert self.msa_registry is not None
-                self.msa_registry.clear()  # type: ignore[reportAttributeAccessIssue]
+            # this forward (read/write inside each cycle). Pick the registry the
+            # HRM reads/writes:
+            #   - generation (use_cache + external_msa_registry): use the CALLER's
+            #     persistent registry so memory accumulates across decode steps.
+            #   - training / no-cache: use the model-owned registry, cleared once
+            #     at the start of reasoning so cycle k>0 reads what cycle k-1 wrote.
+            # The post-reasoning MSA block reuses the SAME registry (hrm_registry)
+            # for its final read, so memory-aware training and generation both
+            # see one consistent slot store per forward.
+            if external_msa_registry is not None and use_cache:
+                hrm_registry = external_msa_registry
+            else:
+                hrm_registry = self.msa_registry
+                if mem_aware:
+                    assert hrm_registry is not None
+                    hrm_registry.clear()  # type: ignore[reportAttributeAccessIssue]
+            if mem_aware and self.cfg.use_nars and self.nars_msa is not None and self.msa_memory is not None:
                 # Wire NARS MSA reasoner onto the bridge so the intra-cycle read
                 # can blend NARS beliefs when use_nars=true.
-                if self.cfg.use_nars and self.nars_msa is not None and self.msa_memory is not None:
-                    self.msa_memory.nars_msa = self.nars_msa  # type: ignore[reportAttributeAccessIssue]
+                self.msa_memory.nars_msa = self.nars_msa  # type: ignore[reportAttributeAccessIssue]
 
             def _call_hrm(_h, _gdr=None) -> Any:
                 assert self.hrm is not None  # narrowed: only called inside this branch
@@ -553,7 +565,7 @@ class HAGI(nn.Module):
                     nars_controller=self.nars_hrm,
                     noise_sigma=self.cfg.thinking_noise,
                     msa_memory=self.msa_memory,
-                    msa_registry=self.msa_registry,
+                    msa_registry=hrm_registry,
                     hrm_memory_aware=mem_aware,
                 )
 
@@ -635,17 +647,11 @@ class HAGI(nn.Module):
             assert self.hdim_slot_router is not None
             assert self.msa_router is not None
             assert self.msa_registry is not None
-            # Bind a local active registry without mutating self.msa_registry,
-            # so a later forward call is never left pointing at a caller-owned
-            # registry. The external registry is only used when caching is on;
-            # otherwise the model's own registry is cleared and used.
-            if external_msa_registry is not None and use_cache:
-                active_registry = external_msa_registry
-            elif mem_aware:
-                # Memory-aware HRM already cleared + filled the model registry
-                # across l_cycles (read/write interleaved). Reuse it as-is for a
-                # final read that feeds expression; do NOT clear/re-register.
-                active_registry = self.msa_registry
+            # Reuse the SAME registry the HRM read/wrote (hrm_registry) when
+            # memory-aware or generating; otherwise fall back to the model-owned
+            # registry cleared+filled here (legacy post-reasoning MSA path).
+            if self.hrm is not None and (mem_aware or (external_msa_registry is not None and use_cache)):
+                active_registry = hrm_registry
             else:
                 active_registry = self.msa_registry
                 active_registry.clear()  # type: ignore[reportAttributeAccessIssue]
