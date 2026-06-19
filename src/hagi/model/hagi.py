@@ -23,7 +23,7 @@ from ..nars.adapters import NarsHdimReasoner, NarsHrmController, NarsMsaReasoner
 from .gdr import GradeConfig, GradeDecomposedRecurrence
 from .hdim_full import DelayedHDIM, DomainRotor, HDIMFull
 from .hrm_full import HRMCore
-from .msa import HDIMSlotRouter, MSAAttention, SlotRegistry, SparseRouter
+from .msa import HDIMSlotRouter, MSAMemory, MSAAttention, SlotRegistry, SparseRouter
 from .transformer import RMSNorm, TransformerBlock, TransformerConfig, build_rope_cache
 
 
@@ -57,6 +57,13 @@ class HAGIConfig:
     hrm_l_cycles: int = 3
     h_dim: int = 256
     l_dim: int = 256
+    # Memory-aware HRM: move MSA read+write INSIDE the l_cycle loop so each
+    # reasoning cycle reads the registry accumulated by the prior cycle and
+    # writes back the refined hidden. This makes the slot registry part of the
+    # thinking process (HRM <-> MSA bidirectional) instead of a bolt-on block
+    # after reasoning. Requires hrm=true and use_msa=true; l_cycles>=2 so a
+    # later cycle actually has memory written by an earlier one to read.
+    hrm_memory_aware: bool = False
     gradient_checkpointing: bool = True
     rotor_seed: int = 42
     use_hdim_cross_domain: bool = True
@@ -112,6 +119,12 @@ class HAGIConfig:
     # values (0.05-0.1) improve generalization/calibration for small LMs.
     label_smoothing: float = 0.0
     compile: bool = False
+    # torch.compile dynamic-shapes toggle. False (default) for fixed-length
+    # training (data.min_seq_len == max_seq_len): inductor specializes on the
+    # single T -> tighter static kernels, no dynamic-dispatch overhead. True
+    # for variable-length training (min_seq_len < max_seq_len, fresh T per
+    # batch) so one graph covers the whole T range without recompile storms.
+    use_dynamic_shapes: bool = False
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
 
@@ -203,6 +216,7 @@ class HAGI(nn.Module):
         self.msa_router = None
         self.hdim_slot_router = None
         self.msa_registry = None
+        self.msa_memory = None
         if cfg.use_msa:
             self.msa = MSAAttention(
                 hidden_size=cfg.hidden_size,
@@ -223,6 +237,12 @@ class HAGI(nn.Module):
             )
             self.hdim_slot_router = HDIMSlotRouter(cfg.hidden_size, key_dim=64)
             self.msa_registry = SlotRegistry(max_slots=cfg.msa_slot_count)
+            # Functional bridge for memory-aware HRM (no params: borrows the
+            # modules above so checkpoints stay identical). Built whenever MSA
+            # is on; only activated by cfg.hrm_memory_aware in the forward.
+            self.msa_memory = MSAMemory(
+                self.msa, self.msa_router, self.hdim_slot_router, cfg
+            )
 
         self.nars_hrm = None
         self.nars_hdim = None
@@ -495,22 +515,53 @@ class HAGI(nn.Module):
             else:
                 gdr_type = "default"
 
+        # Memory-aware HRM flag + MSA load-balance loss are forward-scoped so
+        # the post-reasoning MSA block reads them regardless of whether the HRM
+        # branch ran (hrm is None -> mem_aware stays False, msa_lb_loss None).
+        mem_aware = bool(getattr(self.cfg, "hrm_memory_aware", False)) and (
+            self.msa_memory is not None and self.msa_registry is not None and self.hrm is not None
+        )
+        msa_lb_loss: torch.Tensor | None = None
+
         if self.hrm is not None:
+            # Memory-aware HRM: the registry accumulates across l_cycles WITHIN
+            # this forward (read/write inside each cycle), so clear it once at
+            # the start of reasoning. The post-reasoning MSA block below is
+            # skipped when memory-aware (HRM already interleaved memory); only a
+            # final read feeds expression. External (generation) registry stays
+            # intact when caching — it is only cleared for the model-owned path.
+            if mem_aware and not (external_msa_registry is not None and use_cache):
+                assert self.msa_registry is not None
+                self.msa_registry.clear()  # type: ignore[reportAttributeAccessIssue]
+                # Wire NARS MSA reasoner onto the bridge so the intra-cycle read
+                # can blend NARS beliefs when use_nars=true.
+                if self.cfg.use_nars and self.nars_msa is not None and self.msa_memory is not None:
+                    self.msa_memory.nars_msa = self.nars_msa  # type: ignore[reportAttributeAccessIssue]
+
+            def _call_hrm(_h, _gdr=None) -> Any:
+                assert self.hrm is not None  # narrowed: only called inside this branch
+                return self.hrm(
+                    _h,
+                    self.reasoning,
+                    cos,
+                    sin,
+                    gdr=_gdr,
+                    training_mode=training_mode,
+                    gradient_checkpointing=use_gradient_checkpointing,
+                    tgt_rotor_idx=tgt_idx,
+                    moe_aux_losses=moe_aux_losses,
+                    nars_controller=self.nars_hrm,
+                    noise_sigma=self.cfg.thinking_noise,
+                    msa_memory=self.msa_memory,
+                    msa_registry=self.msa_registry,
+                    hrm_memory_aware=mem_aware,
+                )
+
             if self.gdr is not None:
                 if gdr_type == "delayed":
-                    h, _, _, gdr_state, pre_gdr_h = self.hrm(
-                        h,
-                        self.reasoning,
-                        cos,
-                        sin,
-                        gdr=self.gdr,
-                        training_mode=training_mode,
-                        gradient_checkpointing=use_gradient_checkpointing,
-                        tgt_rotor_idx=tgt_idx,
-                        moe_aux_losses=moe_aux_losses,
-                        nars_controller=self.nars_hrm,
-                        noise_sigma=self.cfg.thinking_noise,
-                    )
+                    h, _, _, gdr_state, pre_gdr_h, _msa_lb = _call_hrm(h, self.gdr)
+                    if mem_aware and _msa_lb is not None:
+                        msa_lb_loss = _msa_lb
                 elif gdr_type == "hdim":
                     if need_iso:
                         gdr_state = self.gdr(
@@ -527,42 +578,18 @@ class HAGI(nn.Module):
                         )
                         gdr_state = None
                         pre_gdr_h = None
-                    h, _, _, _, _ = self.hrm(
-                        h,
-                        self.reasoning,
-                        cos,
-                        sin,
-                        training_mode=training_mode,
-                        gradient_checkpointing=use_gradient_checkpointing,
-                        moe_aux_losses=moe_aux_losses,
-                        nars_controller=self.nars_hrm,
-                        noise_sigma=self.cfg.thinking_noise,
-                    )
+                    h, _, _, _, _, _msa_lb = _call_hrm(h)
+                    if mem_aware and _msa_lb is not None:
+                        msa_lb_loss = _msa_lb
                 else:
                     h = self.gdr(h)
-                    h, _, _, _, _ = self.hrm(
-                        h,
-                        self.reasoning,
-                        cos,
-                        sin,
-                        training_mode=training_mode,
-                        gradient_checkpointing=use_gradient_checkpointing,
-                        moe_aux_losses=moe_aux_losses,
-                        nars_controller=self.nars_hrm,
-                        noise_sigma=self.cfg.thinking_noise,
-                    )
+                    h, _, _, _, _, _msa_lb = _call_hrm(h)
+                    if mem_aware and _msa_lb is not None:
+                        msa_lb_loss = _msa_lb
             else:
-                h, _, _, _, _ = self.hrm(
-                    h,
-                    self.reasoning,
-                    cos,
-                    sin,
-                    training_mode=training_mode,
-                    gradient_checkpointing=use_gradient_checkpointing,
-                    moe_aux_losses=moe_aux_losses,
-                    nars_controller=self.nars_hrm,
-                    noise_sigma=self.cfg.thinking_noise,
-                )
+                h, _, _, _, _, _msa_lb = _call_hrm(h)
+                if mem_aware and _msa_lb is not None:
+                    msa_lb_loss = _msa_lb
             layer_idx += len(self.reasoning)
         else:
             loops = self.cfg.loop_count if self.cfg.use_loop else 1
@@ -597,11 +624,13 @@ class HAGI(nn.Module):
                     h = h + torch.randn_like(h) * self.cfg.thinking_noise  # type: ignore[reportPrivateImportUsage]
                 h = h + self.iter_embed[i]
 
-        # MSA integration after reasoning / GDR
+        # MSA integration after reasoning / GDR.
+        # msa_lb_loss may already be set by the memory-aware HRM (the load-
+        # balance aux computed inside the l_cycle read). Do NOT reset it here:
+        # the legacy `= None` initializer clobbered the HRM-provided loss.
         msa_out = None
         msa_slot_ids = None
         msa_scores = None
-        msa_lb_loss: torch.Tensor | None = None
         if self.cfg.use_msa and self.msa is not None:
             assert self.hdim_slot_router is not None
             assert self.msa_router is not None
@@ -612,6 +641,11 @@ class HAGI(nn.Module):
             # otherwise the model's own registry is cleared and used.
             if external_msa_registry is not None and use_cache:
                 active_registry = external_msa_registry
+            elif mem_aware:
+                # Memory-aware HRM already cleared + filled the model registry
+                # across l_cycles (read/write interleaved). Reuse it as-is for a
+                # final read that feeds expression; do NOT clear/re-register.
+                active_registry = self.msa_registry
             else:
                 active_registry = self.msa_registry
                 active_registry.clear()  # type: ignore[reportAttributeAccessIssue]
@@ -619,58 +653,75 @@ class HAGI(nn.Module):
             nkv = self.msa.num_kv_heads
             head_dim = self.msa.head_dim
 
-            if hasattr(self.msa, "kv_proj"):
-                kv = self.msa.kv_proj(h).view(b, t, 2 * nkv, head_dim).transpose(1, 2)
-                k, v = kv.split(nkv, dim=1)
-            else:
-                k = self.msa.k_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
-                v = self.msa.v_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
+            if not mem_aware:
+                # Legacy path: register the post-reasoning hidden as slots, then
+                # route+attend. Memory-aware HRM did the registering already.
+                if hasattr(self.msa, "kv_proj"):
+                    kv = self.msa.kv_proj(h).view(b, t, 2 * nkv, head_dim).transpose(1, 2)
+                    k, v = kv.split(nkv, dim=1)
+                else:
+                    k = self.msa.k_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
+                    v = self.msa.v_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
 
-            slot_ids, routing_keys, k_caches, v_caches = (
-                self.hdim_slot_router.batch_create_slots(
-                    hidden_states=h,
-                    k_cache=k,
-                    v_cache=v,
-                    slot_id_base=0,
-                    domain_id=0,
-                    chunk_size=getattr(self.cfg, "msa_chunk_size", 1),
-                )
-            )
-            # batch_register already evicts to the registry's _max_slots; the
-            # explicit prune below enforces the tighter cfg.msa_slot_count.
-            active_registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)  # type: ignore[reportAttributeAccessIssue]
-
-            if len(active_registry) > self.cfg.msa_slot_count:
-                active_registry.prune_oldest(
-                    len(active_registry) - self.cfg.msa_slot_count
-                )
-
-            nars_weights = None
-            if self.cfg.use_nars and self.nars_msa is not None:
-                with torch.no_grad():
-                    query_nars = routing_keys.mean(dim=0)  # [key_dim]
-                    top_k_ids, top_values = self.nars_msa.route_top_k_with_nars(
-                        active_registry, query_nars, self.cfg.msa_top_k
+                slot_ids, routing_keys, k_caches, v_caches = (
+                    self.hdim_slot_router.batch_create_slots(
+                        hidden_states=h,
+                        k_cache=k,
+                        v_cache=v,
+                        slot_id_base=0,
+                        domain_id=0,
+                        chunk_size=getattr(self.cfg, "msa_chunk_size", 1),
                     )
-                    msa_slot_ids = top_k_ids.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
-                    msa_scores = top_values.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
-                    nars_weights = self.nars_msa.compute_attention_weights(msa_slot_ids)
-            else:
-                msa_slot_ids, _raw_scores, msa_weights, msa_lb = self.msa_router.route_top_k(
-                    h,
-                    active_registry,
-                    self.cfg.msa_top_k,
-                    compute_lb=bool(getattr(self.cfg, "msa_aux_loss", True))
-                    and training_mode,
-                    lb_alpha=float(getattr(self.cfg, "msa_lb_alpha", 1.0)),
                 )
-                msa_scores = msa_weights
-                msa_lb_loss = msa_lb
+                # batch_register already evicts to the registry's _max_slots; the
+                # explicit prune below enforces the tighter cfg.msa_slot_count.
+                active_registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)  # type: ignore[reportAttributeAccessIssue]
 
-            msa_out = self.msa(
-                h, msa_slot_ids, active_registry, nars_weights=nars_weights
-            )
-            h = h + msa_out
+                if len(active_registry) > self.cfg.msa_slot_count:
+                    active_registry.prune_oldest(
+                        len(active_registry) - self.cfg.msa_slot_count
+                    )
+
+            # Final read: route + sparse-attend over the registry (either the
+            # freshly-registered legacy slots or the memory-aware accumulation).
+            # Skip only when the registry is empty (mem_aware first forward with
+            # an empty registry after a clear would already have been written by
+            # at least one cycle, but guard anyway).
+            if len(active_registry) > 0:
+                nars_weights = None
+                if self.cfg.use_nars and self.nars_msa is not None:
+                    with torch.no_grad():
+                        keys_ref = (
+                            active_registry.keys_tensor(device=str(h.device))
+                            if active_registry._routing_keys is not None  # type: ignore[reportAttributeAccessIssue]
+                            else None
+                        )
+                        query_nars = (
+                            keys_ref.mean(dim=0) if keys_ref is not None else h.mean(dim=(0, 1))
+                        )
+                        top_k_ids, top_values = self.nars_msa.route_top_k_with_nars(
+                            active_registry, query_nars, self.cfg.msa_top_k
+                        )
+                        msa_slot_ids = top_k_ids.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
+                        msa_scores = top_values.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
+                        nars_weights = self.nars_msa.compute_attention_weights(msa_slot_ids)
+                else:
+                    msa_slot_ids, _raw_scores, msa_weights, msa_lb = self.msa_router.route_top_k(
+                        h,
+                        active_registry,
+                        self.cfg.msa_top_k,
+                        compute_lb=bool(getattr(self.cfg, "msa_aux_loss", True))
+                        and training_mode,
+                        lb_alpha=float(getattr(self.cfg, "msa_lb_alpha", 1.0)),
+                    )
+                    msa_scores = msa_weights
+                    if msa_lb is not None and msa_lb_loss is None:
+                        msa_lb_loss = msa_lb
+
+                msa_out = self.msa(
+                    h, msa_slot_ids, active_registry, nars_weights=nars_weights
+                )
+                h = h + msa_out
 
         h = _run_stage(self.expression, h)
 
@@ -799,6 +850,17 @@ class HAGI(nn.Module):
                 result["msa_scores"] = msa_scores
             if msa_lb_loss is not None:
                 result["msa_aux_loss"] = msa_lb_loss
+            # Learnable GDR capacity router load-balance aux (MoE-style). The
+            # GradeDecomposedRecurrence stashes it on .last_router_aux each
+            # forward; fold it into the composite loss via w_gdr_router in the
+            # loop. None when gdr_router is off or in eval. self.gdr may be an
+            # HDIMFull wrapper (the real GDR lives at .gdr) or the bare module.
+            _gdr_inner = getattr(self.gdr, "gdr", self.gdr) if self.gdr is not None else None
+            if (
+                _gdr_inner is not None
+                and getattr(_gdr_inner, "last_router_aux", None) is not None
+            ):
+                result["gdr_router_aux"] = _gdr_inner.last_router_aux
             if pre_logits_hidden is not None and self.quality_head is not None:
                 result["quality_score"] = self.quality_head(pre_logits_hidden).squeeze(
                     -1

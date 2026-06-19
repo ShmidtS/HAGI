@@ -252,6 +252,7 @@ def composite_loss(
     moe_aux_loss: torch.Tensor | None = None,
     num_moe_layers: int | torch.Tensor | None = None,
     msa_aux_loss: torch.Tensor | None = None,
+    gdr_router_aux: torch.Tensor | None = None,
     chunk_size: int = 0,
     quality_score: torch.Tensor | None = None,
     quality_targets: torch.Tensor | None = None,
@@ -305,6 +306,7 @@ def composite_loss(
         "w_iso": 0.01,
         "w_moe": 0.0,
         "w_msa_lb": 0.0,
+        "w_gdr_router": 0.0,
         "w_quality": 0.0,
     }
     if weights is not None:
@@ -360,6 +362,16 @@ def composite_loss(
         result["L_msa_lb"] = l_msa_lb
     else:
         result["L_msa_lb"] = l_ce.new_zeros(())
+    if merged_weights.get("w_gdr_router", 0.0) != 0.0 and gdr_router_aux is not None:
+        # Learnable GDR capacity router load-balance (MoE-style): keeps the
+        # per-grade gate from collapsing onto a single grade.
+        l_gdr_router = gdr_router_aux.to(
+            device=ref_tensor.device, dtype=ref_tensor.dtype
+        )
+        l_total = l_total + merged_weights["w_gdr_router"] * l_gdr_router
+        result["L_gdr_router"] = l_gdr_router
+    else:
+        result["L_gdr_router"] = l_ce.new_zeros(())
     if (
         merged_weights.get("w_quality", 0.0) != 0.0
         and quality_score is not None

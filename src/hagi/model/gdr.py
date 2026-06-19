@@ -42,6 +42,18 @@ class GradeConfig:
     residual: int = 256
     scalar_momentum: float = 0.9
     vector_momentum: float = 0.5
+    # Learnable capacity router (MoE-style): a gate over the 4 geometric grades
+    # (scalar/vector/bivector/trivector) lets the model self-allocate how much
+    # of each forward's update energy flows into entities vs relations vs
+    # higher-order structure, instead of the fixed 64/96/96/64 split. The
+    # structural grade dims stay (Clifford needs vector % 8 == 0); the router
+    # SCALES the per-grade update magnitude, not the dimensions, so the
+    # geometric_product math is unchanged. gdr_router=true enables it.
+    gdr_router: bool = False
+    gdr_router_alpha: float = 0.01
+    # Router temperature: divides router logits before softmax. <1 sharpens
+    # (stickier capacity allocation), >1 flattens (more uniform/exploration).
+    gdr_router_temperature: float = 1.0
 
     @property
     def hidden_size(self) -> int:
@@ -59,6 +71,65 @@ class GradeConfig:
             self.residual,
         )
         return [0, s, s + v, s + v + b, s + v + b + t, s + v + b + t + r]
+
+
+class GradeRouter(nn.Module):
+    """Learnable capacity gate over the 4 Clifford grades (MoE-style).
+
+    Projects the graded context to 4 logits (one per geometric grade), softmaxes
+    them, and returns a per-token gate [B, T, 4] that scales each grade's
+    update. This makes the per-grade capacity *trainable*: the model decides
+    how much update energy flows into scalar (confidence) vs vector (entities)
+    vs bivector (relations) vs trivector (higher-order structure), rather than
+    the fixed 64/96/96/64 split.
+
+    The gate scales update MAGNITUDE, not the grade dimensions, so the
+    geometric_product (vector x vector -> scalar + bivector) stays structurally
+    intact. A Shazeer/Switch load-balance aux loss keeps the gate from
+    collapsing onto a single grade.
+    """
+
+    def __init__(
+        self,
+        ctx_size: int,
+        num_grades: int = 4,
+        alpha: float = 0.01,
+        temperature: float = 1.0,
+    ):
+        super().__init__()
+        self.num_grades = num_grades
+        self.alpha = float(alpha)
+        self.temperature = float(temperature)
+        self.gate_proj = nn.Linear(ctx_size, num_grades, bias=False)
+        nn.init.normal_(self.gate_proj.weight, mean=0.0, std=0.01)
+
+    def forward(
+        self, graded_ctx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Return (gate [.., 4], aux_loss | None).
+
+        aux_loss is the load-balance term (Shazeer/Switch): alpha * N *
+        sum_g(fraction_g * mean_prob_g). Computed only in training.
+        """
+        logits = self.gate_proj(graded_ctx)
+        if self.temperature != 1.0:
+            logits = logits / self.temperature
+        if self.training:
+            noise = torch.randn_like(logits) * 0.01
+            logits = logits + noise.detach()
+        probs = torch.softmax(logits, dim=-1)  # [.., 4]
+        aux = None
+        if self.training:
+            flat = probs.reshape(-1, self.num_grades)
+            # fraction per grade: argmax (detached) one-hot mean; mean_prob:
+            # mean full-softmax probability (differentiable through gate_proj).
+            top_idx = flat.argmax(dim=-1)
+            one_hot = torch.zeros_like(flat)
+            one_hot.scatter_(1, top_idx.unsqueeze(-1), 1.0)
+            fraction = one_hot.mean(dim=0).detach()
+            mean_prob = flat.mean(dim=0)
+            aux = self.alpha * float(self.num_grades) * (fraction * mean_prob).sum()
+        return probs, aux
 
 
 class GradeDecomposedRecurrence(nn.Module):
@@ -86,6 +157,23 @@ class GradeDecomposedRecurrence(nn.Module):
         self.geo_to_bivector = nn.Linear(cfg.vector, cfg.bivector, bias=False)
         self.gate_scalar = nn.Parameter(torch.zeros(1))  # type: ignore[reportCallIssue]
         self.gate_bivector = nn.Parameter(torch.zeros(1))  # type: ignore[reportCallIssue]
+
+        # Learnable capacity router over the 4 geometric grades. Scales the
+        # per-grade update magnitude; None when gdr_router=false (legacy fixed
+        # capacity). Built only when enabled so checkpoints without it load.
+        self.grade_router: GradeRouter | None = (
+            GradeRouter(
+                ctx,
+                num_grades=4,
+                alpha=cfg.gdr_router_alpha,
+                temperature=cfg.gdr_router_temperature,
+            )
+            if getattr(cfg, "gdr_router", False)
+            else None
+        )
+        # Last forward's router load-balance aux (None when no router / eval).
+        # Read by the training loop to fold into the composite loss.
+        self.last_router_aux: torch.Tensor | None = None
 
     def _build_legacy_mlps(self) -> None:
         """Recreate the pre-fusion per-grade MLP layout (for old checkpoints).
@@ -186,6 +274,26 @@ class GradeDecomposedRecurrence(nn.Module):
                 ],
                 dim=-1,
             )
+
+        # Learnable capacity gate: scale each grade's UPDATE by a per-token
+        # softmax weight so the model self-allocates update energy across
+        # scalar/vector/bivector/trivector. The grade dimensions are untouched
+        # (Clifford needs vector % 8 == 0), only the update magnitude is gated,
+        # so geometric_interaction stays valid. Gate is per-token [B, T, 4];
+        # broadcast over the grade's last dim. Skip when no router (legacy).
+        if self.grade_router is not None:
+            gate, gdr_router_aux = self.grade_router(graded_ctx)
+            # gate[..., g] is [.., 1] after unsqueeze; multiply each grade upd.
+            s_upd = s_upd * gate[..., 0:1]
+            v_upd = v_upd * gate[..., 1:2]
+            b_upd = b_upd * gate[..., 2:3]
+            t_upd = t_upd * gate[..., 3:4]
+            # Expose the load-balance aux so the outer loop can add it to the
+            # composite loss. Read via .last_router_aux after forward; cleared
+            # each call so stale values never leak across forwards.
+            self.last_router_aux = gdr_router_aux
+        else:
+            self.last_router_aux = None
 
         sm, vm = self.cfg.scalar_momentum, self.cfg.vector_momentum
         scalar_new = sm * scalar + (1 - sm) * s_upd

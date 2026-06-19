@@ -594,6 +594,13 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     grad_accum_steps = int(train_cfg.get("grad_accum_steps", 4))
     if grad_accum_steps <= 0:
         raise ValueError(f"grad_accum_steps must be > 0, got {grad_accum_steps}")
+    # Variable-length training (min_seq_len < max_seq_len) draws a fresh T per
+    # batch -> torch.compile needs dynamic shapes. Fixed length (min==max) ->
+    # static compile for tighter kernels. Set on the model cfg so loop.py's
+    # torch.compile picks dynamic=False on the canonical fixed-T config.
+    _min_seq = int(data_cfg.get("min_seq_len", _seq_len))
+    if hasattr(model.cfg, "use_dynamic_shapes"):
+        model.cfg.use_dynamic_shapes = bool(_min_seq < _seq_len)
     max_steps = (
         int(args.max_steps)
         if args.max_steps is not None

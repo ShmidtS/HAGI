@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Sequence
-from typing import cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .transformer import RMSNorm, TransformerBlock
+
+if TYPE_CHECKING:
+    from .msa import MSAMemory, SlotRegistry
 
 
 @dataclass
@@ -153,6 +156,9 @@ class HRMCore(nn.Module):
         moe_aux_losses: list[torch.Tensor] | None = None,
         nars_controller=None,
         noise_sigma: float = 0.0,
+        msa_memory: Optional["MSAMemory"] = None,
+        msa_registry: Optional["SlotRegistry"] = None,
+        hrm_memory_aware: bool = False,
     ):
         h = hidden_states
         B, T, H = h.shape
@@ -183,6 +189,19 @@ class HRMCore(nn.Module):
             z_H = z_H * torch.as_tensor(h_gate, dtype=z_H.dtype, device=z_H.device)
             z_L = z_L * torch.as_tensor(l_gate, dtype=z_L.dtype, device=z_L.device)
 
+        # Memory-aware HRM: bind the NARS MSA reasoner onto the bridge (if any)
+        # so the intra-cycle read path can blend NARS beliefs when use_nars=true.
+        msa_lb_loss: torch.Tensor | None = None
+        # Track the slot_id base across writes so successive cycles register
+        # disjoint ids (registry dedups by id, but disjoint ids keep the
+        # eviction order meaningful and avoid the in-place overwrite path).
+        # Defined unconditionally (0 when memory-aware is off) so the write
+        # guard never reads an unbound name.
+        slot_id_base = 0
+        mem_aware = (
+            hrm_memory_aware and msa_memory is not None and msa_registry is not None
+        )
+
         gdr_state = None
         pre_gdr_h = None
         for h_cycle in range(self.h_cycles):
@@ -198,6 +217,33 @@ class HRMCore(nn.Module):
                 z_L = cast(torch.Tensor, z_L)
                 if training_mode and noise_sigma > 0.0:
                     z_L = z_L + torch.randn_like(z_L) * noise_sigma
+
+                # --- Memory-aware READ: attend over what prior cycles wrote.
+                # First cycle (or empty registry) -> no-op, pure reasoning.
+                # Gradient-checkpoint the read when enabled: the MSA sparse
+                # attention activation (qk scores, attn weights) is the main
+                # intra-cycle VRAM cost; recomputing it in backward trades one
+                # extra fwd for a large activation-memory saving. The load-
+                # balance loss is detached-counter-based (no grad through it),
+                # so recomputation reproduces it exactly.
+                if mem_aware:
+                    assert msa_memory is not None and msa_registry is not None
+                    # NOTE: do NOT gradient-checkpoint msa_memory.read here. The
+                    # registry is STATEFUL (the write below appends slots every
+                    # cycle), so between the forward call and the backward
+                    # recompute the registry size differs -> read fetches K/V of
+                    # a different shape -> checkpoint's saved-vs-recomputed
+                    # metadata mismatch aborts backward. The read is kept eager;
+                    # VRAM is bounded instead by the per-cycle activation being
+                    # small (chunked MSA) and by whole-model grad checkpointing
+                    # on the reasoning blocks around it.
+                    msa_out, lb, _r_ids, _r_scores = msa_memory.read(
+                        h, msa_registry, training_mode=training_mode
+                    )
+                    h = h + msa_out
+                    if lb is not None:
+                        msa_lb_loss = lb
+
                 bias = h_term + self.z_l_to_hidden(z_L).unsqueeze(1)
                 for block in reasoning_blocks:
                     h_in = h + bias
@@ -244,6 +290,14 @@ class HRMCore(nn.Module):
                         h = gdr_state["fused"]
                     else:
                         h = gdr(h)
+
+                # --- Memory-aware WRITE: register the refined hidden as slots
+                # so the next cycle (and the post-HRM read) can retrieve it.
+                if mem_aware:
+                    assert msa_memory is not None and msa_registry is not None
+                    ids, _keys = msa_memory.write(h, msa_registry, slot_id_base)
+                    slot_id_base = slot_id_base + int(ids.shape[0])
+
                 z_L = self.l_transition(z_L, h)
             if self.h_cycles > 1:
                 assert self.h_transition is not None
@@ -253,4 +307,4 @@ class HRMCore(nn.Module):
 
         assert isinstance(z_L, torch.Tensor)
         assert isinstance(z_H, torch.Tensor)
-        return h, HState(z_H), LState(z_L), gdr_state, pre_gdr_h
+        return h, HState(z_H), LState(z_L), gdr_state, pre_gdr_h, msa_lb_loss

@@ -1195,3 +1195,129 @@ class HDIMSlotRouter(nn.Module):
             k_cache=k_cache,
             v_cache=v_cache,
         )
+
+
+class MSAMemory:
+    """Functional bridge binding MSA components for memory-aware HRM.
+
+    Memory-aware HRM makes the slot registry part of the reasoning loop instead
+    of a post-reasoning block: each l_cycle READs memory (retrieval -> sparse
+    attention over the registry accumulated so far) and WRITEs memory (registers
+    the current hidden state's K/V as slots). This holds no parameters — it
+    borrows the model's existing ``msa`` / ``msa_router`` / ``hdim_slot_router``
+    nn.Modules so the checkpoint state_dict is unchanged and the routers stay
+    shared (one set of trained routing weights, read and written identically).
+
+    Contract:
+      - ``registry`` is owned by the caller (HRMCore). It persists across the
+        l_cycles within one forward and is cleared at forward start, so cycle
+        k>0 reads what cycle k-1 wrote — the intra-forward memory link.
+      - ``read`` is a no-op (returns zero) when the registry is empty, so the
+        first cycle (no prior write) is just reasoning + write.
+      - ``write`` always registers the current hidden as slots; the registry's
+        ``max_slots`` cap bounds growth.
+      - ``slot_id_base`` is threaded by the caller so successive writes get
+        disjoint slot ids (the registry dedups by id, but disjoint ids avoid
+        the in-place overwrite path and keep the eviction order meaningful).
+
+    Returns from ``read``: (msa_out, lb_loss, slot_ids, scores) where lb_loss is
+    None unless ``compute_lb`` and the registry is non-empty.
+    """
+
+    def __init__(
+        self,
+        msa: MSAAttention,
+        msa_router: SparseRouter,
+        hdim_slot_router: HDIMSlotRouter,
+        cfg: Any,
+    ):
+        self.msa = msa
+        self.msa_router = msa_router
+        self.hdim_slot_router = hdim_slot_router
+        self.top_k = int(getattr(cfg, "msa_top_k", 5))
+        self.chunk_size = int(getattr(cfg, "msa_chunk_size", 1))
+        self.aux_loss = bool(getattr(cfg, "msa_aux_loss", True))
+        self.lb_alpha = float(getattr(cfg, "msa_lb_alpha", 1.0))
+        self.use_nars = bool(getattr(cfg, "use_nars", False))
+        self.nars_msa: Any = None  # set by the model when use_nars=true
+
+    def read(
+        self,
+        hidden_states: torch.Tensor,
+        registry: SlotRegistry,
+        training_mode: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Read memory: route + sparse-attend over the current registry.
+
+        Returns (msa_out [B,T,H], lb_loss | None, slot_ids | None, scores | None).
+        When the registry is empty returns (zeros, None, None, None) so the first
+        cycle has no memory to read and HRM proceeds to reasoning + write.
+        """
+        h = hidden_states
+        b, t, _ = h.shape
+        if len(registry) == 0:
+            return torch.zeros_like(h), None, None, None
+
+        if self.use_nars and self.nars_msa is not None:
+            with torch.no_grad():
+                query_hidden = h.mean(dim=(0, 1))  # [H] pooled for NARS routing
+                # NARS path returns [B=1] ids/scores; expand to [B, T, top_k].
+                top_k_ids, top_values = self.nars_msa.route_top_k_with_nars(
+                    registry, query_hidden, self.top_k
+                )
+                slot_ids = top_k_ids.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
+                scores = top_values.unsqueeze(0).unsqueeze(0).expand(b, t, -1)
+                nars_weights = self.nars_msa.compute_attention_weights(slot_ids)
+                lb_loss = None
+        else:
+            slot_ids, _raw_scores, weights, lb = self.msa_router.route_top_k(
+                h,
+                registry,
+                self.top_k,
+                compute_lb=self.aux_loss and training_mode,
+                lb_alpha=self.lb_alpha,
+            )
+            scores = weights
+            nars_weights = None
+            lb_loss = lb
+
+        msa_out = self.msa(h, slot_ids, registry, nars_weights=nars_weights)
+        return msa_out, lb_loss, slot_ids, scores
+
+    def write(
+        self,
+        hidden_states: torch.Tensor,
+        registry: SlotRegistry,
+        slot_id_base: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Write memory: project the hidden to K/V and register fresh slots.
+
+        Returns (slot_ids [N], routing_keys [N, key_dim]) so the caller can
+        thread the next ``slot_id_base`` (base + N) for disjoint ids.
+        """
+        h = hidden_states
+        b, t, _ = h.shape
+        nkv = self.msa.num_kv_heads
+        head_dim = self.msa.head_dim
+
+        if hasattr(self.msa, "kv_proj"):
+            kv = (
+                self.msa.kv_proj(h).view(b, t, 2 * nkv, head_dim).transpose(1, 2)
+            )
+            k, v = kv.split(nkv, dim=1)
+        else:
+            k = self.msa.k_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
+            v = self.msa.v_proj(h).view(b, t, nkv, head_dim).transpose(1, 2)
+
+        slot_ids, routing_keys, k_caches, v_caches = (
+            self.hdim_slot_router.batch_create_slots(
+                hidden_states=h,
+                k_cache=k,
+                v_cache=v,
+                slot_id_base=slot_id_base,
+                domain_id=0,
+                chunk_size=self.chunk_size,
+            )
+        )
+        registry.batch_register(slot_ids, routing_keys, k_caches, v_caches)
+        return slot_ids, routing_keys

@@ -78,9 +78,11 @@ class LoopConfig:
     w_iso_start: float = 0.0
     w_moe_start: float = 0.0
     w_msa_lb_start: float = 0.0
+    w_gdr_router_start: float = 0.0
     aux_warmup_steps: int = 2000
     iso_warmup_steps: int = 5000
     moe_warmup_steps: int = 2000
+    gdr_router_warmup_steps: int = 2000
     loss_warmup_mode: str = "linear"
 
 
@@ -338,6 +340,11 @@ def _resolve_loss(
         msa_aux_loss=(
             model_output.get("msa_aux_loss") if isinstance(model_output, dict) else None
         ),
+        gdr_router_aux=(
+            model_output.get("gdr_router_aux")
+            if isinstance(model_output, dict)
+            else None
+        ),
         chunk_size=chunk_size,
         quality_score=(
             model_output.get("quality_score")
@@ -396,6 +403,7 @@ def build_loop_config(
         w_iso_start=float(train_cfg.get("w_iso_start", 0.0)),
         w_moe_start=float(train_cfg.get("w_moe_start", 0.0)),
         w_msa_lb_start=float(train_cfg.get("w_msa_lb_start", 0.0)),
+        w_gdr_router_start=float(train_cfg.get("w_gdr_router_start", 0.0)),
         aux_warmup_steps=int(
             train_cfg.get("aux_warmup_steps", train_cfg.get("aux_warmup", 2000))
         ),
@@ -404,6 +412,9 @@ def build_loop_config(
         ),
         moe_warmup_steps=int(
             train_cfg.get("moe_warmup_steps", train_cfg.get("moe_warmup", 2000))
+        ),
+        gdr_router_warmup_steps=int(
+            train_cfg.get("gdr_router_warmup_steps", train_cfg.get("moe_warmup", 2000))
         ),
         loss_warmup_mode=str(train_cfg.get("loss_warmup_mode", "linear")),
     )
@@ -458,16 +469,15 @@ def train(
     ):
         if hasattr(torch, "compile"):
             _patch_inductor_decoder()
-            # dynamic=True: variable-length training (data.min_seq_len=256 ->
-            # max_seq_len=1024) draws a fresh T every batch, so Dynamo would
-            # specialize a guard on targets.shape[1] and hit recompile_limit(8)
-            # -> eager fallback (wasted step-0 compile). dynamic shapes let one
-            # graph cover the whole T range with no recompiles.
-            # mode left default (NOT "max-autotune"): the inductor Triton autotuner
-            # segfaults (0xC0000005 access violation) in bf16 backward on this
-            # Windows/torch build — the autotuned GEMM kernel is ABI-incompatible.
-            # default mode uses the stable eager-fallback kernels.
-            run_model = torch.compile(model, dynamic=True)
+            # dynamic shapes only when variable-length training is active
+            # (data.min_seq_len < max_seq_len draws a fresh T every batch, so
+            # Dynamo would specialize a guard on targets.shape[1] and hit
+            # recompile_limit(8) -> eager fallback). With fixed shapes
+            # (min_seq_len == max_seq_len, the canonical config) dynamic=False
+            # lets inductor specialize on the single T -> tighter static kernels,
+            # no dynamic-shape dispatch overhead per fwd.
+            _dyn = bool(getattr(model.cfg, "use_dynamic_shapes", False))
+            run_model = torch.compile(model, dynamic=_dyn)
 
     precision = cfg.precision
     use_scaler = precision == "fp16" and device.startswith("cuda")
@@ -538,6 +548,9 @@ def train(
     final_iso = composite_weights.get("w_iso", 0.01) if composite_weights else 0.0
     final_moe = composite_weights.get("w_moe", 0.0) if composite_weights else 0.0
     final_msa_lb = composite_weights.get("w_msa_lb", 0.0) if composite_weights else 0.0
+    final_gdr_router = (
+        composite_weights.get("w_gdr_router", 0.0) if composite_weights else 0.0
+    )
 
     last_loss = float("nan")
     end = (
@@ -604,6 +617,13 @@ def train(
                 cfg.moe_warmup_steps,
                 cfg.loss_warmup_mode,
             )
+            effective_weights["w_gdr_router"] = scheduled_weight(
+                step,
+                cfg.w_gdr_router_start,
+                final_gdr_router,
+                cfg.gdr_router_warmup_steps,
+                cfg.loss_warmup_mode,
+            )
 
         optimizer.zero_grad(set_to_none=True)
         accum_loss_tensor: torch.Tensor | None = None
@@ -647,6 +667,7 @@ def train(
                     and effective_weights.get("w_iso", 0) == 0
                     and effective_weights.get("w_moe", 0) == 0
                     and effective_weights.get("w_msa_lb", 0) == 0
+                    and effective_weights.get("w_gdr_router", 0) == 0
                     and effective_weights.get("w_quality", 0) == 0
                     and isinstance(output, dict)
                     and output.get("loss") is not None

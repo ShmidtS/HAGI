@@ -281,6 +281,16 @@ model:
     residual: 192        # Unconstrained channel (standard update)
     scalar_momentum: 0.5 # Momentum for scalar grade update
     vector_momentum: 0.5 # Momentum for vector grade update
+    # Learnable GDR capacity (MoE-style): a router gates the per-grade update
+    # magnitude so the model self-allocates update energy across
+    # scalar/vector/bivector/trivector instead of the fixed 64/96/96/64 split.
+    # The grade DIMENSIONS stay (Clifford needs vector % 8 == 0); the router
+    # scales magnitude, so geometric_product math is unchanged. A Shazeer/Switch
+    # load-balance aux (gdr_router_alpha) keeps the gate from collapsing.
+    # Read in: GradeConfig.gdr_router (gdr.py), GradeRouter (gdr.py)
+    gdr_router: true
+    gdr_router_alpha: 0.01
+    gdr_router_temperature: 1.0
 
   # --- HRM (Hierarchical Recurrent Model) ---
 
@@ -288,6 +298,15 @@ model:
   # When true, HRM owns the reasoning loop (iter_embed is unused).
   # Read in: HAGIConfig.hrm (hagi.py:51), hagi.py:168,217
   hrm: true
+
+  # Memory-aware HRM: move MSA read+write INSIDE the l_cycle loop so each
+  # reasoning cycle reads the slot registry accumulated by the prior cycle and
+  # writes back the refined hidden. This makes the slot registry part of the
+  # thinking process (HRM <-> MSA bidirectional) instead of a bolt-on block run
+  # after reasoning. Requires hrm=true, use_msa=true, hrm_l_cycles>=2 (so a
+  # later cycle has memory written by an earlier one to read).
+  # Read in: HAGIConfig.hrm_memory_aware (hagi.py), hagi.py forward, hrm_full.py
+  hrm_memory_aware: true
 
   # High-level state dimension (z_H). Updated once per h_cycle.
   # Read in: HAGIConfig.h_dim (hagi.py:54), hagi.py:170
@@ -303,14 +322,17 @@ model:
 
   # Low-level cycles: z_L updates per h_cycle. Effective reasoning
   # iterations = hrm_h_cycles × hrm_l_cycles. Raised 1->2: a single
-  # reasoning pass under-trains the recurrent core (loss plateaus ~5.0,
-  # the reasoning blocks are shared weights reused once). Two l_cycles
-  # double the recurrence depth — the z_L state refines across passes,
-  # giving the reasoning stage gradient signal on both passes instead of
-  # one. ~1.5x reasoning-stage FLOPS (perception/expression unchanged);
-  # activation memory rises one reasoning pass worth — verify VRAM <8GB.
+  # reasoning pass under-trains the recurrent core, and memory-aware HRM
+  # (hrm_memory_aware=true) needs >=2 cycles so a later cycle has memory
+  # written by an earlier one to read (cycle 0 writes, cycle 1 reads+writes).
+  # Two l_cycles double the recurrence depth — the z_L state refines across
+  # passes, giving the reasoning stage gradient signal on both passes instead
+  # of one, and each pass interleaves MSA memory read+write so the slot
+  # registry becomes part of the thinking loop. ~1.5x reasoning-stage FLOPS
+  # (perception/expression unchanged); activation memory rises one reasoning
+  # pass worth — verify VRAM <8GB.
   # Read in: HAGIConfig.hrm_l_cycles (hagi.py:53), hagi.py:174
-  hrm_l_cycles: 1
+  hrm_l_cycles: 2
 
   # --- MSA (Memory Sparse Attention) ---
 
@@ -345,6 +367,13 @@ model:
   # Slot compression: group C adjacent tokens into one slot via mean-pooling.
   # Cx more context at the same slot budget. 1 = per-token (legacy).
   # Effective MSA context = msa_slot_count × msa_chunk_size.
+  # KEPT AT 4: memory-aware HRM does MSA read+write inside every l_cycle (2x),
+  # and the MSA attention score tensor scales as [B, nq, T, top_k, T_slot] —
+  # T_slot=chunk_size, so chunk=8 doubled the score tensor and OOM'd at 9.1GB
+  # reserved (vs 5.97GB at chunk=4). chunk=4 keeps VRAM safely under 8GB while
+  # still giving 4096*4=16384 tokens of effective context. The per-cycle slot
+  # count B*T/4=4096 is the registry K/V term; it is bounded by detach + the
+  # model-owned registry clear between forwards.
   # Read in: HAGIConfig.msa_chunk_size (hagi.py:68), hagi.py:595
   msa_chunk_size: 4
 
@@ -550,9 +579,14 @@ training:
   learning_rate: 0.0004
 
   # Micro-batch size (per GPU step before gradient accumulation).
-  # Effective batch = batch_size × grad_accum_steps = 8 × 4 = 32.
+  # Lowered 16->12: memory-aware HRM does MSA read+write inside every l_cycle
+  # (2x), raising per-step activation memory. batch=16 hit 7.23GB reserved
+  # (close to the 8GB ceiling); batch=12 drops reserved to 5.11GB with a
+  # comfortable 2.9GB headroom while keeping tok/s essentially unchanged
+  # (17430 vs 17807 — smaller micro-batch offsets via faster steps). Effective
+  # batch is preserved at ~36 via grad_accum_steps=3 below (was 32 at 16x2).
   # Read in: train.py:433, loop.py:340
-  batch_size: 16
+  batch_size: 12
 
   # Checkpoint save interval (steps).
   # Read in: loop.py:346 (build_loop_config)
@@ -580,6 +614,7 @@ training:
     w_iso: 0.02      # Isomorphic MSE (HDIM domain invariant alignment)
     w_moe: 0.005     # MoE load-balance aux
     w_msa_lb: 0.01   # MSA router load-balance aux
+    w_gdr_router: 0.005 # Learnable GDR grade-capacity router load-balance aux
     w_quality: 0.0   # Quality head BCE (disabled when use_quality_head=false)
 
   # Composite-loss warmup start values (ramp from start → final target).
@@ -588,6 +623,7 @@ training:
   w_iso_start: 0.0
   w_moe_start: 0.0
   w_msa_lb_start: 0.0
+  w_gdr_router_start: 0.0
 
   # --- Schedule ---
 
@@ -620,8 +656,12 @@ training:
   # --- Gradient ---
 
   # Gradient accumulation steps. Effective batch = batch_size × grad_accum.
+  # Raised 2->3 to keep effective batch ~36 (12*3) after batch_size 16->12,
+  # matching the prior 16*2=32 effective batch so optimizer dynamics / LR
+  # calibration carry over. VRAM is unchanged (grad accum adds no activation
+  # memory — each micro-batch is processed and freed before the next).
   # Read in: loop.py:340 (build_loop_config), loop.py:547
-  grad_accum_steps: 2
+  grad_accum_steps: 3
 
   # Global gradient clipping (max L2 norm). Applied before optimizer step.
   # Lowered 1.0->0.8: tighter clip caps the grad_norm excursion (1.51 at step
@@ -804,6 +844,10 @@ training:
   # Warmup steps for L_moe (MoE load-balance loss).
   # Read in: loop.py:370 (build_loop_config), loop.py:533
   moe_warmup_steps: 3500
+
+  # Warmup steps for the learnable GDR grade-capacity router load-balance loss.
+  # Read in: loop.py (build_loop_config), loop.py train loop scheduled_weight
+  gdr_router_warmup_steps: 3500
 
   # --- VRAM probe ---
 
