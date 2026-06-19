@@ -586,7 +586,7 @@ training:
   # (17430 vs 17807 — smaller micro-batch offsets via faster steps). Effective
   # batch is preserved at ~36 via grad_accum_steps=3 below (was 32 at 16x2).
   # Read in: train.py:433, loop.py:340
-  batch_size: 12
+  batch_size: 14
 
   # Checkpoint save interval (steps).
   # Read in: loop.py:346 (build_loop_config)
