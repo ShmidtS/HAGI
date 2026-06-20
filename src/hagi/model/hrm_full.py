@@ -64,6 +64,28 @@ class ResetL(nn.Module):
         return g * h + (1 - g) * x
 
 
+class AttentionPool(nn.Module):
+    """Attention-based pooling of a token sequence into a single vector.
+
+    Replaces ``transformer_output.mean(dim=1)`` in LTransition: mean pooling
+    loses positional information and weights every token equally. A learned
+    query attends over the sequence so the pooled z_L keeps the tokens most
+    relevant to the recurrent state (better long-range information retention
+    in z_L). ~50K extra params (hidden_size query + scalar score proj).
+    """
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, hidden_size) * 0.02)
+        self.scale = hidden_size ** -0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, T, H] -> [B, H]
+        scores = (x * self.query).sum(dim=-1, keepdim=True) * self.scale  # [B, T, 1]
+        weights = torch.softmax(scores, dim=1)
+        return (x * weights).sum(dim=1)
+
+
 class LTransition(nn.Module):
     def __init__(
         self,
@@ -82,6 +104,9 @@ class LTransition(nn.Module):
         self.down = nn.Linear(mult * l_dim, l_dim)
         self.gate = nn.Linear(in_dim, l_dim)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        # Attention pooling preserves positional/long-range info that mean
+        # pooling discards. Fresh training only — no legacy mean-pool fallback.
+        self.pool = AttentionPool(hidden_size)
         if h_cycles > 1:
             self.reset_l = ResetL(
                 h_dim if h_dim is not None else hidden_size, l_dim, mult, dropout
@@ -92,7 +117,7 @@ class LTransition(nn.Module):
     def forward(
         self, z_L_prev: torch.Tensor, transformer_output: torch.Tensor
     ) -> torch.Tensor:
-        pooled = transformer_output.mean(dim=1)
+        pooled = self.pool(transformer_output)
         x = torch.cat([z_L_prev, pooled], dim=-1)
         x = self.norm(x)
         h = self.act(self.up(x))
@@ -124,6 +149,13 @@ class HRMCore(nn.Module):
 
         self.h_init = nn.Linear(hidden_size, h_dim)
         self.l_init = nn.Linear(hidden_size, l_dim)
+        # Learnable initial state baseline (plan 1.5): a data-independent anchor
+        # added to the pooled init so the recurrent state has a stable starting
+        # point the model can learn, instead of being purely a function of the
+        # first forward's pooled hidden. Zero-init so fresh training starts at
+        # the pooled-init behavior and the baseline grows in as it learns.
+        self.z_h_init = nn.Parameter(torch.zeros(1, 1, h_dim))
+        self.z_l_init = nn.Parameter(torch.zeros(1, 1, l_dim))
         self.h_transition = (
             HTransition(h_dim, l_dim, transition_mult, transition_dropout)
             if h_cycles > 1
@@ -159,6 +191,7 @@ class HRMCore(nn.Module):
         msa_memory: Optional["MSAMemory"] = None,
         msa_registry: Optional["SlotRegistry"] = None,
         hrm_memory_aware: bool = False,
+        gc_group_size: int = 1,
     ):
         h = hidden_states
         B, T, H = h.shape
@@ -169,9 +202,9 @@ class HRMCore(nn.Module):
         if isinstance(z_L, LState):
             z_L = z_L.z_L
         if z_H is None:
-            z_H = self.h_init(pooled)
+            z_H = self.h_init(pooled) + self.z_h_init.expand(B, -1, -1).squeeze(1)
         if z_L is None:
-            z_L = self.l_init(pooled)
+            z_L = self.l_init(pooled) + self.z_l_init.expand(B, -1, -1).squeeze(1)
         # Past the branches above z_H/z_L are always tensors, but the
         # parameter is typed Tensor|HState|None, so narrow with cast for the
         # dtype/device access and the gate scaling below.
@@ -245,30 +278,60 @@ class HRMCore(nn.Module):
                         msa_lb_loss = lb
 
                 bias = h_term + self.z_l_to_hidden(z_L).unsqueeze(1)
-                for block in reasoning_blocks:
-                    h_in = h + bias
-                    if gradient_checkpointing:
-                        result = checkpoint(
-                            block,
-                            h_in,
-                            cos,
-                            sin,
-                            attn_mask=attn_mask,
-                            use_reentrant=False,
-                        )
-                    else:
-                        result = block(h_in, cos, sin, attn_mask=attn_mask)
-                    if (
-                        isinstance(result, tuple)
-                        and len(result) == 2
-                        and isinstance(result[1], torch.Tensor)
-                        and result[1].ndim == 0
-                    ):
-                        h = result[0]
-                        if moe_aux_losses is not None:
-                            moe_aux_losses.append(result[1])
-                    else:
-                        h = result
+                block_list = list(reasoning_blocks)
+                if gradient_checkpointing and gc_group_size > 1 and len(block_list) > 1:
+                    # Group checkpointing: wrap consecutive reasoning blocks in one
+                    # checkpoint call -> halves recompute passes in backward
+                    # (14 -> 7 for 7 blocks x 2 l_cycles), the HRM hot path.
+                    for gi in range(0, len(block_list), gc_group_size):
+                        group = block_list[gi : gi + gc_group_size]
+
+                        def run_group(h_in, _blocks=group, _bias=bias):
+                            hh = h_in
+                            _aux_local: list[torch.Tensor] = []
+                            for _b in _blocks:
+                                res = _b(hh + _bias, cos, sin, attn_mask=attn_mask)
+                                if (
+                                    isinstance(res, tuple)
+                                    and len(res) == 2
+                                    and isinstance(res[1], torch.Tensor)
+                                    and res[1].ndim == 0
+                                ):
+                                    hh = res[0]
+                                    _aux_local.append(res[1])
+                                else:
+                                    hh = res
+                            if moe_aux_losses is not None:
+                                for _a in _aux_local:
+                                    moe_aux_losses.append(_a.detach())
+                            return hh
+
+                        h = checkpoint(run_group, h, use_reentrant=False)
+                else:
+                    for block in block_list:
+                        h_in = h + bias
+                        if gradient_checkpointing:
+                            result = checkpoint(
+                                block,
+                                h_in,
+                                cos,
+                                sin,
+                                attn_mask=attn_mask,
+                                use_reentrant=False,
+                            )
+                        else:
+                            result = block(h_in, cos, sin, attn_mask=attn_mask)
+                        if (
+                            isinstance(result, tuple)
+                            and len(result) == 2
+                            and isinstance(result[1], torch.Tensor)
+                            and result[1].ndim == 0
+                        ):
+                            h = result[0]
+                            if moe_aux_losses is not None:
+                                moe_aux_losses.append(result[1])
+                        else:
+                            h = result
                 assert isinstance(h, torch.Tensor)
                 if gdr is not None:
                     current_step = h_cycle * self.l_cycles + l_cycle

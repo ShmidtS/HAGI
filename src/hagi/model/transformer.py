@@ -37,6 +37,7 @@ class TransformerConfig:
     moe_intermediate_size: int | None = None
     moe_alpha: float = 0.01
     moe_router_temperature: float = 1.0
+    moe_mod_skip: bool = False
 
     def __post_init__(self):
         assert (
@@ -232,38 +233,6 @@ class GroupedQueryAttention(nn.Module):
             state.pop(f"{prefix}_qkv_splits", None)
         return state
 
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        qkv_key = prefix + "qkv_weight"
-        q_key = prefix + "q_proj.weight"
-        k_key = prefix + "k_proj.weight"
-        v_key = prefix + "v_proj.weight"
-        if qkv_key not in state_dict and all(
-            k in state_dict for k in (q_key, k_key, v_key)
-        ):
-            q = state_dict[q_key]
-            k = state_dict[k_key]
-            v = state_dict[v_key]
-            state_dict[qkv_key] = torch.cat([q, k, v], dim=0)
-            del state_dict[q_key], state_dict[k_key], state_dict[v_key]
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
-
     def forward(
         self,
         x: torch.Tensor,
@@ -351,37 +320,6 @@ class SwiGLU(nn.Module):
             state[f"{prefix}up.weight"] = up
             state.pop(f"{prefix}gate_up_weight", None)
         return state
-
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        gate_up_key = prefix + "gate_up_weight"
-        gate_key = prefix + "gate.weight"
-        up_key = prefix + "up.weight"
-        if gate_up_key in state_dict:
-            state_dict.pop(gate_key, None)
-            state_dict.pop(up_key, None)
-        elif all(k in state_dict for k in (gate_key, up_key)):
-            gate = state_dict[gate_key]
-            up = state_dict[up_key]
-            state_dict[gate_up_key] = torch.cat([gate, up], dim=0)
-            del state_dict[gate_key], state_dict[up_key]
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if hasattr(self, "gate_up_weight"):

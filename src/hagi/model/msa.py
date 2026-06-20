@@ -831,34 +831,6 @@ class MSAAttention(nn.Module):
             state.pop(f"{prefix}kv_proj.weight", None)
         return state
 
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        kv_key = prefix + "kv_proj.weight"
-        k_key = prefix + "k_proj.weight"
-        v_key = prefix + "v_proj.weight"
-        if kv_key not in state_dict and all(k in state_dict for k in (k_key, v_key)):
-            k = state_dict[k_key]
-            v = state_dict[v_key]
-            state_dict[kv_key] = torch.cat([k, v], dim=0)
-            del state_dict[k_key], state_dict[v_key]
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
-
     @torch.compiler.disable
     def _fetch_kv_from_slots(
         self,

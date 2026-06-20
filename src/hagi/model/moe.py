@@ -44,8 +44,15 @@ class MoESwiGLU(nn.Module):
         )
         self.router_temperature = cfg.moe_router_temperature
         self.alpha = getattr(cfg, "moe_alpha", 0.01)
+        # Mixture-of-Depths (plan 4.2): an extra "skip" router slot whose
+        # selected token bypasses the experts (output 0 -> residual identity).
+        # Trivial tokens skip the MLP compute. The skip slot is the LAST router
+        # logit; when it wins the topk the token gets zero expert output.
+        self.use_mod_skip = bool(getattr(cfg, "moe_mod_skip", False))
+        router_out = cfg.num_experts + (1 if self.use_mod_skip else 0)
+        self.skip_idx = cfg.num_experts if self.use_mod_skip else -1
 
-        self.router = nn.Linear(cfg.hidden_size, cfg.num_experts, bias=False)
+        self.router = nn.Linear(cfg.hidden_size, router_out, bias=False)
         nn.init.normal_(self.router.weight, mean=0.0, std=0.01)
         self.experts = nn.ModuleList(_SwiGLUExpert(cfg) for _ in range(cfg.num_experts))
 
@@ -77,21 +84,49 @@ class MoESwiGLU(nn.Module):
             if self.top_k == 1:
                 # Fast path: sort by expert index for contiguous dispatch and fewer
                 # kernel launches (one sort instead of num_experts where+index_select).
-                sorted_experts, sort_order = torch.sort(expert_idx)
-                sorted_tokens = flat[sort_order]
-                unique_experts, counts = torch.unique_consecutive(
-                    sorted_experts, return_counts=True
-                )
-                offset = 0
-                for e_idx, count in zip(unique_experts.tolist(), counts.tolist()):
-                    expert = self.experts[e_idx]
-                    slice_tokens = sorted_tokens[offset : offset + count]
-                    expert_out = expert(slice_tokens)
-                    out_indices = sort_order[offset : offset + count]
-                    if expert_out.dtype != output.dtype:
-                        expert_out = expert_out.to(output.dtype)
-                    output.index_copy_(0, out_indices, expert_out)
-                    offset += count
+                # MoD: tokens routed to the skip slot keep output 0 (residual
+                # identity) and are excluded from expert dispatch entirely.
+                if self.use_mod_skip:
+                    nonskip = expert_idx != self.skip_idx
+                    if not nonskip.any():
+                        # all tokens skip -> no expert compute, output stays 0
+                        pass
+                    else:
+                        keep = torch.where(nonskip)[0]
+                        expert_idx = expert_idx[keep]
+                        probs = probs[keep]
+                        sorted_experts, sort_order = torch.sort(expert_idx)
+                        sorted_tokens = flat[keep][sort_order]
+                        unique_experts, counts = torch.unique_consecutive(
+                            sorted_experts, return_counts=True
+                        )
+                        offset = 0
+                        for e_idx, count in zip(unique_experts.tolist(), counts.tolist()):
+                            expert = self.experts[e_idx]
+                            slice_tokens = sorted_tokens[offset : offset + count]
+                            expert_out = expert(slice_tokens)
+                            # map back: sort_order -> keep index -> flat index
+                            flat_indices = keep[sort_order[offset : offset + count]]
+                            if expert_out.dtype != output.dtype:
+                                expert_out = expert_out.to(output.dtype)
+                            output.index_copy_(0, flat_indices, expert_out)
+                            offset += count
+                else:
+                    sorted_experts, sort_order = torch.sort(expert_idx)
+                    sorted_tokens = flat[sort_order]
+                    unique_experts, counts = torch.unique_consecutive(
+                        sorted_experts, return_counts=True
+                    )
+                    offset = 0
+                    for e_idx, count in zip(unique_experts.tolist(), counts.tolist()):
+                        expert = self.experts[e_idx]
+                        slice_tokens = sorted_tokens[offset : offset + count]
+                        expert_out = expert(slice_tokens)
+                        out_indices = sort_order[offset : offset + count]
+                        if expert_out.dtype != output.dtype:
+                            expert_out = expert_out.to(output.dtype)
+                        output.index_copy_(0, out_indices, expert_out)
+                        offset += count
             else:
                 for e_idx, expert in enumerate(self.experts):
                     mask = expert_idx == e_idx
@@ -112,11 +147,23 @@ class MoESwiGLU(nn.Module):
         output = output.view(B, T, D)
 
         if self.training:
-            router_prob_per_expert = router_probs.mean(dim=0)
+            # Aux load-balance over REAL experts only (skip slot excluded).
+            # router_probs has num_experts+1 columns when MoD is on; slice off
+            # the skip column. top_k_indices may contain skip_idx — clamp to a
+            # valid expert and zero those rows' contribution so skip-routed
+            # tokens don't bias the balance loss.
+            real_probs = router_probs[:, : self.num_experts]
+            router_prob_per_expert = real_probs.mean(dim=0)
             top_k_mask = torch.zeros(
                 B * T, self.num_experts, device=x.device, dtype=router_probs.dtype
             )
-            top_k_mask.scatter_(1, top_k_indices, 1.0)
+            if self.use_mod_skip:
+                nonskip_sel = (top_k_indices != self.skip_idx)
+                safe_idx = top_k_indices.clamp(max=self.num_experts - 1)
+                top_k_mask.scatter_(1, safe_idx, 1.0)
+                top_k_mask = top_k_mask * nonskip_sel.float()
+            else:
+                top_k_mask.scatter_(1, top_k_indices, 1.0)
             fraction_per_expert = top_k_mask.mean(dim=0)
             aux_loss = (
                 self.alpha

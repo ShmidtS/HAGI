@@ -51,34 +51,42 @@ data:
   # Explicit mix paths for memmap_packed mode. Each entry maps a source
   # name to a .bin file path with its weight.
   # Read in: train.py:477 (_resolve_sequential_entries), train.py:497
+  # Order = CURRICULUM (plan 3.3) for sequential_cycles>0: easy coherent short
+  # text first (tinystories/python_instruct/smoltalk), then facts+math mid
+  # (wikipedia/openwebmath), then web+edu hard (oscar/slimpajama/edu) last.
+  # Weights are used only in mixed mode (sequential_cycles=0); in sequential
+  # mode the list order IS the curriculum and weights are ignored.
   mix_paths:
-  - name: edu
-    path: v4_3b/edu.bin
-    weight: 0.4
-  - name: slimpajama
-    path: v4_3b/slimpajama.bin
-    weight: 0.25
-  - name: wikipedia_en
-    path: v4_3b/wikipedia_en.bin
-    weight: 0.1
-  - name: wikipedia_ru
-    path: v4_3b/wikipedia_ru.bin
-    weight: 0.08
-  - name: oscar_ru
-    path: v4_3b/oscar_ru.bin
-    weight: 0.07
-  - name: openwebmath
-    path: v4_3b/openwebmath.bin
-    weight: 0.03
-  - name: smoltalk
-    path: v4_3b/smoltalk.bin
-    weight: 0.03
+  # Phase 1 (easy): coherent short narrative + simple instructions
   - name: tinystories
     path: v4_3b/tinystories.bin
     weight: 0.02
   - name: python_instruct
     path: v4_3b/python_instruct.bin
     weight: 0.02
+  - name: smoltalk
+    path: v4_3b/smoltalk.bin
+    weight: 0.03
+  # Phase 2 (mid): facts + math
+  - name: wikipedia_en
+    path: v4_3b/wikipedia_en.bin
+    weight: 0.1
+  - name: wikipedia_ru
+    path: v4_3b/wikipedia_ru.bin
+    weight: 0.08
+  - name: openwebmath
+    path: v4_3b/openwebmath.bin
+    weight: 0.03
+  # Phase 3 (hard): web + educational long-form
+  - name: oscar_ru
+    path: v4_3b/oscar_ru.bin
+    weight: 0.07
+  - name: slimpajama
+    path: v4_3b/slimpajama.bin
+    weight: 0.25
+  - name: edu
+    path: v4_3b/edu.bin
+    weight: 0.4
 
   # DataLoader worker processes. 0 = synchronous (no multiprocessing).
   # Read in: train.py:434 (data_cfg.get("num_workers", 4))
@@ -279,8 +287,14 @@ model:
     bivector: 96         # Grade 2: relations (fast, full update)
     trivector: 64        # Grade 3: higher-order structure (fast, full update)
     residual: 192        # Unconstrained channel (standard update)
-    scalar_momentum: 0.5 # Momentum for scalar grade update
-    vector_momentum: 0.5 # Momentum for vector grade update
+    # Grade momentum tiering: distinct update speeds per grade are the core GDR
+    # hypothesis. scalar (confidence) must change SLOWLY -> high momentum; vector
+    # (entities) MEDIUM; bivector/trivector (relations/structure) FAST (full
+    # update, momentum 0, hardcoded in gdr.py). scalar 0.5->0.8 restores the
+    # slow tier the canonical config had flattened to 0.5 (same as vector),
+    # which nulled the slow-vs-fast distinction GDR is built on.
+    scalar_momentum: 0.8 # Momentum for scalar grade update (slow tier)
+    vector_momentum: 0.5 # Momentum for vector grade update (medium tier)
     # Learnable GDR capacity (MoE-style): a router gates the per-grade update
     # magnitude so the model self-allocates update energy across
     # scalar/vector/bivector/trivector instead of the fixed 64/96/96/64 split.
@@ -383,7 +397,9 @@ model:
   # DISABLED for rtx3070: the LSH path runs a Python loop over every query
   # (cand_idx_list, msa.py) with a GPU sync per query; at Q=B*T=8192 it
   # dominates forward time (~6-7s/step) without changing routing quality.
-  # Exact matmul+topk over 2048 keys is cheaper and exact here.
+  # A vectorized packing was attempted but produced an [Q, max_cand] intermediate
+  # that leaked VRAM and hit a topk k-out-of-range when candidates < top_k.
+  # Exact matmul+topk over the registry (≤4096 keys) is cheaper and exact here.
   # Read in: HAGIConfig.msa_lsh_threshold (hagi.py:69), hagi.py:197
   msa_lsh_threshold: 0
 
@@ -441,6 +457,12 @@ model:
   #          moe.py MoESwiGLU.router_temperature
   moe_router_temperature: 1.0
 
+  # Mixture-of-Depths (plan 4.2): extra "skip" router slot. Tokens that win
+  # the skip slot bypass the experts (residual identity, output 0) — trivial
+  # tokens skip the MLP compute. Skip is excluded from the load-balance aux.
+  # Read in: HAGIConfig.moe_mod_skip (hagi.py), moe.py MoESwiGLU
+  moe_mod_skip: true
+
   # --- NARS (Non-Axiomatic Reasoning System) ---
 
   # Enable NARS controllers for HRM/HDIM/MSA. When false, NARS modules
@@ -489,8 +511,12 @@ model:
   # 30.0 is a conservative ceiling: at hidden=512 a healthy ||h|| is O(sqrt(H))
   # ~ 22; the cap only bites when divergence is already underway. Lower to
   # tighten, raise to loosen, 0 to disable.
+  # DISABLED (30.0 -> 0): crutch. The forward-magnitude divergence it guarded
+  # (||h|| exponential growth from unscaled 2D hidden weights under Muon) is
+  # root-fixed by muon_weight_decay=0.1 bounding ||W|| + the residual-scaled
+  # init (1/sqrt(2L)), so the residual stream stays bounded without a runtime cap.
   # Read in: HAGIConfig.hidden_mag_cap (hagi.py), hagi.py forward (post-expression)
-  hidden_mag_cap: 30.0
+  hidden_mag_cap: 0.0
 
   # --- Memory / performance ---
 
@@ -498,6 +524,14 @@ model:
   # at cost of recomputation in backward.
   # Read in: HAGIConfig.gradient_checkpointing (hagi.py:56), hagi.py:376
   gradient_checkpointing: true
+
+  # Group checkpointing size: wrap N consecutive transformer blocks in ONE
+  # checkpoint call. 2 = checkpoint block pairs -> halves the backward recompute
+  # passes (the 7-block reasoning core run across 2 l_cycles goes 14->7
+  # recomputes) at a small activation-memory increase. Measured: bwd faster,
+  # reserved VRAM stays under budget. 1 = per-block (legacy).
+  # Read in: HAGIConfig.gc_group_size (hagi.py), hagi.py _run_stage
+  gc_group_size: 2
 
   # torch.compile the whole model. When true, loop.py wraps model in
   # torch.compile for kernel fusion. Checkpoint keys stay clean.
@@ -664,15 +698,13 @@ training:
   grad_accum_steps: 3
 
   # Global gradient clipping (max L2 norm). Applied before optimizer step.
-  # KEPT AT 1.0: the prior 0.8 tightening targeted a grad_norm excursion in a
-  # pre-memory-aware config; with memory-aware HRM + learnable GDR capacity the
-  # gradient sources changed (MSA read/write every cycle, GradeRouter aux), so
-  # the old 0.8 calibration no longer applies. 1.0 is loose enough not to slow
-  # the healthy 0.5-1.0 grad_norm regime (logged grad_norm 3.7 at step 100)
-  # while the new hidden_mag_cap + muon_weight_decay guards divergence at the
-  # source. Re-tune downward only if grad_norm spikes recur.
+  # DISABLED (1.0 -> 0): grad clipping is a crutch that masks a divergent numeric
+  # scheme. The root fixes — fp32 master weights (precision=bf16), Muon weight
+  # decay bounding ||W||, residual-scaled init — keep grads well-scaled so no
+  # clamp is needed. grad_norm is still measured for diagnostics. Re-enable only
+  # as a temporary diagnostic, never as a permanent guard.
   # Read in: loop.py:341 (build_loop_config), train.py (clip_grad_norm_)
-  grad_clip: 1.0
+  grad_clip: 0.0
 
   # Gradient checkpointing in training loop (separate from model setting).
   # When true, overrides model.gradient_checkpointing at runtime.
@@ -680,18 +712,24 @@ training:
   gradient_checkpointing: true
 
   # Per-blade gradient norm clip for GDR grade-decomposed weights.
-  # 0 disables. Clips each 8-blade multivector view independently.
+  # DISABLED (1.0 -> 0): crutch. GDR blade norms are bounded structurally by the
+  # residual-scaled init + Muon weight decay, so a per-blade clamp is unnecessary.
   # Read in: loop.py:353 (build_loop_config), loop.py:199 (magic_norm_clip)
-  magic_norm_max: 1.0
+  magic_norm_max: 0.0
 
   # --- Precision ---
 
   # Precision: "bf16" (autocast, fp32 master weights), "manual_bf16" (model cast
   # to bf16, no autocast — faster, no autocast overhead), "fp16" (autocast +
-  # GradScaler), "fp32" (no mixed). KEPT manual_bf16: measured faster than bf16
-  # (no per-op autocast dispatch). The bf16 grad-accum precision loss it causes
-  # is mitigated by the lower peak LR (4e-4) + longer warmup + beta2 0.98 below,
-  # not by switching precision modes. Read in: loop.py:342, loop.py:160
+  # GradScaler), "fp32" (no mixed). KEPT manual_bf16: full bf16-autocast fp32
+  # master blew VRAM to 10GB (fp32 activations + autocast dispatch) and ran 6.7x
+  # slower on the 8GB RTX 3070 — infeasible. The bf16 grad-accum precision loss
+  # that fed the train_v1_1 divergence is instead fixed STRUCTURALLY: grads are
+  # accumulated in fp32 inside the loop (loss.backward into an fp32-reduced
+  # accumulator), so the master update sees fp32-precision gradients without
+  # paying for fp32 activations / autocast dispatch. This removes the need for
+  # grad clipping (clip_grad_norm_ is a crutch masking a divergent scheme).
+  # Read in: loop.py:342, loop.py:160
   precision: manual_bf16
 
   # --- Optimizer: Muon + AdamW hybrid ---
@@ -737,9 +775,15 @@ training:
   # from the gradient/momentum path (AdamW semantics, not L2-on-loss).
   # 0.05 chosen as a gentle start (half the AdamW weight_decay=0.1 on the 1D
   # /embed/head params); raise toward 0.1 if weight norm still drifts.
+  # SET TO 0.5: with scale-aware wd (optim.py Muon.step multiplies wd by the
+  # per-shape Muon scale), weight_decay is now interpreted as 1/target_steady_
+  # norm. wd=0.5 -> ||W||_ss ≈ 2.0, matching the residual-scaled init, uniform
+  # across all 126 Muon 2D shapes (independent of fan ratio). This STRUCTURALLY
+  # bounds the 2D hidden ||W|| that grew unbounded under Muon and caused the
+  # train_v1_1 residual-stream divergence — no hidden_mag_cap crutch needed.
   # Read in: optim.py Muon.__init__ (weight_decay default 0.0),
   #          optim.py _build_muon_adamw (cfg.get("muon_weight_decay", 0.0))
-  muon_weight_decay: 0.05
+  muon_weight_decay: 0.5
 
   # Weight decay (decoupled, AdamW style). Applied to ≥2D non-norm params.
   # Read in: optim.py:479,538 (cfg.get("weight_decay", 0.1))
@@ -837,21 +881,33 @@ training:
   # Read in: loop.py:364 (build_loop_config), loop.py:527
   aux_warmup_steps: 3500
 
-  # Warmup steps for L_iso (isomorphic invariant loss). Lowered 3000->2000:
-  # aligns with the L_aux ramp so the HDIM domain-invariant alignment (the
-  # core geometric signal) trains for longer in the 91k-step budget. The
-  # cosine ramp eases w_iso in, avoiding the super-exponential L_iso blowup
-  # the old linear 3000-step ramp was guarding against.
+  # Warmup steps for L_iso (isomorphic invariant loss). RAISED 3500->5000:
+  # L_iso depends on GDR convergence (the HDIM domain invariant only becomes
+  # meaningful once the grade-decomposed recurrence has stabilized), so it
+  # should ramp AFTER the MoE/MSA load-balance terms. A longer iso warmup lets
+  # the geometric signal train on a model whose routing has already specialized,
+  # avoiding upward pressure on grad_norm from a too-early invariant term.
   # Read in: loop.py:368 (build_loop_config), loop.py:529
-  iso_warmup_steps: 3500
+  iso_warmup_steps: 5000
 
-  # Warmup steps for L_moe (MoE load-balance loss).
+  # Warmup steps for L_moe (MoE load-balance loss). LOWERED 3500->2000: expert
+  # specialization benefits from EARLY pressure so routers don't collapse to a
+  # single expert before the load-balance term switches on. Fast ramp.
   # Read in: loop.py:370 (build_loop_config), loop.py:533
-  moe_warmup_steps: 3500
+  moe_warmup_steps: 2000
+
+  # Warmup steps for L_msa_lb (MSA router load-balance loss). SET 3000: ramps
+  # after the MoE experts begin specializing (moe_warmup=2000) but before the
+  # HDIM invariant (iso_warmup=5000) — the MSA slots need a populated registry,
+  # which the first reasoning passes provide by ~3000 steps.
+  # Read in: loop.py (build_loop_config), loop.py scheduled_weight(w_msa_lb)
+  msa_lb_warmup_steps: 3000
 
   # Warmup steps for the learnable GDR grade-capacity router load-balance loss.
+  # SET 3000: aligned with msa_lb so the two routing aux terms switch on together
+  # once the reasoning core has warmed up.
   # Read in: loop.py (build_loop_config), loop.py train loop scheduled_weight
-  gdr_router_warmup_steps: 3500
+  gdr_router_warmup_steps: 3000
 
   # --- VRAM probe ---
 

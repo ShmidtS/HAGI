@@ -129,15 +129,24 @@ class Muon(torch.optim.Optimizer):
                     if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(g)  # type: ignore[reportPrivateImportUsage]
                     bufs.append(state["momentum_buffer"])
-                # Decoupled (AdamW-style) weight decay: shrink params by
-                # (1 - lr*wd) independently of the gradient/orthogonalized update.
-                # Muon orthogonalizes the update direction, which is scale-invariant
-                # and has no built-in shrinkage — without wd the 2D hidden weight
-                # norm grows monotonically under repeated orthogonalized steps,
-                # inflating the residual-stream forward gain. wd=0 reproduces the
-                # legacy behavior (no decay).
+                # Scale-aware decoupled weight decay. Muon's orthogonalized
+                # update has a fixed norm, applied as p -= lr*scale*ortho; the
+                # per-step growth in ||W|| is therefore ~lr*scale (shape-dependent
+                # via scale = sqrt(max(1, fan_out/fan_in)) capped at 2). Plain
+                # decoupled wd (shrink by 1-lr*wd) reaches steady state when
+                # lr*scale == lr*wd*||W||  ->  ||W||_ss = scale/wd, which varies
+                # 1x..2x across shapes and drifts far above init (measured 5.8x at
+                # wd=0.1). Scaling wd by the SAME `scale` makes the growth and
+                # decay both ~lr*scale, so ||W||_ss = 1/wd — uniform across shapes
+                # and independent of fan ratio. With wd=0.5 the steady norm ≈ 2.0,
+                # matching the residual-scaled init, so the residual-stream forward
+                # gain stays bounded WITHOUT a runtime hidden_mag_cap (a crutch).
+                # weight_decay here is interpreted as 1/target_steady_norm.
                 if weight_decay != 0.0:
-                    torch._foreach_mul_(params, 1.0 - lr * weight_decay)  # type: ignore[reportPrivateImportUsage]
+                    p0 = params[0]
+                    scale_wd = min(max(1.0, p0.size(0) / p0.size(1)) ** 0.5, 2.0)
+                    eff_wd = weight_decay * scale_wd
+                    torch._foreach_mul_(params, 1.0 - lr * eff_wd)  # type: ignore[reportPrivateImportUsage]
                 torch._foreach_mul_(bufs, momentum)  # type: ignore[reportPrivateImportUsage]
                 torch._foreach_add_(bufs, grads)  # type: ignore[reportPrivateImportUsage]
                 if nesterov:

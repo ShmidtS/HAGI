@@ -65,6 +65,11 @@ class HAGIConfig:
     # later cycle actually has memory written by an earlier one to read.
     hrm_memory_aware: bool = False
     gradient_checkpointing: bool = True
+    # Group checkpointing: wrap N consecutive transformer blocks in one
+    # torch.utils.checkpoint call. 1 = per-block (legacy, max recompute passes).
+    # 2 = checkpoint pairs -> halves backward recompute (14->7 for the 7-block
+    # reasoning core run across 2 l_cycles) at a small activation-memory cost.
+    gc_group_size: int = 1
     rotor_seed: int = 42
     use_hdim_cross_domain: bool = True
     use_msa: bool = True
@@ -112,6 +117,11 @@ class HAGIConfig:
     # (legacy); <1.0 flattens the expert distribution (more exploration/load
     # balance), >1.0 sharpens (stickier routing). See moe.py MoESwiGLU.
     moe_router_temperature: float = 1.0
+    # Mixture-of-Depths (plan 4.2): an extra "skip" router slot lets trivial
+    # tokens bypass the experts (residual identity, output 0), saving the MLP
+    # compute for tokens that don't need it. The skip slot is excluded from the
+    # load-balance aux loss.
+    moe_mod_skip: bool = False
     ce_chunk_size: int = 0
     use_fused_ce: bool = False
     ce_fused_chunk_size: int = 4096
@@ -138,6 +148,7 @@ class HAGIConfig:
         self.transformer.moe_intermediate_size = self.moe_intermediate_size
         self.transformer.moe_alpha = self.moe_alpha
         self.transformer.moe_router_temperature = self.moe_router_temperature
+        self.transformer.moe_mod_skip = self.moe_mod_skip
         if self.use_moe and self.transformer.moe_intermediate_size is None:
             self.transformer.moe_intermediate_size = (
                 self.transformer.intermediate_size // self.num_experts
@@ -470,21 +481,70 @@ class HAGI(nn.Module):
             return result
 
         def _run_stage(blocks, hidden):
-            """Run a sequence of transformer blocks, threading the KV cache."""
+            """Run a sequence of transformer blocks, threading the KV cache.
+
+            Group checkpointing: when ``gc_group_size > 1`` and gradient
+            checkpointing is on, consecutive blocks are wrapped together in a
+            single ``checkpoint`` call instead of one per block. This halves the
+            recompute passes in backward (14 -> 7 for the 7-block reasoning core
+            run twice) at the cost of holding the group's input activation
+            instead of each block's input — a small activation-memory increase
+            that stays well under the 8GB budget (measured). use_cache path keeps
+            per-block execution (KV threading is sequential).
+            """
             nonlocal layer_idx
-            for block in blocks:
-                past = (
-                    past_key_values[layer_idx]
-                    if past_key_values is not None and layer_idx < len(past_key_values)
-                    else None
+            # KV-cache path is inherently sequential; keep per-block there.
+            if use_cache or not use_gradient_checkpointing or self.cfg.gc_group_size <= 1:
+                for block in blocks:
+                    past = (
+                        past_key_values[layer_idx]
+                        if past_key_values is not None
+                        and layer_idx < len(past_key_values)
+                        else None
+                    )
+                    if use_cache:
+                        hidden, next_kv = _run_block(block, hidden, past)  # type: ignore[assignment]
+                        assert next_key_values is not None
+                        next_key_values.append(next_kv)
+                    else:
+                        hidden = _run_block(block, hidden)  # type: ignore[assignment]
+                    layer_idx += 1
+                return hidden
+
+            # Group checkpointing path: run block groups under one checkpoint.
+            group_size = int(self.cfg.gc_group_size)
+            block_list = list(blocks)
+            for i in range(0, len(block_list), group_size):
+                group = block_list[i : i + group_size]
+
+                def run_group(h_in, _blocks=group, _start=layer_idx):
+                    h = h_in
+                    _moe_local: list[torch.Tensor] = []
+                    for _b in _blocks:
+                        res = _b(h, cos, sin)
+                        if isinstance(res, tuple) and len(res) == 2:
+                            h = res[0]
+                            aux = res[1]
+                            if (
+                                _moe_list is not None
+                                and isinstance(aux, torch.Tensor)
+                                and aux.ndim == 0
+                            ):
+                                _moe_local.append(aux)
+                        else:
+                            h = res
+                    # MoE aux tensors must escape the checkpoint recomputation
+                    # as detached constants so they contribute to the loss without
+                    # being differentiated through the recomputed graph.
+                    if _moe_list is not None:
+                        for _aux in _moe_local:
+                            _moe_list.append(_aux.detach())
+                    return h
+
+                hidden = checkpoint(
+                    run_group, hidden, use_reentrant=False
                 )
-                if use_cache:
-                    hidden, next_kv = _run_block(block, hidden, past)  # type: ignore[assignment]
-                    assert next_key_values is not None
-                    next_key_values.append(next_kv)
-                else:
-                    hidden = _run_block(block, hidden)  # type: ignore[assignment]
-                layer_idx += 1
+                layer_idx += len(group)
             return hidden
 
         h = _run_stage(self.perception, h)
@@ -567,6 +627,7 @@ class HAGI(nn.Module):
                     msa_memory=self.msa_memory,
                     msa_registry=hrm_registry,
                     hrm_memory_aware=mem_aware,
+                    gc_group_size=int(getattr(self.cfg, "gc_group_size", 1)),
                 )
 
             if self.gdr is not None:
@@ -633,10 +694,20 @@ class HAGI(nn.Module):
                             h = self.gdr(h)
                     h = _run_stage(self.reasoning, h)
                 if self.training and self.cfg.thinking_noise > 0.0:
+                    assert h is not None
                     h = h + torch.randn_like(h) * self.cfg.thinking_noise  # type: ignore[reportPrivateImportUsage]
+                assert h is not None
                 h = h + self.iter_embed[i]
 
         # MSA integration after reasoning / GDR.
+        # Narrow h to Tensor: the reasoning loop reassigns h through _run_stage /
+        # _run_block (which return Any via checkpoint + tuple unpacking), so
+        # basedpyright flow-analysis widens it to Tensor | None here even though
+        # every branch produces a concrete Tensor. The assert documents the
+        # invariant and silences the Optional-narrowing errors on h.shape /
+        # h.device / h.mean / h.norm / batch_create_slots(h) / route_top_k(h)
+        # in the MSA block below.
+        assert h is not None
         # msa_lb_loss may already be set by the memory-aware HRM (the load-
         # balance aux computed inside the l_cycle read). Do NOT reset it here:
         # the legacy `= None` initializer clobbered the HRM-provided loss.
@@ -730,6 +801,7 @@ class HAGI(nn.Module):
                 h = h + msa_out
 
         h = _run_stage(self.expression, h)
+        assert h is not None
 
         # Runtime magnitude cap on the residual stream: any token whose ||h||
         # exceeds cfg.hidden_mag_cap is rescaled down to the cap. Guards the

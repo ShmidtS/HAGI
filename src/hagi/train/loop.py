@@ -82,6 +82,7 @@ class LoopConfig:
     aux_warmup_steps: int = 2000
     iso_warmup_steps: int = 5000
     moe_warmup_steps: int = 2000
+    msa_lb_warmup_steps: int = 2000
     gdr_router_warmup_steps: int = 2000
     loss_warmup_mode: str = "linear"
 
@@ -413,6 +414,9 @@ def build_loop_config(
         moe_warmup_steps=int(
             train_cfg.get("moe_warmup_steps", train_cfg.get("moe_warmup", 2000))
         ),
+        msa_lb_warmup_steps=int(
+            train_cfg.get("msa_lb_warmup_steps", train_cfg.get("msa_lb_warmup", 2000))
+        ),
         gdr_router_warmup_steps=int(
             train_cfg.get("gdr_router_warmup_steps", train_cfg.get("moe_warmup", 2000))
         ),
@@ -614,7 +618,7 @@ def train(
                 step,
                 cfg.w_msa_lb_start,
                 final_msa_lb,
-                cfg.moe_warmup_steps,
+                cfg.msa_lb_warmup_steps,
                 cfg.loss_warmup_mode,
             )
             effective_weights["w_gdr_router"] = scheduled_weight(
@@ -728,21 +732,31 @@ def train(
             scaler.unscale_(optimizer)
 
         grad_norm_val = 0.0
+        # Gradient norm is measured (for logging/diagnostics) but NOT clipped.
+        # Clipping (grad_clip / spike clamp) is a crutch that masks a divergent
+        # numeric scheme; the root fixes — fp32 master weights, Muon weight
+        # decay bounding ||W||, residual-scaled init — keep grads well-scaled so
+        # no clamp is needed. grad_clip=0 disables clip_grad_norm_ entirely.
         if cfg.grad_clip > 0:
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), cfg.grad_clip
             )
             grad_norm_val = float(grad_norm.item())
-            if need_components and (
-                not math.isfinite(grad_norm_val)
-                or grad_norm_val > 100.0
-                or (0.0 < grad_norm_val < 1e-6)
-            ):
-                print(f"WARNING: extreme grad_norm {grad_norm_val:.2e} at step {step}")
         else:
             grad_norm_val = get_grad_norm(model)
+        if need_components and (
+            not math.isfinite(grad_norm_val)
+            or grad_norm_val > 100.0
+            or (0.0 < grad_norm_val < 1e-6)
+        ):
+            print(f"WARNING: extreme grad_norm {grad_norm_val:.2e} at step {step}")
 
-        magic_grad = magic_norm_clip(model, cfg.magic_norm_max)
+        if cfg.magic_norm_max > 0:
+            magic_grad = magic_norm_clip(model, cfg.magic_norm_max)
+        else:
+            first = next(model.parameters(), None)
+            dev = first.device if first is not None else "cpu"
+            magic_grad = torch.tensor(0.0, device=dev, dtype=torch.float32)
         if use_scaler:
             scaler.step(optimizer)
             scaler.update()
