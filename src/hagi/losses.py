@@ -209,6 +209,24 @@ def compute_auxiliary_loss(
     return loss.sum() / valid.sum().clamp_min(1)
 
 
+def _isomorphic_mse(invariant_src: torch.Tensor, invariant_tgt: torch.Tensor) -> torch.Tensor:
+    # L_iso compares HDIM rotor sandwiches R^-1 G R. The MSE scales with
+    # ||G||^2 because each invariant is an isometry of G with the same norm:
+    # ||inv|| = ||G||, so MSE(inv_src, inv_tgt) ~ ||G||^2 * delta^2. That forms
+    # a quadratic feedback loop -- any step pushing ||G|| up inflates L_iso,
+    # which pulls ||G|| up further, yielding the super-exponential blowup
+    # observed in train_v1_1.log (L_iso 0.12 -> 51.9 in ~450 steps, grad_norm
+    # -> inf at step 4750). Normalizing each invariant to unit length drops
+    # the ||G||^2 factor: the loss becomes an angular MSE bounded in [0, 4],
+    # so the gradient can no longer drive ||G|| through L_iso.
+    eps = 1e-8
+    norm_src = invariant_src.norm(dim=-1, keepdim=True).clamp_min(eps)
+    norm_tgt = invariant_tgt.norm(dim=-1, keepdim=True).clamp_min(eps)
+    unit_src = invariant_src / norm_src
+    unit_tgt = invariant_tgt / norm_tgt
+    return F.mse_loss(unit_src, unit_tgt)
+
+
 def compute_isomorphic_loss(
     invariant_src,
     invariant_tgt=None,
@@ -228,13 +246,13 @@ def compute_isomorphic_loss(
                 tgt = value
                 break
         if isinstance(src, torch.Tensor) and isinstance(tgt, torch.Tensor):
-            return F.mse_loss(src, tgt)
+            return _isomorphic_mse(src, tgt)
         return torch.tensor(0.0)
 
     if isinstance(invariant_src, torch.Tensor) and isinstance(
         invariant_tgt, torch.Tensor
     ):
-        return F.mse_loss(invariant_src, invariant_tgt)
+        return _isomorphic_mse(invariant_src, invariant_tgt)
     if isinstance(invariant_src, torch.Tensor):
         return invariant_src.new_zeros(())
     return torch.tensor(0.0)
