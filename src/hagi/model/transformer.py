@@ -82,7 +82,7 @@ def _apply_rope_impl(
     sin = sin[None, None, :, :]
     rx1 = x1 * cos - x2 * sin
     rx2 = x1 * sin + x2 * cos
-    return torch.cat([rx1, rx2], dim=-1)
+    return torch.stack((rx1, rx2), dim=-1).flatten(-2)
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:

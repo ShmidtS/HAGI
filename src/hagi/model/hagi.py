@@ -248,6 +248,7 @@ class HAGI(nn.Module):
             )
             self.hdim_slot_router = HDIMSlotRouter(cfg.hidden_size, key_dim=64)
             self.msa_registry = SlotRegistry(max_slots=cfg.msa_slot_count)
+            self._msa_has_kv_proj = hasattr(self.msa, "kv_proj")
             # Functional bridge for memory-aware HRM (no params: borrows the
             # modules above so checkpoints stay identical). Built whenever MSA
             # is on; only activated by cfg.hrm_memory_aware in the forward.
@@ -733,7 +734,7 @@ class HAGI(nn.Module):
             if not mem_aware:
                 # Legacy path: register the post-reasoning hidden as slots, then
                 # route+attend. Memory-aware HRM did the registering already.
-                if hasattr(self.msa, "kv_proj"):
+                if self._msa_has_kv_proj:
                     kv = self.msa.kv_proj(h).view(b, t, 2 * nkv, head_dim).transpose(1, 2)
                     k, v = kv.split(nkv, dim=1)
                 else:

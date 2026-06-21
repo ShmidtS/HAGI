@@ -237,6 +237,7 @@ class HRMCore(nn.Module):
 
         gdr_state = None
         pre_gdr_h = None
+        block_list = list(reasoning_blocks)
         for h_cycle in range(self.h_cycles):
             if training_mode and noise_sigma > 0.0:
                 z_H = z_H + torch.randn_like(z_H) * noise_sigma
@@ -278,7 +279,6 @@ class HRMCore(nn.Module):
                         msa_lb_loss = lb
 
                 bias = h_term + self.z_l_to_hidden(z_L).unsqueeze(1)
-                block_list = list(reasoning_blocks)
                 if gradient_checkpointing and gc_group_size > 1 and len(block_list) > 1:
                     # Group checkpointing: wrap consecutive reasoning blocks in one
                     # checkpoint call -> halves recompute passes in backward

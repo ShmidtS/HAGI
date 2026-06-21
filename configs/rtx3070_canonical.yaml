@@ -371,12 +371,12 @@ model:
   msa_slot_count: 4096
 
   # Top-k slots selected per query token. Higher = more attention coverage.
-  # Raised 5->8: each query attends to more memory slots (broader retrieval
-  # = more effective context per token). Cost is the MSA attention matmul
-  # scaling as top_k*T_slot, small at chunk_size=4. L_msa_lb floor rises to
-  # alpha*top_k=8 but stays a tiny fraction of CE. Verify VRAM <7.4GB.
+  # 8->6: each query attends to 6 memory slots instead of 8 — MSA attention
+  # matmul scales as top_k*T_slot, so 25% less routing compute. Coverage
+  # remains strong at 6 (4096*4=16384 token context, 6 slots/query is still
+  # broad retrieval). L_msa_lb floor = alpha*top_k=6.
   # Read in: HAGIConfig.msa_top_k (hagi.py:61), hagi.py:621
-  msa_top_k: 8
+  msa_top_k: 6
 
   # Slot compression: group C adjacent tokens into one slot via mean-pooling.
   # Cx more context at the same slot budget. 1 = per-token (legacy).
@@ -526,10 +526,11 @@ model:
   gradient_checkpointing: true
 
   # Group checkpointing size: wrap N consecutive transformer blocks in ONE
-  # checkpoint call. 2 = checkpoint block pairs -> halves the backward recompute
-  # passes (the 7-block reasoning core run across 2 l_cycles goes 14->7
-  # recomputes) at a small activation-memory increase. Measured: bwd faster,
-  # reserved VRAM stays under budget. 1 = per-block (legacy).
+  # checkpoint call. 2 = checkpoint block pairs -> 7-block reasoning core
+  # groups into [2,2,2,1] = 4 recompute passes per l_cycle. Across 2 l_cycles:
+  # 8 recomputes. gc=3 ([3,3,1]=3 passes) tested within noise — bwd bottleneck
+  # is matmul gradients, not recompute launch overhead. Kept at 2 for VRAM
+  # headroom safety. 1 = per-block (legacy, max recompute).
   # Read in: HAGIConfig.gc_group_size (hagi.py), hagi.py _run_stage
   gc_group_size: 2
 
@@ -613,14 +614,13 @@ training:
   learning_rate: 0.0004
 
   # Micro-batch size (per GPU step before gradient accumulation).
-  # Lowered 16->12: memory-aware HRM does MSA read+write inside every l_cycle
-  # (2x), raising per-step activation memory. batch=16 hit 7.23GB reserved
-  # (close to the 8GB ceiling); batch=12 drops reserved to 5.11GB with a
-  # comfortable 2.9GB headroom while keeping tok/s essentially unchanged
-  # (17430 vs 17807 — smaller micro-batch offsets via faster steps). Effective
-  # batch is preserved at ~36 via grad_accum_steps=3 below (was 32 at 16x2).
+  # 14->16: VRAM headroom at batch=14 was 5.87/8GB reserved (~2GB free);
+  # batch=16 raises reserved to 6.40GB (1.6GB headroom) and tok/s 19356->20546
+  # (+6%) via better GPU utilization. batch=18 hits 7.11GB reserved and tok/s
+  # drops (oversubscription) — 16 is the Pareto point for this architecture.
+  # Effective batch = 16 × grad_accum_steps=3 = 48.
   # Read in: train.py:433, loop.py:340
-  batch_size: 14
+  batch_size: 16
 
   # Checkpoint save interval (steps).
   # Read in: loop.py:346 (build_loop_config)

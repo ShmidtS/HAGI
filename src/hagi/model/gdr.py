@@ -139,6 +139,8 @@ class GradeDecomposedRecurrence(nn.Module):
         self.cfg = cfg
         ctx = cfg.scalar + cfg.vector + cfg.bivector + cfg.trivector
         self.ctx_size = ctx
+        self._bounds = cfg.bounds
+        self._split_sizes = [cfg.scalar, cfg.vector, cfg.bivector, cfg.trivector]
 
         # Shared trunk + single fused head replaces four per-grade MLPs:
         # two matmuls instead of eight, identical receptive field (full ctx).
@@ -188,7 +190,7 @@ class GradeDecomposedRecurrence(nn.Module):
         self.last_router_aux: torch.Tensor | None = None
 
     def split(self, h: torch.Tensor):
-        b = self.cfg.bounds
+        b = self._bounds
         return (
             h[..., b[0] : b[1]],  # scalar
             h[..., b[1] : b[2]],  # vector
@@ -211,17 +213,12 @@ class GradeDecomposedRecurrence(nn.Module):
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         scalar, vector, bivector, trivector, residual = self.split(h)
-        graded_ctx = h[..., : self.cfg.bounds[4]]
+        graded_ctx = h[..., : self._bounds[4]]
 
         graded = self.grade_head(self.grade_trunk(graded_ctx))
         s_upd, v_upd, b_upd, t_upd = torch.split(
             graded,
-            [
-                self.cfg.scalar,
-                self.cfg.vector,
-                self.cfg.bivector,
-                self.cfg.trivector,
-            ],
+            self._split_sizes,
             dim=-1,
         )
 

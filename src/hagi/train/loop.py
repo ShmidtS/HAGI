@@ -745,7 +745,7 @@ def train(
                 model.parameters(), cfg.grad_clip
             )
             grad_norm_val = float(grad_norm.item())
-        else:
+        elif need_components:
             grad_norm_val = get_grad_norm(model)
         if need_components and (
             not math.isfinite(grad_norm_val)
