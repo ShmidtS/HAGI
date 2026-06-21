@@ -954,6 +954,66 @@ def save_checkpoint(
         on_checkpoint(str(path))
 
 
+def _convert_split_qkv_to_fused(
+    model: "HAGI", state_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """Convert a portable (split q/k/v) state_dict to the fused param layout.
+
+    ``GroupedQueryAttention.state_dict`` and the MSA attention ``state_dict``
+    override emission to split fused params (``q_proj``/``k_proj``/``v_proj`` and
+    MSA ``k_proj``/``v_proj``) for portability across ``fuse_qkv`` settings. But
+    ``load_state_dict`` consumes the actual parameter names, which are fused
+    (``qkv_weight``, MSA ``kv_proj``) when ``fuse_qkv`` is active. A checkpoint
+    saved through the override therefore cannot load into a fused model without
+    reversing the split. This rebuilds the fused tensors from their split parts
+    and drops the split keys, leaving a dict keyed by the model's parameters.
+
+    Splits are derived from the live model params (``_qkv_splits``,
+    ``num_kv_heads * head_dim``) so this is robust to GQA head ratios and head
+    dimensions. No-op when the state_dict is already fused.
+    """
+    out = dict(state_dict)
+
+    for name, module in model.named_modules():
+        # GroupedQueryAttention: qkv_weight <- cat([q_proj, k_proj, v_proj], dim=0)
+        if hasattr(module, "qkv_weight") and hasattr(module, "_qkv_splits"):
+            prefix = f"{name}." if name else ""
+            qk, kk, vk = (
+                f"{prefix}q_proj.weight",
+                f"{prefix}k_proj.weight",
+                f"{prefix}v_proj.weight",
+            )
+            if qk in out and kk in out and vk in out:
+                wq, wk, wv = out.pop(qk), out.pop(kk), out.pop(vk)
+                splits = [int(s) for s in module._qkv_splits]  # type: ignore[union-attr]
+                if [wq.size(0), wk.size(0), wv.size(0)] != splits:
+                    raise RuntimeError(
+                        f"qkv split mismatch at {prefix!r}: ckpt "
+                        f"{[wq.size(0), wk.size(0), wv.size(0)]} vs model {splits}"
+                    )
+                out[f"{prefix}qkv_weight"] = torch.cat(
+                    [wq, wk, wv], dim=0
+                ).contiguous()
+
+        # MSA attention: kv_proj <- cat([k_proj, v_proj], dim=0)
+        msa_kv = getattr(module, "kv_proj", None)
+        if msa_kv is not None and not name.endswith(".q_proj"):
+            prefix = f"{name}." if name else ""
+            kk, vk = f"{prefix}k_proj.weight", f"{prefix}v_proj.weight"
+            fused = f"{prefix}kv_proj.weight"
+            if kk in out and vk in out and fused not in out:
+                wk, wv = out.pop(kk), out.pop(vk)
+                kv_dim = msa_kv.weight.size(0)
+                if wk.size(0) + wv.size(0) != kv_dim:
+                    raise RuntimeError(
+                        f"msa kv_proj split mismatch at {prefix!r}: ckpt "
+                        f"{wk.size(0) + wv.size(0)} vs model {kv_dim}"
+                    )
+                out[fused] = torch.cat([wk, wv], dim=0).contiguous()
+
+    return out
+
+
 def _resume_load_state_dict(
     model: HAGI,
     ckpt_state: dict[str, Any],
@@ -1051,8 +1111,7 @@ def load_checkpoint(
             state_dict = {
                 k.replace("hrm._orig_mod.", "hrm.", 1): v for k, v in state_dict.items()
             }
-        for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
-            state_dict.pop(key, None)
+        state_dict = _convert_split_qkv_to_fused(model, state_dict)
         if model_cfg_override is not None:
             _resume_load_state_dict(model, state_dict, cfg, meta.get("config"))
         else:
@@ -1063,6 +1122,7 @@ def load_checkpoint(
         if (use_ema or load_ema) and (p / "ema.pt").exists():
             ema_state = torch.load(p / "ema.pt", map_location="cpu", weights_only=True)
             if use_ema:
+                ema_state = _convert_split_qkv_to_fused(model, ema_state)
                 model.load_state_dict(ema_state)
                 ema_state = None
         step = int(meta.get("step", 0))
@@ -1075,8 +1135,6 @@ def load_checkpoint(
         return model, step, ema_state
 
     state = torch.load(path, map_location="cpu", weights_only=True)
-    for key in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
-        state.pop(key, None)
     if model_cfg_override is not None:
         cfg = model_cfg_override
     else:
@@ -1095,6 +1153,7 @@ def load_checkpoint(
         repack_qkv_for_contiguous(model)
         precompute_rope_tables(model, max_seq_len)
 
+    state["model"] = _convert_split_qkv_to_fused(model, state["model"])
     if model_cfg_override is not None:
         _resume_load_state_dict(model, state["model"], cfg, state.get("config"))
     else:
@@ -1132,6 +1191,7 @@ def load_checkpoint(
     ema_state = state.get("model_ema") if (use_ema or load_ema) else None
     step = int(state.get("step", 0))
     if use_ema and ema_state is not None:
+        ema_state = _convert_split_qkv_to_fused(model, ema_state)
         model.load_state_dict(ema_state)
         ema_state = None
     del state
