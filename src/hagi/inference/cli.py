@@ -8,71 +8,29 @@ try:
 except ImportError:  # pragma: no cover - dependency fallback
     typer: Any = None
 
-import torch
-
 from hagi.data import TokenizerWrapper
 from hagi.inference.chat import ChatSession
 from hagi.model import HAGI
-from hagi.train.config import config_from_dict
-from hagi.utils import _load_yaml
+from hagi.train.loop import load_checkpoint
 
 
-def _load_state_dict(
-    checkpoint: Path, device: str
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load (model_state_dict, aux_state) from a flat file or sharded dir.
+def _load_model(checkpoint: Path, config: Path | None = None, device: str = "cpu") -> HAGI:
+    """Load a HAGI model from a checkpoint, preferring EMA weights.
 
-    Sharded layout: ``<dir>/{model.pt,meta.pt,...}``. The model weights always
-    come from ``model.pt`` (never ``ema.pt`` — EMA in this checkpoint is stale).
+    Sharded layout: ``<dir>/{model.pt,optimizer.pt,ema.pt,meta.pt}``.
+    EMA weights (``ema.pt``) are preferred for inference — they are a
+    Polyak-Ruppert average that is smoother and gives better generation
+    quality than the raw main weights. Falls back to ``model.pt`` when
+    ``ema.pt`` is absent (e.g. EMA disabled or early checkpoint).
+
+    The ``config`` argument is accepted for CLI compatibility but unused —
+    the model config is rebuilt from the checkpoint's ``meta.pt``.
     """
-    model_pt = checkpoint / "model.pt" if checkpoint.is_dir() else checkpoint
-    state = torch.load(model_pt, map_location=device, weights_only=True)
-    # Flat checkpoints wrap weights under {"model": ...}; sharded dirs store
-    # a raw state_dict at the top level.
-    if (
-        isinstance(state, dict)
-        and "model" in state
-        and isinstance(state["model"], dict)
-    ):
-        aux = state
-        state_dict = state["model"]
-    else:
-        aux = state if isinstance(state, dict) else {}
-        state_dict = state
-    return state_dict, aux
-
-
-def _load_model(checkpoint: Path, config: Path, device: str) -> HAGI:
-    cfg = _load_yaml(config)
-    model = HAGI(config_from_dict(cfg.get("model", cfg)))
-    state_dict, state = _load_state_dict(checkpoint, device)
-    model.load_state_dict(state_dict)
-    # Load MSA and NARS states if present
-    if (
-        hasattr(model, "msa_registry")
-        and model.msa_registry is not None
-        and "msa_registry" in state
-    ):
-        model.msa_registry.load_state_dict(state["msa_registry"])
-    if (
-        hasattr(model, "nars_hrm")
-        and model.nars_hrm is not None
-        and "nars_hrm" in state
-    ):
-        model.nars_hrm.load_state_dict(state["nars_hrm"])
-    if (
-        hasattr(model, "nars_hdim")
-        and model.nars_hdim is not None
-        and "nars_hdim" in state
-    ):
-        model.nars_hdim.load_state_dict(state["nars_hdim"])
-    if (
-        hasattr(model, "nars_msa")
-        and model.nars_msa is not None
-        and "nars_msa" in state
-    ):
-        model.nars_msa.load_state_dict(state["nars_msa"])
-    model.to(device)
+    model, _step, _ema = load_checkpoint(
+        str(checkpoint),
+        device=device,
+        use_ema=True,
+    )
     model.eval()
     return model
 

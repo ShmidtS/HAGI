@@ -550,13 +550,17 @@ class HAGI(nn.Module):
 
         h = _run_stage(self.perception, h)
 
-        # Precompute rotor index and gdr dispatch type once
+        # Precompute rotor index and gdr dispatch type once.
+        # Rotor selection is NOT gated on training_mode: inference must use
+        # the same cross-domain transfer (rotor 0 -> rotor k) the model was
+        # trained on. Training-only gating left the inference path calling
+        # self.gdr(h) with default rotor 0 -> 0 = identity sandwich, silently
+        # discarding the geometric transfer the model learned.
         tgt_idx = None
         gdr_type = "none"
         if self.gdr is not None:
             if (
-                training_mode
-                and isinstance(self.gdr, HDIMFull)
+                isinstance(self.gdr, HDIMFull)
                 and isinstance(self.gdr.rotors, DomainRotor)
             ):
                 num_rotors = self.gdr.rotors.num_rotors
@@ -571,7 +575,7 @@ class HAGI(nn.Module):
                 and self.gdr.delay_steps > 1
             ):
                 gdr_type = "delayed"
-            elif training_mode and isinstance(self.gdr, HDIMFull):
+            elif isinstance(self.gdr, HDIMFull):
                 gdr_type = "hdim"
             else:
                 gdr_type = "default"
