@@ -78,14 +78,17 @@ class ChatSession:
             torch.cuda.empty_cache()
 
     def _render_prompt(self) -> str:
+        # Plain-text stream: system + history messages joined by "\n", no role
+        # tags. Matches training (download_data.py serializes Smoltalk rows as
+        # content joined by "\n"); the <User>/<Assistant> tags were never seen
+        # during training and caused OOD at inference. Trailing "\n" invites the
+        # model to continue the text stream as the next turn.
         parts: list[str] = []
         if self.system_prompt:
-            parts.append(f"<System>\n{self.system_prompt}\n</System>")
-        for role, text in self.history:
-            marker = "User" if role == "user" else "Assistant"
-            parts.append(f"<{marker}>\n{text}\n</{marker}>")
-        parts.append("<Assistant>\n")
-        return "\n".join(parts)
+            parts.append(self.system_prompt)
+        for _, text in self.history:
+            parts.append(text)
+        return "\n".join(parts) + "\n"
 
     def _prompt_ids(self) -> list[int]:
         prompt_ids = self.tokenizer.encode(self._render_prompt())
