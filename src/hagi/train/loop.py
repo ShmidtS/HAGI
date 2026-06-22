@@ -442,6 +442,8 @@ def train(
     to_device_fn: Callable[..., Any] | None = None,
     apply_prefix_mask_fn: Callable[..., Any] | None = None,
     sequential_state_fn: Callable[[], dict[str, int] | None] | None = None,
+    teacher_model: Any | None = None,
+    distill_cfg: dict[str, Any] | None = None,
 ) -> float:
     """Run the canonical training loop. Returns the final training loss.
 
@@ -558,6 +560,31 @@ def train(
     final_gdr_router = (
         composite_weights.get("w_gdr_router", 0.0) if composite_weights else 0.0
     )
+
+    # Distillation config
+    distill_enabled = teacher_model is not None and distill_cfg is not None
+    if distill_enabled:
+        _dc = distill_cfg or {}
+        distill_T = float(_dc.get("temperature", 2.0))
+        distill_alpha_start = float(_dc.get("alpha_start", 0.3))
+        distill_alpha_end = float(_dc.get("alpha_end", 0.7))
+        distill_end_step = int(_dc.get("distill_end_step", 0))
+        if distill_end_step <= 0:
+            distill_end_step = int(cfg.max_steps * 0.60)
+        distill_chunk_size = int(_dc.get("chunk_size", 4096))
+        distill_every = max(1, int(_dc.get("every", 1)))
+        print(
+            f"distillation: enabled, teacher online until step {distill_end_step}, "
+            f"T={distill_T}, alpha={distill_alpha_start}->{distill_alpha_end}, "
+            f"every={distill_every} steps"
+        )
+    else:
+        distill_T = 2.0
+        distill_alpha_start = 0.3
+        distill_alpha_end = 0.7
+        distill_end_step = 0
+        distill_chunk_size = 4096
+        distill_every = 1
 
     last_loss = float("nan")
     end = (
@@ -686,6 +713,51 @@ def train(
                         output, targets, effective_weights, cfg.ce_chunk_size
                     )
                 raw_loss = loss.detach().float()
+                # Online distillation: replace loss with distillation loss.
+                # distill_every: run teacher only every N steps to cut VRAM
+                # pressure and teacher forward cost. On non-teacher steps,
+                # fall back to pure CE (the student's fused CE loss).
+                if (
+                    distill_enabled
+                    and step < distill_end_step
+                    and step % distill_every == 0
+                ):
+                    from hagi.train.distillation import (
+                        alpha_at,
+                        distillation_loss_chunked,
+                    )
+
+                    assert teacher_model is not None
+                    teacher_hidden = teacher_model(tokens)
+                    alpha = alpha_at(
+                        step,
+                        distill_alpha_start,
+                        distill_alpha_end,
+                        cfg.max_steps,
+                        distill_end_step,
+                    )
+                    pre_h = output.get("pre_logits_hidden")
+                    ce_loss = output.get("loss")
+                    if pre_h is not None and ce_loss is not None:
+                        loss = distillation_loss_chunked(
+                            pre_h,
+                            model.lm_head.weight,
+                            teacher_hidden,
+                            teacher_model.lm_head_weight,
+                            targets,
+                            ce_loss,
+                            T=distill_T,
+                            alpha=alpha,
+                            chunk_size=distill_chunk_size,
+                        )
+                    del teacher_hidden
+                    # Release teacher activation VRAM back to the allocator
+                    # so the backward pass has headroom. Without this the
+                    # caching allocator holds onto the teacher's intermediate
+                    # blocks, inflating reserved VRAM by ~1-2GB.
+                    if device.startswith("cuda"):
+                        torch.cuda.empty_cache()
+                    raw_loss = loss.detach().float()
                 loss = loss / cfg.grad_accum_steps
                 if device.startswith("cuda") and need_components:
                     torch.cuda.synchronize()
@@ -765,6 +837,19 @@ def train(
             scaler.update()
         else:
             optimizer.step()
+        # Free teacher model when distillation phase ends
+        if (
+            distill_enabled
+            and step == distill_end_step
+            and teacher_model is not None
+        ):
+            teacher_model.free()
+            teacher_model = None
+            import gc
+            gc.collect()
+            if device.startswith("cuda"):
+                torch.cuda.empty_cache()
+            print(f"distillation: teacher freed at step {step}, solo phase begins")
         t_opt = time.perf_counter() - t_opt_start
 
         if step >= cfg.ema_start_step and model_ema is not None:
@@ -814,6 +899,9 @@ def train(
                 component_text = " | " + " | ".join(
                     f"{name} {value:.4f}" for name, value in last_components.items()
                 )
+            if distill_enabled and step < distill_end_step:
+                from hagi.train.distillation import alpha_at as _alpha_at
+                component_text += f" | alpha {_alpha_at(step, distill_alpha_start, distill_alpha_end, cfg.max_steps, distill_end_step):.3f}"
             mem_text = ""
             if device.startswith("cuda"):
                 allocated = torch.cuda.memory_allocated(device) / 1024**3

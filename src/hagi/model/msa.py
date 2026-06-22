@@ -382,6 +382,17 @@ class SlotRegistry:
         self._v_caches = torch.tensor(vc) if vc else None
         self._id_to_idx = {sid: i for i, sid in enumerate(self._slot_ids)}
         self._slot_ids_tensor = None
+        self._id_to_idx_tensor.fill_(-1)
+        for i, sid in enumerate(self._slot_ids):
+            self._id_to_idx_tensor[sid] = i
+        if self._k_caches is not None:
+            self._slot_lens = torch.full(
+                (len(self._slot_ids),),
+                self._k_caches.size(-2),
+                dtype=torch.long,
+            )
+        else:
+            self._slot_lens = None
 
 
 class SparseRouter(nn.Module):

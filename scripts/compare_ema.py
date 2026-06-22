@@ -13,11 +13,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from hagi.data.tokenizer import TokenizerWrapper
 from hagi.model import HAGI
 from hagi.train.config import config_from_dict
 from hagi.train.loop import load_checkpoint, _convert_split_qkv_to_fused
-from hagi.utils import _load_yaml
 
 
 @torch.no_grad()
@@ -145,7 +143,7 @@ def main() -> None:
         else:
             print(f"{key:<15} {r:>12.4f} {e:>12.4f} {d:>+12.4f} {better:>8}")
     print(f"{'='*60}")
-    print(f"\nLower loss/ppl = better. Higher entropy = more diverse predictions.")
+    print("\nLower loss/ppl = better. Higher entropy = more diverse predictions.")
 
 
 if __name__ == "__main__":

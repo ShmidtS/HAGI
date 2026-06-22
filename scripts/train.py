@@ -10,12 +10,22 @@ from typing import Any, cast
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+# Load HF_TOKEN from project root .env (needed for SmolLM2-135M teacher download)
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    with _env_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("HF_TOKEN="):
+                os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip().strip("\"'")
+                break
 
-from hagi.data import (
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from torch.utils.data import DataLoader, Subset  # noqa: E402
+
+from hagi.data import (  # noqa: E402
     MemmapDataset,
     PrefixLMBatch,
     SequentialCyclingIterator,
@@ -23,16 +33,16 @@ from hagi.data import (
     get_mixed_memmap_dataloader,
     get_sft_dataloader,
 )
-from hagi.data.tokenizer import TokenizerWrapper
-from hagi.model import HAGI
-from hagi.train.config import config_from_dict
-from hagi.train.loop import (
+from hagi.data.tokenizer import TokenizerWrapper  # noqa: E402
+from hagi.model import HAGI  # noqa: E402
+from hagi.train.config import config_from_dict  # noqa: E402
+from hagi.train.loop import (  # noqa: E402
     LoopConfig,
     autocast_ctx,
     train,
 )
-from hagi.train.optim import build_optimizer
-from hagi.utils import _load_yaml as load_yaml
+from hagi.train.optim import build_optimizer  # noqa: E402
+from hagi.utils import _load_yaml as load_yaml  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -566,6 +576,37 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     else:
         model = HAGI(model_cfg).to(args.device)
 
+    # Distillation: load teacher and transfer embeddings
+    distill_cfg = cfg.get("distillation", {})
+    teacher_model = None
+    if distill_cfg.get("enabled", False) and not args.resume:
+        from hagi.train.distillation import DistillationTeacher, transfer_embeddings
+
+        if distill_cfg.get("embedding_transfer", False):
+            embedding_model_name = distill_cfg.get(
+                "embedding_model", distill_cfg.get("teacher_model", "HuggingFaceTB/SmolLM2-135M")
+            )
+            n = transfer_embeddings(model, embedding_model_name)
+            print(f"transferred embeddings for {n} tokens from {embedding_model_name}")
+
+        if args.device.startswith("cuda"):
+            teacher_model = DistillationTeacher(
+                teacher_model_name=distill_cfg.get("teacher_model", "HuggingFaceTB/SmolLM2-135M"),
+                device=args.device,
+                micro_batch=int(distill_cfg.get("teacher_micro_batch", 0)),
+            )
+            print(f"distillation teacher loaded on {args.device}")
+    elif distill_cfg.get("enabled", False) and args.resume:
+        print("distillation: enabled but resuming — teacher will be loaded")
+        from hagi.train.distillation import DistillationTeacher
+        if args.device.startswith("cuda"):
+            teacher_model = DistillationTeacher(
+                teacher_model_name=distill_cfg.get("teacher_model", "HuggingFaceTB/SmolLM2-135M"),
+                device=args.device,
+                micro_batch=int(distill_cfg.get("teacher_micro_batch", 0)),
+            )
+            print(f"distillation teacher loaded on {args.device} (resume)")
+
     if hasattr(model.cfg, "gradient_checkpointing"):
         model.cfg.gradient_checkpointing = bool(
             train_cfg.get("gradient_checkpointing", model.cfg.gradient_checkpointing)
@@ -791,6 +832,8 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
             if isinstance(dataloader, SequentialCyclingIterator)
             else None
         ),
+        teacher_model=teacher_model,
+        distill_cfg=distill_cfg if distill_cfg.get("enabled", False) else None,
     )
 
 

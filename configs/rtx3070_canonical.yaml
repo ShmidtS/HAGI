@@ -214,12 +214,11 @@ model:
 
   # --- Core dimensions ---
 
-  # Hidden size (residual stream dimension). Must match transformer.hidden_size.
-  # 512 (down from 768): head_dim stays 64 via num_query_heads=8. Activations
-  # + AdamW/Muon optimizer state drop ~60% -> VRAM est ~2.2-3.7GB (safe under
-  # 8GB with large headroom). Pair with grades summing to 512 below.
+  # 576 (up from 512): exact match with SmolLM2-135M for embedding transfer.
+  # head_dim = 576/8 = 72 (was 64). Grades: 64+96+96+64+256=576.
+  # VRAM: (576/512)^2 ~ 1.27x activations -> batch 16->12 keeps VRAM < 8GB.
   # Read in: HAGIConfig.hidden_size (hagi.py:41), hagi.py:100
-  hidden_size: 512
+  hidden_size: 576
 
   # Vocabulary size (SmolLM2 tokenizer = 49,152).
   # Read in: HAGIConfig.vocab_size (hagi.py:40), hagi.py:128
@@ -286,7 +285,7 @@ model:
     vector: 96           # Grade 1: entities/concepts (medium, momentum)
     bivector: 96         # Grade 2: relations (fast, full update)
     trivector: 64        # Grade 3: higher-order structure (fast, full update)
-    residual: 192        # Unconstrained channel (standard update)
+    residual: 256          # 576-64-96-96-64=256, unconstrained channel
     # Grade momentum tiering: distinct update speeds per grade are the core GDR
     # hypothesis. scalar (confidence) must change SLOWLY -> high momentum; vector
     # (entities) MEDIUM; bivector/trivector (relations/structure) FAST (full
@@ -335,16 +334,9 @@ model:
   hrm_h_cycles: 1
 
   # Low-level cycles: z_L updates per h_cycle. Effective reasoning
-  # iterations = hrm_h_cycles × hrm_l_cycles. Raised 1->2: a single
-  # reasoning pass under-trains the recurrent core, and memory-aware HRM
-  # (hrm_memory_aware=true) needs >=2 cycles so a later cycle has memory
-  # written by an earlier one to read (cycle 0 writes, cycle 1 reads+writes).
-  # Two l_cycles double the recurrence depth — the z_L state refines across
-  # passes, giving the reasoning stage gradient signal on both passes instead
-  # of one, and each pass interleaves MSA memory read+write so the slot
-  # registry becomes part of the thinking loop. ~1.5x reasoning-stage FLOPS
-  # (perception/expression unchanged); activation memory rises one reasoning
-  # pass worth — verify VRAM <8GB.
+  # iterations = hrm_h_cycles × hrm_l_cycles. 2: 7×2=14 reasoning passes/step.
+  # Memory-aware HRM: cycle 0 writes, cycle 1 reads+writes. 3 l_cycles
+  # tested: 21 passes -> 10583 tok/s (-38%), 7.88GB (near OOM) — too expensive.
   # Read in: HAGIConfig.hrm_l_cycles (hagi.py:53), hagi.py:174
   hrm_l_cycles: 2
 
@@ -440,10 +432,9 @@ model:
   moe_top_k: 1
 
   # Intermediate size per expert. None = intermediate_size // num_experts.
-  # 341 ~ 1365/4 (same per-expert ratio as the prior 2048/4=512 at hidden 768).
-  # Each expert is a SwiGLU at hidden 512 -> 341 -> 512.
+  # 384 ~ 1536/4 (same per-expert ratio). Each expert: SwiGLU 576->384->576.
   # Read in: HAGIConfig.moe_intermediate_size (hagi.py:87), hagi.py:106,108
-  moe_intermediate_size: 341
+  moe_intermediate_size: 384
 
   # MoE load-balance aux loss coefficient.
   # Read in: HAGIConfig.moe_alpha (hagi.py:88), hagi.py:107, moe.py:46
@@ -544,13 +535,13 @@ model:
   transformer:
     # Hidden size (must match model.hidden_size).
     # Read in: TransformerConfig.hidden_size (transformer.py:21)
-    hidden_size: 512
+    hidden_size: 576
 
     # SwiGLU intermediate size (non-MoE path). When MoE is active, each
-    # expert uses moe_intermediate_size instead. 1365 ~ 512*2.67 (same SwiGLU
-    # ratio as the prior 768/2048).
+    # expert uses moe_intermediate_size instead. 1536 = 576*2.67 (same SwiGLU
+    # ratio as 512/1365). Divisible by 8.
     # Read in: TransformerConfig.intermediate_size (transformer.py:24)
-    intermediate_size: 1365
+    intermediate_size: 1536
 
     # Maximum sequence length for RoPE precomputation. T > max_seq_len
     # falls back to dynamic cache. Raised 2048->4096 to extend the model's
@@ -606,21 +597,13 @@ model:
 training:
   # Peak learning rate for AdamW (non-Muon params). Cosine schedule scales
   # from 0 → learning_rate → min_lr_ratio × learning_rate.
-  # Lowered 6e-4->4e-4: at peak 6e-4 grad_norm climbed 1.09->1.51 over steps
-  # 1100-1275 (loss 5.70->5.84) — too hot for a 119M model with bf16 grads.
-  # 4e-4 is the standard peak for this param count (SmolLM2-135M uses ~3e-4);
-  # Muon (muon_lr=8e-3) handles the 2D reasoning core independently.
   # Read in: loop.py:338 (build_loop_config), optim.py:537 (build_optimizer)
   learning_rate: 0.0004
 
   # Micro-batch size (per GPU step before gradient accumulation).
-  # 14->16: VRAM headroom at batch=14 was 5.87/8GB reserved (~2GB free);
-  # batch=16 raises reserved to 6.40GB (1.6GB headroom) and tok/s 19356->20546
-  # (+6%) via better GPU utilization. batch=18 hits 7.11GB reserved and tok/s
-  # drops (oversubscription) — 16 is the Pareto point for this architecture.
-  # Effective batch = 16 × grad_accum_steps=3 = 48.
+
   # Read in: train.py:433, loop.py:340
-  batch_size: 16
+  batch_size: 10
 
   # Checkpoint save interval (steps).
   # Read in: loop.py:346 (build_loop_config)
@@ -661,31 +644,30 @@ training:
 
   # --- Schedule ---
 
-  # LR schedule: "cosine" (warmup → cosine decay) or "wsd" (warmup → stable → decay).
-  # Read in: loop.py:350 (build_loop_config), loop.py:135
-  schedule: cosine
+  # WSD (Warmup-Stable-Decay): better for small models with embedding transfer.
+  # Warmup is short (1000 steps) because embeddings are pretrained — no early
+  # embedding chaos. Long stable phase at peak LR, then linear decay in the
+  # last 10%. Read in: loop.py:350 (build_loop_config), loop.py:135
+  schedule: wsd
 
-  # Warmup steps: linear ramp from 0 → learning_rate.
-  # Raised 500->1000: longer warmup eases the composite-loss terms (L_aux/L_iso
-  # ramp at 1500/2000) onto a model whose embeddings have stabilized, reducing
-  # the transient gradient spike that fed the late-run grad_norm climb.
+  # 1000 (down from 3500): embedding transfer from SmolLM2-135M skips the
+  # random-init chaos. Short warmup eases composite-loss terms onto a model
+  # whose embeddings are already stable.
   # Read in: loop.py:337 (build_loop_config), loop.py:133
-  warmup_steps: 3500
+  warmup_steps: 1000
 
   # Minimum LR ratio: cosine decays to min_lr_ratio × learning_rate.
   # Read in: loop.py:339 (build_loop_config), loop.py:147
   min_lr_ratio: 0.1
 
-  # Cooldown fraction: last N% of training decays linearly to min_lr.
-  # Used only with "wsd" schedule.
+  # 0.10 (up from 0.05): WSD decay tail covers last 10% of training.
   # Read in: loop.py:351 (build_loop_config), loop.py:136
-  cooldown_frac: 0.05
+  cooldown_frac: 0.10
 
-  # Maximum training steps. Overridden by train_tokens if set (see data section):
-  # with train_tokens=3e9, batch 8 × grad_accum 5 × seq 1024 = 40960 tok/step ->
-  # ceil(3e9/40960) = 73243 steps (~1 epoch over the 3B-token corpus).
+  # With train_tokens=3e9, batch 12 × grad_accum 4 × seq 1024 = 49152 tok/step ->
+  # ceil(3e9/49152) = 61035 steps (~1 epoch over the 3B-token corpus).
   # Read in: loop.py:336 (build_loop_config), train.py:44 (_resolve_max_steps)
-  max_steps: 73243
+  max_steps: 61035
 
   # --- Gradient ---
 
@@ -695,7 +677,7 @@ training:
   # calibration carry over. VRAM is unchanged (grad accum adds no activation
   # memory — each micro-batch is processed and freed before the next).
   # Read in: loop.py:340 (build_loop_config), loop.py:547
-  grad_accum_steps: 3
+  grad_accum_steps: 2
 
   # Global gradient clipping (max L2 norm). Applied before optimizer step.
   # DISABLED (1.0 -> 0): grad clipping is a crutch that masks a divergent numeric
@@ -741,14 +723,11 @@ training:
 
   # Muon peak LR for reasoning-core 2D weights. Muon orthogonalizes updates
   # via Newton-Schulz, so LR is independent of grad_clip.
-  # Raised 0.008->0.012: hrm_l_cycles=2 doubles the reasoning recurrence depth,
-  # so the shared reasoning blocks see ~2x the per-step gradient signal of the
-  # 1-cycle config. A larger Muon LR converts that denser signal into faster
-  # convergence of the geometric reasoning core (Muon's orthogonalized update
-  # is scale-invariant, so a higher LR does not blow up the way AdamW's would).
-  # 0.012 is still well below the Muon canonical 0.02 ceiling for 2D weights.
+  # 0.02 (canonical Keller Jordan recipe): scale-invariant orthogonalized
+  # update means higher LR converges faster. Distillation stabilizes gradients,
+  # so 0.02 is safe. Was 0.015 (conservative), 0.02 is the proven canonical.
   # Read in: optim.py:488 (cfg.get("muon_lr", 0.02))
-  muon_lr: 0.012
+  muon_lr: 0.02
 
   # Muon momentum (Nesterov-style).
   # Raised 0.95->0.97: a longer momentum EMA smooths the per-step update
@@ -760,9 +739,10 @@ training:
   muon_momentum: 0.97
 
   # Newton-Schulz iteration count for zero-power orthogonalization.
-  # More = better approximation, more compute.
+  # 5 is canonical (Keller Jordan recipe). 10 adds ~50% opt time for marginal
+  # quality gain at this scale. 5 converges well for 2D hidden weights.
   # Read in: optim.py:490 (cfg.get("muon_ns_steps", 5))
-  muon_ns_steps: 10
+  muon_ns_steps: 5
 
   # Decoupled (AdamW-style) weight decay applied INSIDE Muon to the 2D hidden
   # weights. 0 disables (legacy behavior, reproduces pre-fix runs). Muon
@@ -826,14 +806,13 @@ training:
   ema:
     decay: 0.9995
 
-    # Start EMA from this step (skip early unstable steps). Aligned with
-    # warmup_steps (1000): starting EMA at 500 folded in weights from the
-    # middle of the linear warmup, when LR was still ramping and the loss was
-    # most volatile — polluting the averaged model with the noisiest region.
-    # Begin at warmup's end so the EMA only tracks the post-warmup stable
-    # regime, giving a cleaner Polyak-Ruppert average for eval/gen.
+    # Start EMA from this step. 1000 (down from 3500): aligned with
+    # warmup_steps=1000 — begin averaging at warmup's end so the EMA only
+    # tracks the post-warmup stable regime. Starting at 3500 wasted 2500
+    # steps of EMA averaging; 1000 gives a longer Polyak-Ruppert average
+    # for eval/gen with no noise penalty (warmup is the only noisy region).
     # Read in: loop.py:357 (build_loop_config), loop.py:469
-    start_step: 3500
+    start_step: 1000
 
   # --- Evaluation ---
 
@@ -858,7 +837,7 @@ training:
 
   # Log interval (steps). 0 = no logging.
   # Read in: loop.py:348 (build_loop_config), loop.py:542
-  log_interval: 25
+  log_interval: 1
 
   # NARS policy update interval (steps). Used only when use_nars=true.
   # Read in: loop.py:349 (build_loop_config)
@@ -874,40 +853,35 @@ training:
   # Read in: loop.py:373 (build_loop_config), loop.py:155
   loss_warmup_mode: cosine
 
-  # Warmup steps for L_aux (contrastive auxiliary loss). Lowered 2000->1500:
-  # with cosine loss_warmup the ramp is gentle, so the GDR contrastive term
-  # can switch on earlier and train the HDIM features longer across the 91k-
-  # step budget without the linear-ramp instability that justified 2000.
+  # Warmup steps for L_aux (contrastive auxiliary loss). Aligned with new
+  # warmup_steps=1000. Composite-loss terms ramp during the short warmup +
+  # early stable phase.
   # Read in: loop.py:364 (build_loop_config), loop.py:527
-  aux_warmup_steps: 3500
+  aux_warmup_steps: 1500
 
-  # Warmup steps for L_iso (isomorphic invariant loss). RAISED 3500->5000:
-  # L_iso depends on GDR convergence (the HDIM domain invariant only becomes
-  # meaningful once the grade-decomposed recurrence has stabilized), so it
-  # should ramp AFTER the MoE/MSA load-balance terms. A longer iso warmup lets
-  # the geometric signal train on a model whose routing has already specialized,
-  # avoiding upward pressure on grad_norm from a too-early invariant term.
+  # Warmup steps for L_iso (isomorphic invariant loss). Aligned with new
+  # warmup_steps=1000. Composite-loss terms ramp during the short warmup +
+  # early stable phase.
   # Read in: loop.py:368 (build_loop_config), loop.py:529
-  iso_warmup_steps: 5000
+  iso_warmup_steps: 2000
 
-  # Warmup steps for L_moe (MoE load-balance loss). LOWERED 3500->2000: expert
-  # specialization benefits from EARLY pressure so routers don't collapse to a
-  # single expert before the load-balance term switches on. Fast ramp.
+  # Warmup steps for L_moe (MoE load-balance loss). Aligned with new
+  # warmup_steps=1000. Composite-loss terms ramp during the short warmup +
+  # early stable phase.
   # Read in: loop.py:370 (build_loop_config), loop.py:533
-  moe_warmup_steps: 2000
+  moe_warmup_steps: 1000
 
-  # Warmup steps for L_msa_lb (MSA router load-balance loss). SET 3000: ramps
-  # after the MoE experts begin specializing (moe_warmup=2000) but before the
-  # HDIM invariant (iso_warmup=5000) — the MSA slots need a populated registry,
-  # which the first reasoning passes provide by ~3000 steps.
+  # Warmup steps for L_msa_lb (MSA router load-balance loss). Aligned with new
+  # warmup_steps=1000. Composite-loss terms ramp during the short warmup +
+  # early stable phase.
   # Read in: loop.py (build_loop_config), loop.py scheduled_weight(w_msa_lb)
-  msa_lb_warmup_steps: 3000
+  msa_lb_warmup_steps: 1500
 
   # Warmup steps for the learnable GDR grade-capacity router load-balance loss.
-  # SET 3000: aligned with msa_lb so the two routing aux terms switch on together
-  # once the reasoning core has warmed up.
+  # Aligned with new warmup_steps=1000. Composite-loss terms ramp during the
+  # short warmup + early stable phase.
   # Read in: loop.py (build_loop_config), loop.py train loop scheduled_weight
-  gdr_router_warmup_steps: 3000
+  gdr_router_warmup_steps: 1500
 
   # --- VRAM probe ---
 
@@ -926,3 +900,45 @@ training:
   # Prefix LM mode: pack multiple documents per sequence with attention mask.
   # Read in: train.py:681 (train_cfg.get("use_prefix_lm", False))
   use_prefix_lm: false
+
+# =============================================================================
+# DISTILLATION — online knowledge distillation from SmolLM2-135M
+# Teacher: SmolLM2-135M (same tokenizer, vocab=49152, hidden=576).
+# Phase 1 (0-distill_end_step): alpha*CE + (1-alpha)*T^2*KL(student||teacher)
+# Phase 2 (distill_end_step-end): CE only (teacher freed from VRAM)
+# Read in: scripts/train.py (teacher load + embedding transfer),
+#          src/hagi/train/loop.py (teacher forward + distill loss),
+#          src/hagi/train/distillation.py (implementation)
+# =============================================================================
+distillation:
+  enabled: true
+  # Teacher for online distillation (KL on logits). SmolLM2-360M (361M params,
+  # hidden=960, 32 layers) is 5x the student size — strong enough to provide
+  # meaningful soft targets. Same tokenizer (vocab=49152), so KL is computed
+  # on matching vocab dimensions. hidden_size mismatch (960 vs 576) is fine:
+  # KL projects each model's hidden through its own lm_head to [B,T,V] logits.
+  # VRAM bf16: 690MB weights + ~180MB peak activation (micro_batch=4) = ~870MB.
+  teacher_model: HuggingFaceTB/SmolLM2-360M
+  # Separate model for embedding transfer (must match student hidden_size=576).
+  # SmolLM2-135M has hidden=576, same as student. Used once at init, then freed.
+  embedding_model: HuggingFaceTB/SmolLM2-135M
+  embedding_transfer: true
+  temperature: 2.0
+  # Alpha schedule: CE weight = alpha, KL weight = (1-alpha).
+  # 0.5->0.3: start balanced (equal CE+KL), shift toward KL-dominant (70% KL)
+  # at the end. More teacher signal throughout — the point of distillation.
+  alpha_start: 0.5
+  alpha_end: 0.3
+  # 0 = auto (max_steps * 0.60). Teacher freed at 60% of training.
+  distill_end_step: 0
+  # 2048: KL chunk size. Peak VRAM per chunk = 2 * 2048 * 49152 * 6B ~ 1.2GB.
+  # Reduced from 4096 to 2048 to fit alongside the larger 360M teacher.
+  chunk_size: 1024
+  # Run teacher every 2 steps (not every step). Halves teacher forward cost
+  # and VRAM pressure. On non-teacher steps, pure CE is used. The KL signal
+  # is still fresh enough (teacher hidden doesn't change much between steps).
+  every: 1
+  # Teacher micro-batch: process B tokens in chunks of 4 to bound peak
+  # activation VRAM. At micro_batch=4, seq=1024, 32 layers, 15 heads:
+  # peak attention = 4 * 15 * 1024 * 1024 * 2B = 120MB per layer.
+  teacher_micro_batch: 4

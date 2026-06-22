@@ -6,6 +6,7 @@ import math
 from typing import Any, cast
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -368,14 +369,12 @@ class AdamMini(torch.optim.Optimizer):
                     state["step"] += 1
                     step = state["step"]
 
-                    # Per-block mean gradient
-                    g_mean = torch.zeros(
-                        num_blocks, in_dim, dtype=g2d.dtype, device=g2d.device
-                    )
-                    for b in range(num_blocks):
-                        start = b * block_size
-                        end = min((b + 1) * block_size, out_dim)
-                        g_mean[b] = g2d[start:end].mean(dim=0)
+                    # Per-block mean gradient via reshape+mean (vectorized)
+                    pad = block_size - (out_dim % block_size)
+                    if pad:
+                        g2d = F.pad(g2d, (0, 0, 0, pad))
+                    num_blocks = g2d.size(0) // block_size
+                    g_mean = g2d.view(num_blocks, block_size, in_dim).mean(dim=1)
 
                     if wd != 0:
                         p.mul_(1 - lr * wd)
@@ -388,17 +387,10 @@ class AdamMini(torch.optim.Optimizer):
                     m_hat = m / bias_corr1
                     v_hat = v / bias_corr2
 
-                    # Broadcast block update back to parameter shape
-                    update_blocks = []
-                    for b in range(num_blocks):
-                        start = b * block_size
-                        end = min((b + 1) * block_size, out_dim)
-                        block_update = m_hat[b] / (v_hat[b].sqrt() + eps)
-                        block_update = block_update.unsqueeze(0).expand(end - start, -1)
-                        update_blocks.append(block_update)
-                    update = torch.cat(update_blocks, dim=0).view(orig_shape)
-
-                    p.add_(update, alpha=-lr)
+                    update = (m_hat / (v_hat.sqrt() + eps)).repeat_interleave(
+                        block_size, dim=0
+                    )[:out_dim]
+                    p.add_(update.view(orig_shape), alpha=-lr)
 
 
 class AdEMAMix(torch.optim.Optimizer):

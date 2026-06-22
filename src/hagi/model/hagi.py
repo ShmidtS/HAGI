@@ -481,7 +481,7 @@ class HAGI(nn.Module):
                 return h_out
             return result
 
-        def _run_stage(blocks, hidden):
+        def _run_stage(blocks, hidden, force_no_gc: bool = False):
             """Run a sequence of transformer blocks, threading the KV cache.
 
             Group checkpointing: when ``gc_group_size > 1`` and gradient
@@ -492,10 +492,14 @@ class HAGI(nn.Module):
             instead of each block's input — a small activation-memory increase
             that stays well under the 8GB budget (measured). use_cache path keeps
             per-block execution (KV threading is sequential).
+
+            ``force_no_gc``: skip gradient checkpointing for this stage entirely
+            (used for perception/expression — only 2+2 blocks, cheap to keep
+            activations, saves 4 recompute passes in backward).
             """
             nonlocal layer_idx
             # KV-cache path is inherently sequential; keep per-block there.
-            if use_cache or not use_gradient_checkpointing or self.cfg.gc_group_size <= 1:
+            if use_cache or not use_gradient_checkpointing or self.cfg.gc_group_size <= 1 or force_no_gc:
                 for block in blocks:
                     past = (
                         past_key_values[layer_idx]
@@ -548,7 +552,7 @@ class HAGI(nn.Module):
                 layer_idx += len(group)
             return hidden
 
-        h = _run_stage(self.perception, h)
+        h = _run_stage(self.perception, h, force_no_gc=True)
 
         # Precompute rotor index and gdr dispatch type once.
         # Rotor selection is NOT gated on training_mode: inference must use
@@ -805,7 +809,7 @@ class HAGI(nn.Module):
                 )
                 h = h + msa_out
 
-        h = _run_stage(self.expression, h)
+        h = _run_stage(self.expression, h, force_no_gc=True)
         assert h is not None
 
         # Runtime magnitude cap on the residual stream: any token whose ||h||
@@ -882,6 +886,7 @@ class HAGI(nn.Module):
 
         if training_mode:
             result = {"logits": logits}
+            result["pre_logits_hidden"] = h
             if loss is not None:
                 result["loss"] = loss
             if moe_aux_losses:
