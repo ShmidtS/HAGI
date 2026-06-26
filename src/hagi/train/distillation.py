@@ -1,12 +1,17 @@
-"""Online knowledge distillation from SmolLM2-135M for HAGI training.
+"""Online knowledge distillation for HAGI training.
 
-Teacher (SmolLM2-135M) provides:
-  1. Pretrained token embeddings (exact copy at init)
+Supports multiple teacher architectures:
+  - Decoder-only CausalLM (SmolLM2, etc.): AutoModelForCausalLM
+  - Encoder-decoder Seq2SeqLM (T5Gemma, etc.): AutoModelForSeq2SeqLM
+  - Multimodal LM (Gemma 4 Unified, etc.): AutoModelForMultimodalLM
+
+Teacher provides:
+  1. Pretrained token embeddings (exact copy at init, if hidden_size matches)
   2. Soft logit targets for KL distillation during training
 
 Student (HAGI) learns from: alpha * CE_hard + (1-alpha) * T^2 * KL(soft_student || soft_teacher)
 
-VRAM strategy: teacher forward returns hidden states (14MB), NOT logits (1.2GB).
+VRAM strategy: teacher forward returns hidden states, NOT logits.
 Both student and teacher hidden are projected to logits per-chunk inside KL,
 so peak logits memory = 2 * chunk_size * V * dtype_bytes, never [B, T, V].
 """
@@ -32,24 +37,98 @@ if _env_path.exists():
                 break
 
 
+def _detect_model_type(model_name: str) -> str:
+    """Detect model architecture type from model name.
+
+    Returns one of: "causal_lm", "seq2seq_lm", "multimodal_lm".
+    Gemma 4 models are all multimodal (Unified architecture with
+    vision/audio encoders, even when the name doesn't say "unified").
+    """
+    name_lower = model_name.lower()
+    if "t5gemma" in name_lower or "t5-" in name_lower or "ul2" in name_lower:
+        return "seq2seq_lm"
+    # All Gemma 4 models are multimodal (text + vision, some + audio).
+    # The 12B model is "Unified" (encoder-free), E2B/E4B have PLE.
+    # 26B A4B and 31B also have vision encoders.
+    if "gemma-4" in name_lower or "gemma4" in name_lower:
+        return "multimodal_lm"
+    return "causal_lm"
+
+
+def _get_embeddings(model: Any, model_type: str) -> torch.Tensor:
+    """Extract token embedding weights from various model architectures.
+
+    Returns [V, H] embedding tensor.
+    """
+    if model_type == "seq2seq_lm":
+        # T5Gemma: encoder and decoder share tied embeddings.
+        # Access via encoder.embed_tokens (or decoder.embed_tokens — same weight).
+        if hasattr(model, "encoder") and hasattr(model.encoder, "embed_tokens"):
+            return model.encoder.embed_tokens.weight.data
+        if hasattr(model, "model") and hasattr(model.model, "encoder"):
+            return model.model.encoder.embed_tokens.weight.data
+        raise AttributeError(f"cannot find encoder embeddings in {type(model).__name__}")
+
+    if model_type == "multimodal_lm":
+        # Gemma 4 Unified: text model has embed_tokens.
+        # Path: model.model.text_model.embed_tokens or model.language_model.embed_tokens
+        for path in [
+            ("model", "text_model", "embed_tokens"),
+            ("model", "language_model", "embed_tokens"),
+            ("language_model", "embed_tokens"),
+            ("model", "embed_tokens"),
+        ]:
+            obj = model
+            try:
+                for attr in path:
+                    obj = getattr(obj, attr)
+                return obj.weight.data
+            except AttributeError:
+                continue
+        raise AttributeError(f"cannot find text embeddings in {type(model).__name__}")
+
+    # Default: CausalLM (SmolLM2, Llama, etc.)
+    if hasattr(model, "model") and hasattr(model.model, "embed_tokens"):
+        return model.model.embed_tokens.weight.data
+    if hasattr(model, "embed_tokens"):
+        return model.embed_tokens.weight.data
+    raise AttributeError(f"cannot find embeddings in {type(model).__name__}")
+
+
 def transfer_embeddings(
     model: nn.Module,
     teacher_model_name: str = "HuggingFaceTB/SmolLM2-135M",
 ) -> int:
-    """Copy pretrained SmolLM2 embeddings into HAGI's embedding layer.
+    """Copy pretrained embeddings into HAGI's embedding layer.
+
+    Supports decoder-only (CausalLM), encoder-decoder (Seq2SeqLM / T5Gemma),
+    and multimodal (Gemma 4 Unified) architectures.
 
     Requires model.cfg.vocab_size == teacher vocab_size and
-    model.cfg.hidden_size == teacher hidden_size (576).
+    model.cfg.hidden_size == teacher hidden_size.
     Weight tying: lm_head shares embed.weight, so lm_head is updated automatically.
 
     Returns number of tokens transferred.
     """
-    from transformers import AutoModelForCausalLM
+    model_type = _detect_model_type(teacher_model_name)
 
-    teacher: Any = AutoModelForCausalLM.from_pretrained(
-        teacher_model_name, dtype=torch.bfloat16, local_files_only=True
-    )
-    teacher_emb = teacher.model.embed_tokens.weight.data  # [V, H]
+    if model_type == "seq2seq_lm":
+        from transformers import AutoModelForSeq2SeqLM
+        teacher: Any = AutoModelForSeq2SeqLM.from_pretrained(
+            teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+        )
+    elif model_type == "multimodal_lm":
+        from transformers import AutoModelForMultimodalLM
+        teacher = AutoModelForMultimodalLM.from_pretrained(
+            teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+        )
+    else:
+        from transformers import AutoModelForCausalLM
+        teacher = AutoModelForCausalLM.from_pretrained(
+            teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+        )
+
+    teacher_emb = _get_embeddings(teacher, model_type)  # [V, H]
 
     embed_weight = model.embed.weight  # type: ignore[attr-defined]
     assert isinstance(embed_weight, torch.Tensor)
@@ -65,22 +144,28 @@ def transfer_embeddings(
 
 
 class DistillationTeacher:
-    """Frozen SmolLM2 teacher for online distillation.
+    """Frozen teacher for online distillation.
 
-    Loads the teacher model in bf16, freezes all params, and provides
+    Supports multiple architectures:
+      - CausalLM (SmolLM2, etc.): AutoModelForCausalLM, base model = model.model
+      - Seq2SeqLM (T5Gemma, etc.): AutoModelForSeq2SeqLM, uses decoder
+      - MultimodalLM (Gemma 4 Unified, etc.): AutoModelForMultimodalLM,
+        full model loaded with ALL components (vision, audio, text).
+        Text-only forward is used for KL distillation, but vision/audio
+        encoders remain in VRAM for future multimodal training.
+
+    Loads the teacher model, freezes all params, and provides
     a forward method returning hidden states (NOT logits) to save VRAM.
     The lm_head weight is exposed for per-chunk projection in KL loss.
 
-    Teacher forward runs in micro-batches to bound peak activation VRAM:
-    instead of one [B, T, H] forward (which allocates attention scores for
-    the full batch), runs N forwards of micro_batch tokens each and concats.
-    Peak teacher activation VRAM = micro_batch/batch of the full forward.
+    Teacher forward runs in micro-batches to bound peak activation VRAM.
 
     Resides in VRAM during the distill phase; call .free() to release.
     """
 
     model: Any
     _base_model: Any
+    _model_type: str
 
     def __init__(
         self,
@@ -88,22 +173,44 @@ class DistillationTeacher:
         device: str = "cuda",
         micro_batch: int = 0,
     ):
-        from transformers import AutoModelForCausalLM
+        self._model_type = _detect_model_type(teacher_model_name)
 
-        self.model: Any = AutoModelForCausalLM.from_pretrained(
-            teacher_model_name, dtype=torch.bfloat16, local_files_only=True
-        )
+        if self._model_type == "seq2seq_lm":
+            from transformers import AutoModelForSeq2SeqLM
+            self.model: Any = AutoModelForSeq2SeqLM.from_pretrained(
+                teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+            )
+            self._base_model = self.model.model  # encoder-decoder base
+        elif self._model_type == "multimodal_lm":
+            from transformers import AutoModelForMultimodalLM
+            self.model = AutoModelForMultimodalLM.from_pretrained(
+                teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+            )
+            # Keep the FULL multimodal model (vision + audio + text).
+            # Text-only forward is used for KL distillation; vision/audio
+            # encoders stay loaded for future multimodal training.
+            self._base_model = self.model
+        else:
+            from transformers import AutoModelForCausalLM
+            self.model = AutoModelForCausalLM.from_pretrained(
+                teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+            )
+            self._base_model = self.model.model
+
         self.model.to(device)
         self.model.eval()
         for param in self.model.parameters():
             param.requires_grad_(False)
-        self._base_model: Any = self.model.model
         self.device = device
         self._micro_batch = micro_batch
         self._compiled = False
 
     def _ensure_compiled(self) -> None:
-        """Lazily compile the teacher's base transformer for faster inference."""
+        """Lazily compile the teacher's base model for faster inference.
+
+        For multimodal models, compiles the full model (all components).
+        Compilation is best-effort: silently skips on failure.
+        """
         if self._compiled or not hasattr(torch, "compile"):
             return
         try:
@@ -116,31 +223,116 @@ class DistillationTeacher:
 
     @property
     def lm_head_weight(self) -> torch.Tensor:
-        """Teacher lm_head weight [V, H] for per-chunk projection."""
-        w = self.model.lm_head.weight
-        assert isinstance(w, torch.Tensor)
-        return w
+        """Teacher lm_head weight [V, H] for per-chunk projection.
+
+        Handles tied embeddings (common in Gemma/T5Gemma) where lm_head
+        shares the embedding weight.
+        """
+        # Try direct lm_head access first
+        if hasattr(self.model, "lm_head") and hasattr(self.model.lm_head, "weight"):
+            w = self.model.lm_head.weight
+            assert isinstance(w, torch.Tensor)
+            return w
+
+        # Tied embeddings: lm_head = embed_tokens
+        if self._model_type == "multimodal_lm":
+            try:
+                w = _get_embeddings(self.model, "multimodal_lm")
+                assert isinstance(w, torch.Tensor)
+                return w
+            except (AttributeError, AssertionError):
+                pass
+        elif self._model_type == "seq2seq_lm":
+            try:
+                w = _get_embeddings(self.model, "seq2seq_lm")
+                assert isinstance(w, torch.Tensor)
+                return w
+            except (AttributeError, AssertionError):
+                pass
+
+        # Fallback: try model.model.embed_tokens (CausalLM path)
+        if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):
+            w = self.model.model.embed_tokens.weight
+            assert isinstance(w, torch.Tensor)
+            return w
+
+        raise AttributeError(f"cannot find lm_head weight in {type(self.model).__name__}")
 
     @torch.inference_mode()
     def forward_hidden(self, tokens: torch.Tensor) -> torch.Tensor:
         """Run teacher forward and return last hidden state [B, T, H].
 
-        Uses the base transformer model (not the CausalLM head) to avoid
-        materializing [B, T, V] logits. Saves ~1.2GB VRAM at batch=12.
+        For CausalLM: uses the base transformer model (not the CausalLM head).
+        For Seq2SeqLM (T5Gemma): uses the decoder in decoder-only mode
+            (feeds tokens as decoder input, no encoder context).
+        For MultimodalLM (Gemma 4): calls the FULL model with input_ids only.
+            Vision/audio encoders are loaded but not activated. The text
+            decoder produces hidden states for KL distillation. This preserves
+            the full multimodal model for future multimodal training.
 
         When micro_batch > 0, processes the batch in chunks of micro_batch
-        to bound peak activation memory (teacher attention scores scale
-        linearly with batch). Trades a few extra kernel launches for
-        significantly lower VRAM peak.
+        to bound peak activation memory.
         """
         self._ensure_compiled()
         if self._micro_batch > 0 and tokens.size(0) > self._micro_batch:
             hiddens: list[torch.Tensor] = []
             for i in range(0, tokens.size(0), self._micro_batch):
                 chunk = tokens[i : i + self._micro_batch]
-                out = self._base_model(chunk)
-                hiddens.append(out.last_hidden_state)
+                out = self._forward_single(chunk)
+                hiddens.append(out)
             return torch.cat(hiddens, dim=0)
+        return self._forward_single(tokens)
+
+    def _forward_single(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Forward pass for a single micro-batch, returning [B, T, H].
+
+        For MultimodalLM: calls the FULL model with input_ids only.
+        Vision/audio encoders are loaded but not activated (no image/audio
+        input). The text decoder produces hidden states for KL distillation.
+        This preserves the full multimodal model for future multimodal
+        training while using text-only forward for current distillation.
+        """
+        if self._model_type == "multimodal_lm":
+            out = self.model(input_ids=tokens)
+            if hasattr(out, "last_hidden_state"):
+                return out.last_hidden_state  # [B, T, H]
+            # Some multimodal models return hidden states under different keys
+            if hasattr(out, "text_hidden_states") and out.text_hidden_states is not None:
+                return out.text_hidden_states
+            # Fallback: access the text sub-model directly
+            for path in [("model", "text_model"), ("model", "language_model")]:
+                obj = self.model
+                try:
+                    for attr in path:
+                        obj = getattr(obj, attr)
+                    sub_out = obj(tokens)
+                    if hasattr(sub_out, "last_hidden_state"):
+                        return sub_out.last_hidden_state
+                except (AttributeError, TypeError):
+                    continue
+            raise RuntimeError(
+                f"cannot extract hidden states from {type(self.model).__name__}"
+            )
+
+        if self._model_type == "seq2seq_lm":
+            # T5Gemma: run decoder-only forward by feeding tokens as
+            # decoder_input_ids with empty encoder output.
+            decoder = self._base_model.decoder if hasattr(self._base_model, "decoder") else self._base_model
+            if hasattr(decoder, "embed_tokens"):
+                emb = decoder.embed_tokens(tokens)
+                B, T = tokens.shape
+                H = emb.size(-1)
+                enc_out = torch.zeros(1, 0, H, dtype=emb.dtype, device=emb.device)
+                out = self._base_model(
+                    input_ids=torch.zeros(1, 0, dtype=tokens.dtype, device=tokens.device),
+                    decoder_input_ids=tokens,
+                    encoder_outputs=(enc_out, None),
+                )
+                return out.last_hidden_state  # [B, T, H]
+            out = self._base_model(tokens)
+            return out.last_hidden_state
+
+        # Default: CausalLM base model
         out = self._base_model(tokens)
         return out.last_hidden_state  # [B, T, H]
 

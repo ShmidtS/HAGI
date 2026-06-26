@@ -1,0 +1,349 @@
+# =============================================================================
+# HAGI Configuration — 24gb_google (Google models: T5Gemma + Gemma 4)
+# Target: 24 GB VRAM GPU, ~300M params (hidden 1152, vocab 262144).
+# Embedding model: google/t5gemma-2-1b-1b (encoder-decoder, hidden=1152)
+# Teacher model: google/gemma-4-12B-it-qat-w4a16-ct (W4A16, ~7GB VRAM)
+# Tokenizer/vocab: Gemma (262,144) — shared by both Google models.
+# Data format: uint32 (262,144 > 65,535 uint16 limit).
+# =============================================================================
+
+name: 24gb_google
+
+# =============================================================================
+# DATA — training data sources, tokenization, and batching
+# Read in: scripts/train.py (build_dataloader, _resolve_max_steps)
+# =============================================================================
+data:
+  dataset_mode: memmap_packed
+
+  max_seq_len: 1024
+  min_seq_len: 1024
+
+  mix:
+    edu: 0.4
+    slimpajama: 0.25
+    wikipedia_en: 0.1
+    wikipedia_ru: 0.08
+    oscar_ru: 0.07
+    openwebmath: 0.03
+    smoltalk: 0.03
+    tinystories: 0.02
+    python_instruct: 0.02
+
+  mix_paths:
+  - name: tinystories
+    path: v4_3b/tinystories.bin
+    weight: 0.02
+  - name: python_instruct
+    path: v4_3b/python_instruct.bin
+    weight: 0.02
+  - name: smoltalk
+    path: v4_3b/smoltalk.bin
+    weight: 0.03
+  - name: wikipedia_en
+    path: v4_3b/wikipedia_en.bin
+    weight: 0.1
+  - name: wikipedia_ru
+    path: v4_3b/wikipedia_ru.bin
+    weight: 0.08
+  - name: openwebmath
+    path: v4_3b/openwebmath.bin
+    weight: 0.03
+  - name: oscar_ru
+    path: v4_3b/oscar_ru.bin
+    weight: 0.07
+  - name: slimpajama
+    path: v4_3b/slimpajama.bin
+    weight: 0.25
+  - name: edu
+    path: v4_3b/edu.bin
+    weight: 0.4
+
+  num_workers: 0
+  packing: bfd
+
+  sequential_cycles: 3
+
+  pin_memory: true
+
+  # Gemma tokenizer (vocab=262,144). Must match teacher and embedding model.
+  # Read in: train.py:441 (data_cfg.get("tokenizer", ...))
+  tokenizer: google/t5gemma-2-1b-1b
+
+  train_tokens: 3000000000
+
+  # uint32: vocab 262,144 exceeds uint16 max (65,535).
+  # Read in: train.py:190,457 (data_cfg.get("dtype", "uint16"))
+  dtype: uint32
+
+  # train_path: data/v4_3b/edu.bin
+  # eval_path: data/v4_3b/eval.bin
+
+# =============================================================================
+# EVAL
+# =============================================================================
+eval:
+  benchmarks:
+  - gsm8k
+  - arc_challenge
+  - boolq
+  - hellaswag
+  - winogrande
+
+# =============================================================================
+# MODEL — HAGI architecture configuration
+# hidden_size=1152 matches t5gemma-2-1b-1b for direct embedding transfer.
+# Read in: scripts/train.py:659 -> config_from_dict(cfg["model"]) -> HAGIConfig
+# =============================================================================
+model:
+  ce_chunk_size: 0
+  use_fused_ce: true
+  ce_fused_chunk_size: 4096
+  label_smoothing: 0.05
+
+  # --- Architecture: layer counts ---
+  # 24GB VRAM allows more layers. Reasoning depth is HAGI's core novelty.
+  perception_layers: 3
+  reasoning_layers: 10
+  expression_layers: 3
+
+  # --- Core dimensions ---
+  # 1152 = t5gemma-2-1b-1b hidden_size (direct embedding transfer).
+  # head_dim = 1152/16 = 72. Grades: 96+144+144+96+672=1152.
+  hidden_size: 1152
+  vocab_size: 262144
+
+  # --- Reasoning loop ---
+  loop_count: 5
+  use_loop: true
+
+  # --- GDR (Grade-Decomposed Recurrence) ---
+  use_gdr: true
+  hdim_full: true
+  hdim_heads: 4
+  hdim_num_rotors: 4
+  hdim_delay_steps: 1
+  use_hdim_cross_domain: true
+  rotor_seed: 42
+
+  # --- Grade configuration (Clifford algebra) ---
+  # Sum = 96+144+144+96+672 = 1152 = hidden_size.
+  # All grades divisible by 8 (Clifford requires vector % 8 == 0).
+  grades:
+    scalar: 96
+    vector: 144
+    bivector: 144
+    trivector: 96
+    residual: 672
+    scalar_momentum: 0.8
+    vector_momentum: 0.5
+    gdr_router: true
+    gdr_router_alpha: 0.01
+    gdr_router_temperature: 1.0
+
+  # --- HRM (Hierarchical Recurrent Model) ---
+  hrm: true
+  hrm_memory_aware: true
+  h_dim: 256
+  l_dim: 256
+  hrm_h_cycles: 1
+  # 3 l_cycles: 24GB allows more reasoning passes (10x3=30 vs 7x2=14).
+  hrm_l_cycles: 3
+
+  # --- MSA (Memory Sparse Attention) ---
+  use_msa: true
+  msa_slot_count: 4096
+  msa_top_k: 6
+  msa_chunk_size: 4
+  msa_lsh_threshold: 0
+  msa_lsh_hashes: 8
+  msa_lsh_bits: 10
+  msa_lsh_probe: 2
+  msa_aux_loss: true
+  msa_lb_alpha: 1.0
+
+  # --- MoE (Mixture of Experts) ---
+  use_moe: true
+  num_experts: 4
+  moe_top_k: 1
+  # 3072/4 = 768 per expert. SwiGLU 1152->768->1152.
+  moe_intermediate_size: 768
+  moe_alpha: 0.01
+  moe_router_temperature: 1.0
+  moe_mod_skip: true
+
+  # --- NARS ---
+  use_nars: false
+
+  # --- Quality head ---
+  use_quality_head: false
+
+  # --- Binary factorized layers ---
+  use_binary_factorized: false
+  binary_factorized_rank: 8
+
+  # --- Regularization ---
+  thinking_noise: 0.0
+  hidden_mag_cap: 0.0
+
+  # --- Memory / performance ---
+  gradient_checkpointing: true
+  gc_group_size: 2
+  compile: true
+
+  # --- Transformer block configuration ---
+  transformer:
+    hidden_size: 1152
+    # 3072 = 1152 * 8/3 (SwiGLU ratio). Divisible by 8.
+    intermediate_size: 3072
+    max_seq_len: 4096
+    norm: rmsnorm
+    norm_eps: 1.0e-6
+    # 4 KV heads (GQA ratio 16/4=4, head_dim=72).
+    num_kv_heads: 4
+    # 16 query heads (head_dim = 1152/16 = 72).
+    num_query_heads: 16
+    qk_norm: true
+    rope_theta: 500000.0
+    fuse_qkv: true
+    fuse_gate_up: true
+
+# =============================================================================
+# TRAINING — optimizer, schedule, loss, and loop configuration
+# =============================================================================
+training:
+  learning_rate: 0.0004
+
+  # 24GB VRAM: larger batch than 8GB config.
+  # Student ~300M params + 262K embedding table (~604MB bf16).
+  # batch=16, grad_accum=2, effective batch=32.
+  batch_size: 16
+
+  ckpt_interval: 500
+
+  composite_loss:
+    w_ce: 1.0
+    w_aux: 0.0
+    w_iso: 0.02
+    w_moe: 0.005
+    w_msa_lb: 0.01
+    w_gdr_router: 0.005
+    w_quality: 0.0
+
+  w_aux_start: 0.0
+  w_iso_start: 0.0
+  w_moe_start: 0.0
+  w_msa_lb_start: 0.0
+  w_gdr_router_start: 0.0
+
+  schedule: wsd
+  warmup_steps: 1000
+  min_lr_ratio: 0.1
+  cooldown_frac: 0.10
+
+  # 3B tokens / (16 * 2 * 1024) = ~91,553 steps
+  max_steps: 91553
+
+  grad_accum_steps: 2
+  grad_clip: 0.0
+  gradient_checkpointing: true
+  magic_norm_max: 0.0
+
+  precision: manual_bf16
+
+  # --- Optimizer: Muon + AdamW hybrid ---
+  optimizer: muon_adamw
+  muon_lr: 0.02
+  muon_momentum: 0.97
+  muon_ns_steps: 5
+  muon_weight_decay: 0.5
+  weight_decay: 0.1
+  betas: [0.9, 0.98]
+  eps: 1.0e-8
+
+  # --- EMA ---
+  ema:
+    decay: 0.9995
+    start_step: 1000
+
+  # --- Evaluation ---
+  eval_interval: 0
+  eval_samples: 500
+  eval_iters: 50
+
+  # --- Logging ---
+  log_interval: 1
+  nars_policy_interval: 200
+
+  # --- Loss warmup ---
+  loss_warmup_mode: cosine
+  aux_warmup_steps: 1500
+  iso_warmup_steps: 2000
+  moe_warmup_steps: 1000
+  msa_lb_warmup_steps: 1500
+  gdr_router_warmup_steps: 1500
+
+  # --- VRAM probe ---
+  # 24GB target. headroom 0.90 = use up to 90% of VRAM (~21.6GB).
+  vram_probe:
+    safety: 1.0
+    headroom: 0.90
+
+  seed: 42
+  use_prefix_lm: false
+
+# =============================================================================
+# DISTILLATION — Google teacher + embedding model
+# Teacher: google/gemma-4-12B-it-qat-w4a16-ct (W4A16, full multimodal)
+#   Full model loaded: text decoder (~7GB W4A16) + vision encoder (~1.1GB bf16)
+#   + audio encoder (~0.6GB bf16) = ~8.7GB total weights.
+#   Frozen, text-only forward for KL (vision/audio inactive but loaded).
+# Embedding: google/t5gemma-2-1b-1b (hidden=1152, vocab=262144)
+# Both share Gemma vocab (262,144) — KL distillation on matching vocab.
+# VRAM: teacher ~9GB + student ~7GB + KL ~1.6GB + overhead ~1GB = ~19GB.
+# Read in: scripts/train.py (teacher load + embedding transfer),
+#          src/hagi/train/loop.py (teacher forward + distill loss),
+#          src/hagi/train/distillation.py (implementation)
+# =============================================================================
+distillation:
+  enabled: true
+  # Gemma 4 12B QAT W4A16: full multimodal model (text + vision + audio).
+  # W4A16 text decoder ~6.5GB + vision ~1.1GB + audio ~0.6GB = ~8.7GB.
+  # Text-only forward used for KL; vision/audio loaded but inactive.
+  # Same vocab (262,144) as student. Hidden_size=3840 (mismatch OK:
+  # KL projects each model's hidden through its own lm_head).
+  teacher_model: google/gemma-4-12B-it-qat-w4a16-ct
+  # T5Gemma 2 1B-1B: encoder-decoder, hidden=1152, vocab=262144.
+  # Used for embedding transfer at init (hidden matches student exactly).
+  # Tied embeddings (encoder = decoder), so encoder.embed_tokens is the source.
+  embedding_model: google/t5gemma-2-1b-1b
+  embedding_transfer: true
+  temperature: 2.0
+  alpha_start: 0.5
+  alpha_end: 0.3
+  distill_end_step: 0
+  # 512: KL chunk size for 262K vocab.
+  # Peak VRAM per chunk = 2 * 512 * 262144 * 6B ~ 1.6GB.
+  chunk_size: 512
+  every: 1
+  # 2: process teacher batch in micro-chunks of 2 sequences.
+  # 12B model with 48 layers: peak attention per micro_batch=2 at seq=1024
+  # is manageable (~64MB per layer with sliding window).
+  teacher_micro_batch: 2
+
+# =============================================================================
+# CURRICULUM — two-stage SFT
+# =============================================================================
+curriculum:
+  enabled: true
+  stage2_start: 60000
+  stage2_mix_paths:
+  - name: openwebmath
+    path: v4_3b/openwebmath.bin
+    weight: 0.15
+  - name: edu
+    path: v4_3b/edu.bin
+    weight: 0.50
+  - name: slimpajama
+    path: v4_3b/slimpajama.bin
+    weight: 0.35

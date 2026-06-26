@@ -23,6 +23,13 @@ if _env_path.exists():
                 os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip().strip("\"'")
                 break
 
+# Default dtype for token memmap files. uint16 supports vocab up to 65,535
+# (SmolLM2). uint32 supports vocab up to 4,294,967,295 (Gemma 262K, etc.).
+_DTYPE_MAP = {
+    "uint16": (np.uint16, "H", 2),
+    "uint32": (np.uint32, "I", 4),
+}
+
 
 def _tokenize_chunk(
     lines: list[str],
@@ -30,6 +37,7 @@ def _tokenize_chunk(
     min_length: int,
     eos_token_id: int | None,
     _fast_json: Any = _json,
+    dtype: str = "uint16",
 ) -> np.ndarray:
     texts: list[str] = []
     for line in lines:
@@ -42,17 +50,19 @@ def _tokenize_chunk(
             continue
         texts.append(text)
     if not texts:
-        return np.asarray([], dtype=np.uint16)
+        np_dtype, arr_code, _ = _DTYPE_MAP.get(dtype, _DTYPE_MAP["uint16"])
+        return np.asarray([], dtype=np_dtype)
     # Direct Rust tokenizer — no BatchEncoding / attention_mask overhead
     ids_list = tokenizer.fast_batch_encode(texts)
-    tokens = array.array("H")
+    np_dtype, arr_code, _ = _DTYPE_MAP.get(dtype, _DTYPE_MAP["uint16"])
+    tokens = array.array(arr_code)
     for ids in ids_list:
         if len(ids) < min_length:
             continue
         if eos_token_id is not None:
             ids.append(eos_token_id)
         tokens.extend(ids)
-    return np.frombuffer(tokens, dtype=np.uint16).copy()
+    return np.frombuffer(tokens, dtype=np_dtype).copy()
 
 
 DATASET_NAME = "HuggingFaceFW/fineweb-edu"
@@ -256,28 +266,31 @@ def parse_token_count(value: str) -> int:
     return int(float(text) * multiplier)
 
 
-def _count_bin_tokens(path: Path) -> int | None:
-    """Token count in a uint16 .bin, or None if absent/invalid.
+def _count_bin_tokens(path: Path, dtype: str = "uint16") -> int | None:
+    """Token count in a .bin memmap, or None if absent/invalid.
 
-    Used by skip-existing checks: a non-empty even-sized .bin is read via memmap
-    to count tokens; otherwise None (caller re-downloads/tokenizes).
+    Supports uint16 (2 bytes/token, vocab <= 65,535) and uint32
+    (4 bytes/token, vocab <= 4,294,967,295).
     """
     if not path.exists():
         return None
+    _, _, item_size = _DTYPE_MAP.get(dtype, _DTYPE_MAP["uint16"])
     size = path.stat().st_size
-    if size == 0 or size % 2 != 0:
+    if size == 0 or size % item_size != 0:
         return None
-    existing = np.memmap(path, dtype=np.uint16, mode="r")
+    np_dtype = _DTYPE_MAP.get(dtype, _DTYPE_MAP["uint16"])[0]
+    existing = np.memmap(path, dtype=np_dtype, mode="r")
     count = int(existing.shape[0])
     del existing
     return count if count > 0 else None
 
 
-def flush_shard(tokens: list[int], output_dir: Path, shard_idx: int) -> Path:
+def flush_shard(tokens: list[int], output_dir: Path, shard_idx: int, dtype: str = "uint16") -> Path:
     path = output_dir / f"fineweb_edu_{shard_idx:05d}.bin"
-    array = np.asarray(tokens, dtype=np.uint16)
-    memmap = np.memmap(path, dtype=np.uint16, mode="w+", shape=array.shape)
-    memmap[:] = array[:]
+    np_dtype = _DTYPE_MAP.get(dtype, _DTYPE_MAP["uint16"])[0]
+    arr = np.asarray(tokens, dtype=np_dtype)
+    memmap = np.memmap(path, dtype=np_dtype, mode="w+", shape=arr.shape)
+    memmap[:] = arr[:]
     memmap.flush()
     return path
 
@@ -371,15 +384,16 @@ def tokenize_source_parallel(
     num_workers: int = 8,
     chunk_lines: int = 2000,
     skip_existing: bool = False,
+    dtype: str = "uint16",
 ) -> Path:
     path = output_dir / f"{source}.bin"
     if skip_existing:
-        existing_count = _count_bin_tokens(path)
+        existing_count = _count_bin_tokens(path, dtype=dtype)
         if existing_count is not None:
             print(f"source={source} skip_existing tokens={existing_count}")
             return path
 
-    tokenizer = TokenizerWrapper.smollm2(tokenizer_name, use_fast=True)
+    tokenizer = TokenizerWrapper(model_name=tokenizer_name, use_fast=True)
     eos_token_id = (
         int(tokenizer.eos_token_id) if tokenizer.eos_token_id is not None else None
     )
@@ -404,7 +418,7 @@ def tokenize_source_parallel(
             if not chunk:
                 break
             arr = _tokenize_chunk(
-                chunk, tokenizer, min_length, eos_token_id, _fast_json
+                chunk, tokenizer, min_length, eos_token_id, _fast_json, dtype=dtype
             )
             if arr.size > 0:
                 remaining = target_tokens - written
@@ -437,6 +451,8 @@ def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:
     download_workers = int(
         getattr(args, "download_workers", min(len(args.mix_ratios), 4))
     )
+    tokenizer_name = getattr(args, "tokenizer", SMOLLM2_TOKENIZER)
+    dtype = getattr(args, "dtype", "uint16")
 
     # Stage 1: parallel download all raw texts
     raw_tasks: list[tuple[str, Path, int]] = []
@@ -447,7 +463,7 @@ def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:
         for source, ratio in args.mix_ratios.items():
             target_path = output_dir / f"{source}.bin"
             if skip_existing:
-                existing_count = _count_bin_tokens(target_path)
+                existing_count = _count_bin_tokens(target_path, dtype=dtype)
                 if existing_count is not None:
                     paths[source] = target_path
                     print(f"source={source} skip_existing tokens={existing_count}")
@@ -485,12 +501,13 @@ def download_mixed_token_bins(args: argparse.Namespace) -> dict[str, Path]:
                 source,
                 raw_path,
                 output_dir,
-                SMOLLM2_TOKENIZER,
+                tokenizer_name,
                 source_target,
                 args.min_length,
                 num_workers=15,
                 chunk_lines=2000,
                 skip_existing=skip_existing,
+                dtype=dtype,
             )
             paths[source] = output_dir / f"{source}.bin"
         except Exception as exc:
@@ -550,7 +567,9 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
     target_tokens = parse_token_count(args.subset)
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer = TokenizerWrapper.smollm2(SMOLLM2_TOKENIZER, use_fast=True)
+    tokenizer_name = getattr(args, "tokenizer", SMOLLM2_TOKENIZER)
+    dtype = getattr(args, "dtype", "uint16")
+    tokenizer = TokenizerWrapper(model_name=tokenizer_name, use_fast=True)
     dataset = load_dataset(
         DATASET_NAME, name=args.name, split=args.split, streaming=True
     )
@@ -574,8 +593,9 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
         if len(set(ids)) / max(1, len(ids)) < args.dedup_ratio:
             skipped += 1
             continue
+        np_dtype = _DTYPE_MAP.get(dtype, _DTYPE_MAP["uint16"])[0]
         token_hash = hashlib.sha256(
-            np.asarray(ids, dtype=np.uint16).tobytes()
+            np.asarray(ids, dtype=np_dtype).tobytes()
         ).hexdigest()
         if token_hash in seen_hashes:
             skipped += 1
@@ -591,7 +611,7 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
         total_tokens += len(ids)
         while len(shard_tokens) >= args.shard_tokens:
             written.append(
-                flush_shard(shard_tokens[: args.shard_tokens], output_dir, shard_idx)
+                flush_shard(shard_tokens[: args.shard_tokens], output_dir, shard_idx, dtype=dtype)
             )
             shard_tokens = shard_tokens[args.shard_tokens :]
             shard_idx += 1
@@ -601,7 +621,7 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
         print(f"skipped {skipped} short/duplicate/low-diversity samples")
 
     if shard_tokens:
-        written.append(flush_shard(shard_tokens, output_dir, shard_idx))
+        written.append(flush_shard(shard_tokens, output_dir, shard_idx, dtype=dtype))
 
     meta = output_dir / "metadata.txt"
     meta.write_text(
@@ -610,9 +630,9 @@ def download_and_tokenize(args: argparse.Namespace) -> None:
                 f"dataset={DATASET_NAME}",
                 f"name={args.name}",
                 f"split={args.split}",
-                f"tokenizer={SMOLLM2_TOKENIZER}",
+                f"tokenizer={tokenizer_name}",
                 f"tokens={total_tokens}",
-                "dtype=uint16",
+                f"dtype={dtype}",
                 *[f"shard={path.name}" for path in written],
             ]
         )
@@ -698,6 +718,19 @@ def parse_args() -> argparse.Namespace:
         choices=("bfd", "random"),
         default="bfd",
         help="sequence packing strategy (bfd=best-fit-decreasing on EOS, random=legacy memmap)",
+    )
+    parser.add_argument(
+        "--tokenizer",
+        default=SMOLLM2_TOKENIZER,
+        help="HuggingFace tokenizer model name (default: SmolLM2-135M, vocab=49152). "
+        "Use google/t5gemma-2-1b-1b for Gemma tokenizer (vocab=262144).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=("uint16", "uint32"),
+        default="uint16",
+        help="memmap dtype for token files. uint16 for vocab<=65535 (SmolLM2), "
+        "uint32 for vocab>65535 (Gemma 262K, etc.).",
     )
     return parser.parse_args()
 
