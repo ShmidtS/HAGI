@@ -61,12 +61,26 @@ def _get_embeddings(model: Any, model_type: str) -> torch.Tensor:
     Returns [V, H] embedding tensor.
     """
     if model_type == "seq2seq_lm":
-        # T5Gemma: encoder and decoder share tied embeddings.
-        # Access via encoder.embed_tokens (or decoder.embed_tokens — same weight).
-        if hasattr(model, "encoder") and hasattr(model.encoder, "embed_tokens"):
-            return model.encoder.embed_tokens.weight.data
+        # T5Gemma 2: encoder wraps a text_model sub-module with embed_tokens.
+        # Path: model.encoder.text_model.embed_tokens (tied with decoder.embed_tokens).
+        enc = getattr(model, "encoder", None)
+        if enc is not None:
+            if hasattr(enc, "embed_tokens"):
+                return enc.embed_tokens.weight.data
+            tm = getattr(enc, "text_model", None)
+            if tm is not None and hasattr(tm, "embed_tokens"):
+                return tm.embed_tokens.weight.data
         if hasattr(model, "model") and hasattr(model.model, "encoder"):
-            return model.model.encoder.embed_tokens.weight.data
+            enc = model.model.encoder
+            if hasattr(enc, "embed_tokens"):
+                return enc.embed_tokens.weight.data
+            tm = getattr(enc, "text_model", None)
+            if tm is not None and hasattr(tm, "embed_tokens"):
+                return tm.embed_tokens.weight.data
+        # Fallback: decoder embed_tokens (tied with encoder in T5Gemma)
+        dec = getattr(model, "decoder", None)
+        if dec is not None and hasattr(dec, "embed_tokens"):
+            return dec.embed_tokens.weight.data
         raise AttributeError(f"cannot find encoder embeddings in {type(model).__name__}")
 
     if model_type == "multimodal_lm":
