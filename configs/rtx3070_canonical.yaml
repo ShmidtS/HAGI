@@ -586,6 +586,19 @@ model:
     # Read in: TransformerConfig.fuse_gate_up (transformer.py:33), transformer.py:331
     fuse_gate_up: true
 
+  # --- Reasoning Cache (RC) ---
+  # Iterative generate→summarize→cache decoding (arXiv:2602.03773).
+  # See the top-level `rc:` section for full documentation. These fields
+  # are read by config_from_dict → HAGIConfig and saved in checkpoints.
+  # Read in: HAGIConfig.rc_* (hagi.py), hagi.inference.reasoning_cache,
+  #          hagi.train.loop (rc_train_step integration)
+  rc_enabled: true
+  rc_iterations: 3
+  rc_reasoning_budget: 512
+  rc_summary_budget: 128
+  rc_train_probability: 0.0
+  rc_train_iterations: 2
+
 # =============================================================================
 # TRAINING — optimizer, schedule, loss, and loop configuration
 # Read in: scripts/train.py:660 (train_cfg = dict(cfg["training"]))
@@ -958,3 +971,52 @@ curriculum:
     path: v4_3b/slimpajama.bin
     weight: 0.35
   stage2_sequential_cycles: 2
+
+# =============================================================================
+# REASONING CACHE (RC) — iterative generate→summarize→cache decoding
+# Replaces standard autoregressive decoding with an iterative loop: each turn
+# generates a reasoning trace (H_R tokens), summarizes it into a compact
+# summary (H_S << H_R), and conditions the next turn on the summary. This
+# decouples the effective reasoning horizon (T × (H_R + H_S)) from the
+# per-step context length, enabling extrapolation beyond training lengths.
+# See: arXiv:2602.03773 (Wu et al., 2026).
+#
+# HAGI integration: at inference, generate_with_rc() wraps generate() with
+# the iterative loop. At training, rc_train_probability > 0 enables RC
+# training steps (two-forward: no-grad reasoning + grad summary-conditioned)
+# to teach summary-conditioned generation. The MSA slot registry serves as
+# the cross-iteration memory cache when use_msa_cache=true.
+# Read in: hagi.inference.reasoning_cache (RCConfig, generate_with_rc),
+#          hagi.inference.chat (ChatSession.rc_config),
+#          hagi.train.loop (rc_train_step integration)
+# =============================================================================
+rc:
+  # Master switch for RC training. When false, rc_train_probability is
+  # forced to 0 and no RC training steps run. Inference RC is controlled
+  # separately via ChatSession.enable_rc() / rc_config at call time.
+  enabled: true
+
+  # Inference: number of RC turns (generate→summarize cycles). More turns
+  # = longer effective reasoning horizon at the cost of more forward passes.
+  # 3 turns × (512 + 128) = 1920 effective tokens per response.
+  iterations: 3
+
+  # H_R: max new tokens per reasoning trace generation. Bounded context
+  # keeps each step close to the training distribution (seq_len=1024).
+  # 512 = half the training seq_len, leaving room for prompt + summary.
+  reasoning_budget: 512
+
+  # H_S: max new tokens per summary. H_S << H_R: the summary compresses
+  # the reasoning trace into a compact cache entry. 128 tokens is ~4x
+  # compression vs 512-token traces.
+  summary_budget: 128
+
+  # Training: probability of an RC training step (0.0 = never, 1.0 =
+  # always). 0.05 = ~1 in 20 steps uses RC training. Low probability
+  # keeps the primary next-token-prediction signal dominant while
+  # gradually teaching summary-conditioned generation.
+  train_probability: 0.0
+
+  # Training: number of RC iterations per RC training step. Fewer than
+  # inference (2 vs 3) to bound the extra forward cost per step.
+  train_iterations: 2

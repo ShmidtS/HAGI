@@ -13,6 +13,7 @@ Ampere-specific TF32/bf16 knobs are set once at startup.
 from __future__ import annotations
 
 import math
+import random
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -41,7 +42,6 @@ from hagi.train.config import config_from_dict, config_to_dict  # noqa: E402
 
 if TYPE_CHECKING:
     from hagi.model import HAGI
-
 
 @dataclass
 class LoopConfig:
@@ -561,6 +561,13 @@ def train(
         composite_weights.get("w_gdr_router", 0.0) if composite_weights else 0.0
     )
 
+    # RC (Reasoning Cache) training config. When rc_train_probability > 0,
+    # a fraction of training steps use rc_train_step (two-forward: no-grad
+    # reasoning pass + grad summary-conditioned pass) to teach the model
+    # summary-conditioned generation. See: arXiv:2602.03773.
+    rc_train_prob = float(getattr(getattr(model, "cfg", None), "rc_train_probability", 0.0))
+    rc_enabled = rc_train_prob > 0.0
+
     # Distillation config
     distill_enabled = teacher_model is not None and distill_cfg is not None
     if distill_enabled:
@@ -687,12 +694,28 @@ def train(
 
             t_fwd_start = time.perf_counter()
             with autocast_ctx(precision, device):
-                output = run_model(
-                    tokens,
-                    targets=targets,
-                    training_mode=effective_weights is not None,
-                    weights=effective_weights,
+                use_rc_step = (
+                    rc_enabled
+                    and not distill_enabled
+                    and random.random() < rc_train_prob
                 )
+                if use_rc_step:
+                    from hagi.inference.reasoning_cache import rc_train_step
+
+                    output = rc_train_step(
+                        run_model,
+                        tokens,
+                        targets,
+                        training_mode=effective_weights is not None,
+                        weights=effective_weights,
+                    )
+                else:
+                    output = run_model(
+                        tokens,
+                        targets=targets,
+                        training_mode=effective_weights is not None,
+                        weights=effective_weights,
+                    )
                 # Fast path: skip composite_loss aggregation when only CE needed.
                 if (
                     not need_components

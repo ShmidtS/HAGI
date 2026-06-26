@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from hagi.inference.generate import generate, generate_with_rollouts, stream_generate
 from hagi.inference.online import FeedbackBuffer, OnlineLearner
 from hagi.inference.lora import apply_lora_to_model
+from hagi.inference.reasoning_cache import RCConfig, generate_with_rc
 from hagi.model.msa import SlotRegistry
 
 
@@ -29,6 +30,7 @@ class ChatSession:
         lora_rank: int = 8,
         lora_alpha: int = 16,
         auto_learn_after: int = 3,
+        rc_config: RCConfig | None = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -55,6 +57,8 @@ class ChatSession:
         self._last_prompt_ids: list[int] = []
         self._last_response_ids: list[int] = []
         self._msa_session_registry: Any | None = None
+        self.rc_config = rc_config
+        self.rc_enabled = rc_config is not None
         if getattr(getattr(model, "cfg", None), "use_msa", False):
             self._msa_session_registry = SlotRegistry(
                 max_slots=model.cfg.msa_slot_count
@@ -103,6 +107,8 @@ class ChatSession:
         prompt_ids = self._prompt_ids()
         self._last_prompt_ids = list(prompt_ids)
         self._last_response_ids = []
+        if self.rc_enabled and self.rc_config is not None:
+            return self.generate_response_with_rc()
         if self.rollouts > 1 and self.noise_sigma > 0.0:
             generated_ids = generate_with_rollouts(
                 self.model,
@@ -144,6 +150,62 @@ class ChatSession:
                     device=generated_ids.device,
                 ),
                 generated_ids[:, len(self._last_prompt_ids) :],
+            ],
+            dim=-1,
+        )
+        self._observe_nars(full_ids)
+        self._maybe_clear_cuda_cache()
+        return text
+
+    def enable_rc(self, rc_config: RCConfig | None = None) -> None:
+        """Enable Reasoning Cache decoding for subsequent responses."""
+        self.rc_config = rc_config or RCConfig()
+        self.rc_enabled = True
+
+    def disable_rc(self) -> None:
+        """Disable Reasoning Cache decoding."""
+        self.rc_enabled = False
+
+    def generate_response_with_rc(self) -> str:
+        """Generate a response using Reasoning Cache (RC) iterative decoding.
+
+        Runs ``rc_config.iterations`` turns of generate→summarize→cache,
+        then produces the final answer conditioned on the accumulated
+        summary cache.
+        """
+        if self.rc_config is None:
+            self.rc_config = RCConfig()
+        prompt_ids = self._prompt_ids()
+        self._last_prompt_ids = list(prompt_ids)
+        self._last_response_ids = []
+        rc_result = generate_with_rc(
+            self.model,
+            self.tokenizer,
+            prompt_ids,
+            rc_config=self.rc_config,
+            max_new_tokens=self.max_new_tokens,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            top_p=self.top_p,
+            eos_token_id=self.eos_token_id,
+            use_cache=True,
+            compile_model=self.compile_model,
+            external_msa_registry=self._msa_session_registry,
+        )
+        generated_ids = rc_result.final_ids
+        new_ids = generated_ids[0, len(prompt_ids):].tolist()
+        text = self.tokenizer.decode(new_ids)
+        self.add_assistant_message(text)
+        self._last_response_ids = list(new_ids)
+        self._capture_last_ids(prompt_ids, generated_ids)
+        full_ids = torch.cat(
+            [
+                torch.tensor(
+                    [self._last_prompt_ids],
+                    dtype=torch.long,
+                    device=generated_ids.device,
+                ),
+                generated_ids[:, len(self._last_prompt_ids):],
             ],
             dim=-1,
         )
