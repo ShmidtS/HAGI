@@ -1,0 +1,138 @@
+# =============================================================================
+# RL Configuration — MGPO on RTX 3070 8GB (VibeThinker-inspired)
+# Run after SFT: python scripts/train_rl.py --config configs/rl_rtx3070.yaml
+#                --sft-checkpoint checkpoints/rtx3070/step-NNNNNN.pt
+# =============================================================================
+name: rl_rtx3070
+
+# =============================================================================
+# SFT CHECKPOINT — starting point for RL
+# =============================================================================
+sft_checkpoint: checkpoints/rtx3070/step-146000.pt
+
+# =============================================================================
+# MODEL — must match SFT model config (copied from rtx3070_canonical.yaml)
+# =============================================================================
+model:
+  vocab_size: 49152
+  hidden_size: 576
+  perception_layers: 2
+  reasoning_layers: 7
+  expression_layers: 2
+  loop_count: 5
+  use_loop: true
+  use_gdr: true
+  hdim_full: true
+  hdim_heads: 4
+  hdim_num_rotors: 4
+  hdim_delay_steps: 1
+  hrm: true
+  hrm_h_cycles: 1
+  hrm_l_cycles: 2
+  hrm_memory_aware: true
+  h_dim: 160
+  l_dim: 160
+  use_hdim_cross_domain: true
+  use_msa: true
+  msa_slot_count: 4096
+  msa_top_k: 6
+  msa_chunk_size: 4
+  msa_lsh_threshold: 0
+  msa_aux_loss: true
+  msa_lb_alpha: 1.0
+  use_moe: true
+  num_experts: 4
+  moe_top_k: 1
+  moe_intermediate_size: 384
+  moe_alpha: 0.01
+  moe_mod_skip: true
+  use_nars: false
+  use_quality_head: false
+  use_binary_factorized: false
+  thinking_noise: 0.0
+  hidden_mag_cap: 0.0
+  gradient_checkpointing: true
+  gc_group_size: 2
+  compile: false
+  use_fused_ce: false
+  ce_chunk_size: 4096
+  ce_fused_chunk_size: 4096
+  label_smoothing: 0.0
+  rotor_seed: 42
+  grades:
+    scalar: 64
+    vector: 96
+    bivector: 96
+    trivector: 64
+    residual: 256
+    scalar_momentum: 0.8
+    vector_momentum: 0.5
+    gdr_router: true
+    gdr_router_alpha: 0.01
+    gdr_router_temperature: 1.0
+  transformer:
+    hidden_size: 576
+    intermediate_size: 1536
+    max_seq_len: 4096
+    norm: rmsnorm
+    norm_eps: 1.0e-6
+    num_kv_heads: 4
+    num_query_heads: 8
+    qk_norm: true
+    rope_theta: 500000.0
+    fuse_qkv: true
+    fuse_gate_up: true
+
+# =============================================================================
+# RL — MGPO training loop configuration
+# =============================================================================
+rl:
+  max_steps: 5000
+  group_size: 4              # G rollouts per prompt
+  num_prompts_per_step: 4    # prompts per optimizer step
+  max_new_tokens: 256        # max generation length per rollout
+  min_prompt_len: 16
+  temperature: 1.0
+  top_k: 50
+  top_p: 0.9
+  learning_rate: 1.0e-5      # Low LR for RL fine-tuning
+  min_lr_ratio: 0.1
+  warmup_steps: 100
+  clip_eps: 0.2              # PPO clipping coefficient
+  mgpo_gamma: 4.0            # MGPO sharpness (higher = more boundary-focused)
+  mgpo_p0: 0.5               # MGPO target accuracy (max entropy point)
+  long2short_lambda: 0.0     # 0 = disabled, 0.2 = VibeThinker default
+  min_accuracy: 0.0          # Filter prompts with 0% accuracy (too hard)
+  max_accuracy: 1.0          # Filter prompts with 100% accuracy (too easy)
+  grad_accum_steps: 1
+  grad_clip: 1.0
+  ckpt_interval: 500
+  log_interval: 10
+  eval_interval: 500
+  ckpt_dir: checkpoints/rl
+  seed: 42
+  precision: manual_bf16
+  gradient_checkpointing: true
+  entropy_coeff: 0.01
+  update_epochs: 1
+  reference_model_free: true
+
+# =============================================================================
+# OPTIMIZER — AdamW for RL (simpler than Muon for RL updates)
+# =============================================================================
+optimizer:
+  kind: adamw
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+
+# =============================================================================
+# DATA — RL dataset of verifiable prompts
+# Format: JSONL with {"prompt": str, "reference": str, "domain": str}
+# =============================================================================
+data:
+  # Path to RL prompts (JSONL). Each line: {"prompt": "...", "reference": "..."}
+  rl_dataset_path: data/rl_prompts.jsonl
+  tokenizer: HuggingFaceTB/SmolLM2-135M
+  max_prompt_len: 512

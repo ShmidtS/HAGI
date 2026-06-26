@@ -538,6 +538,143 @@ def _build_loop_config(
     return build_loop_config(cfg, str(ckpt_dir), max_steps)
 
 
+class CurriculumBatchProvider:
+    """Two-stage curriculum data provider (VibeThinker-inspired).
+
+    Wraps two dataloaders and switches from stage 1 (broad coverage)
+    to stage 2 (hard-reasoning subset) at a configurable step boundary.
+    Implements the iterator protocol for use as ``get_batch`` in batched mode.
+    """
+
+    def __init__(
+        self,
+        stage1_loader: Any,
+        stage2_loader: Any,
+        stage2_start_step: int,
+        start_step: int = 0,
+        grad_accum_steps: int = 1,
+    ):
+        self.stage1_loader = stage1_loader
+        self.stage2_loader = stage2_loader
+        self.stage2_start_step = stage2_start_step
+        self.start_step = start_step
+        self.grad_accum_steps = max(1, grad_accum_steps)
+        self._batch_count = 0
+        self._current_stage = 1
+        self._stage1_iter: Any = None
+        self._stage2_iter: Any = None
+        self._switched = False
+
+    def _current_step(self) -> int:
+        return self.start_step + self._batch_count // self.grad_accum_steps
+
+    def _active_iter(self) -> Any:
+        step = self._current_step()
+        if step >= self.stage2_start_step:
+            if not self._switched:
+                print(
+                    f"Curriculum: switching to stage 2 (hard-reasoning) at step {step}"
+                )
+                self._switched = True
+                self._current_stage = 2
+            if self._stage2_iter is None:
+                self._stage2_iter = iter(self.stage2_loader)
+            return self._stage2_iter
+        if self._stage1_iter is None:
+            self._stage1_iter = iter(self.stage1_loader)
+        return self._stage1_iter
+
+    def __iter__(self) -> CurriculumBatchProvider:
+        return self
+
+    def __next__(self) -> tuple[Any, Any]:
+        try:
+            batch, targets = next(self._active_iter())
+        except StopIteration:
+            if self._current_stage == 1:
+                self._stage1_iter = iter(self.stage1_loader)
+                batch, targets = next(self._stage1_iter)
+            else:
+                self._stage2_iter = iter(self.stage2_loader)
+                batch, targets = next(self._stage2_iter)
+        self._batch_count += 1
+        return batch, targets
+
+    def state_dict(self) -> dict[str, Any]:
+        active = (
+            self.stage1_loader if self._current_stage == 1 else self.stage2_loader
+        )
+        result: dict[str, Any] = {
+            "stage": self._current_stage,
+            "batch_count": self._batch_count,
+        }
+        if hasattr(active, "state_dict"):
+            result["sequential_state"] = active.state_dict()
+        return result
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self._current_stage = state.get("stage", 1)
+        self._batch_count = state.get("batch_count", 0)
+        self._switched = self._current_stage == 2
+        if "sequential_state" in state:
+            active = (
+                self.stage1_loader if self._current_stage == 1 else self.stage2_loader
+            )
+            if hasattr(active, "load_state_dict"):
+                active.load_state_dict(state["sequential_state"])
+
+
+def _build_stage2_dataloader(
+    cfg: dict[str, Any],
+    data_dir: Path,
+    device: str,
+    use_prefix_lm: bool,
+) -> Any:
+    """Build a dataloader for curriculum stage 2 (hard-reasoning subset)."""
+    data_cfg = cfg.get("data", {})
+    train_cfg = cfg.get("training", {})
+    curr_cfg = cfg.get("curriculum", {})
+    seq_len = int(data_cfg.get("max_seq_len", 512))
+    min_seq_len = int(data_cfg.get("min_seq_len", seq_len))
+    batch_size = int(train_cfg.get("batch_size", 2))
+    num_workers = int(data_cfg.get("num_workers", 4))
+    pin_memory = bool(data_cfg.get("pin_memory", device.startswith("cuda")))
+    dtype = data_cfg.get("dtype", "uint16")
+
+    stage2_mix = curr_cfg.get("stage2_mix_paths", [])
+    entries: list[dict[str, Any]] = []
+    for entry in stage2_mix:
+        path = Path(entry["path"])
+        if not path.is_absolute() and not path.exists():
+            path = data_dir / path
+        entries.append(
+            {
+                "path": str(path),
+                "name": entry.get("name", "unknown"),
+                "weight": float(entry.get("weight", 1.0)),
+            }
+        )
+
+    stage2_cycles = int(curr_cfg.get("stage2_sequential_cycles", 2))
+    total_batches = int(train_cfg.get("max_steps", 50000)) * int(
+        train_cfg.get("grad_accum_steps", 1)
+    )
+    num_datasets = max(1, len(entries))
+    steps_per_cycle = max(1, total_batches // (num_datasets * stage2_cycles))
+
+    return SequentialCyclingIterator(
+        entries,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        dtype=dtype,
+        cycles_per_dataset=stage2_cycles,
+        steps_per_cycle=steps_per_cycle,
+        min_seq_len=min_seq_len,
+    )
+
+
 def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     """Single canonical training entry: build model/optimizer/data/loop -> train."""
     model_cfg = config_from_dict(cfg.get("model", {}))
@@ -675,6 +812,27 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         and isinstance(dataloader, SequentialCyclingIterator)
     ):
         dataloader.load_state_dict(seq_state)
+
+    # Curriculum: two-stage SFT (VibeThinker-inspired). When enabled, build a
+    # stage 2 dataloader with the hard-reasoning subset and wrap both stages in
+    # a CurriculumBatchProvider that switches at stage2_start_step.
+    curr_cfg = cfg.get("curriculum", {})
+    if curr_cfg.get("enabled", False) and not use_prefix_lm:
+        stage2_loader = _build_stage2_dataloader(
+            cfg, args.data_dir, args.device, use_prefix_lm
+        )
+        stage2_start = int(curr_cfg.get("stage2_start", int(max_steps * 0.68)))
+        curriculum_provider = CurriculumBatchProvider(
+            stage1_loader=dataloader,
+            stage2_loader=stage2_loader,
+            stage2_start_step=stage2_start,
+            start_step=start_step,
+            grad_accum_steps=grad_accum_steps,
+        )
+        if seq_state is not None and isinstance(seq_state, dict) and "stage" in seq_state:
+            curriculum_provider.load_state_dict(seq_state)
+        print(f"Curriculum: enabled, stage 2 starts at step {stage2_start}")
+        dataloader = curriculum_provider
 
     print_model_summary(model, model_cfg, args.device)
     if args.dry_run:
@@ -829,7 +987,7 @@ def run(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
         apply_prefix_mask_fn=apply_prefix_mask,
         sequential_state_fn=(
             (lambda: dataloader.state_dict())
-            if isinstance(dataloader, SequentialCyclingIterator)
+            if hasattr(dataloader, "state_dict")
             else None
         ),
         teacher_model=teacher_model,

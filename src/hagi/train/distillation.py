@@ -219,3 +219,252 @@ def alpha_at(
         return 1.0
     progress = min(1.0, step / max(1, distill_end_step))
     return alpha_start + (alpha_end - alpha_start) * progress
+
+
+# =============================================================================
+# Offline Self-Distillation (VibeThinker-inspired)
+# =============================================================================
+
+
+@torch.inference_mode()
+def learning_potential_score(
+    student_model: nn.Module,
+    prompt_ids: torch.Tensor,
+    response_ids: torch.Tensor,
+    device: str = "cuda",
+) -> float:
+    """Compute the learning-potential score of a trajectory under the student.
+
+    S_LP = -(1/|y|) * sum_t log pi_stu(y_t | q, y<t)
+
+    A higher score means the trace is NOT yet well modeled by the student
+    and therefore carries higher distillation value.
+
+    Args:
+        student_model: the current student model (eval mode).
+        prompt_ids: [prompt_len] prompt token ids.
+        response_ids: [response_len] response token ids.
+        device: target device.
+
+    Returns:
+        Scalar learning-potential score.
+    """
+    full = torch.cat([prompt_ids, response_ids]).unsqueeze(0).to(device)
+    resp_start = prompt_ids.size(0)
+
+    output = student_model(full, training_mode=False)
+    logits = output["logits"] if isinstance(output, dict) else output[0]
+    if logits is None:
+        raise ValueError(
+            "logits is None — disable use_fused_ce for self-distillation"
+        )
+
+    resp_logits = logits[0, resp_start - 1 : -1, :]
+    resp_tokens = full[0, resp_start:]
+
+    log_probs = torch.nn.functional.log_softmax(resp_logits, dim=-1)
+    token_log_probs = log_probs.gather(-1, resp_tokens.unsqueeze(-1)).squeeze(-1)
+    nll = -token_log_probs.mean().item()
+    return float(nll)
+
+
+class OfflineSelfDistillation:
+    """Offline self-distillation from RL-enhanced checkpoints.
+
+    VibeThinker-inspired pipeline:
+    1. Generate trajectories with the RL-enhanced model
+    2. Verify correctness with reward functions
+    3. Compute learning-potential score (NLL under student)
+    4. Filter by length buckets + score range
+    5. Return selected (prompt, response) pairs for SFT
+
+    The student is the current SFT model; the teacher is the RL checkpoint
+    (same architecture, different weights — self-distillation).
+    """
+
+    def __init__(
+        self,
+        student_model: nn.Module,
+        teacher_model: nn.Module,
+        tokenizer: Any,
+        device: str = "cuda",
+        min_response_len: int = 32,
+        max_response_len: int = 2048,
+        score_percentile_low: float = 0.3,
+        score_percentile_high: float = 0.95,
+        num_length_buckets: int = 5,
+    ):
+        self.student = student_model
+        self.teacher = teacher_model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.min_response_len = min_response_len
+        self.max_response_len = max_response_len
+        self.score_percentile_low = score_percentile_low
+        self.score_percentile_high = score_percentile_high
+        self.num_length_buckets = num_length_buckets
+
+    @torch.inference_mode()
+    def collect_trajectories(
+        self,
+        prompts: list[str],
+        max_new_tokens: int = 256,
+        temperature: float = 1.0,
+        top_k: int | None = 50,
+        top_p: float | None = 0.9,
+        eos_token_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Generate and verify trajectories from the teacher (RL checkpoint).
+
+        Returns list of dicts with keys:
+            prompt, prompt_ids, response, response_ids, length, score, correct
+        """
+        from hagi.inference.generate import generate
+
+        was_training = self.teacher.training
+        self.teacher.eval()
+        self.student.eval()
+
+        results: list[dict[str, Any]] = []
+        for prompt_text in prompts:
+            prompt_ids = self.tokenizer.encode(prompt_text)
+            if isinstance(prompt_ids, list):
+                prompt_ids = torch.tensor(prompt_ids, dtype=torch.long)
+
+            full = generate(
+                self.teacher,
+                prompt_ids.unsqueeze(0).to(self.device),
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                eos_token_id=eos_token_id,
+                use_cache=True,
+            )
+            resp_start = prompt_ids.size(0)
+            response_ids = full[0, resp_start:]
+            response_text = self.tokenizer.decode(response_ids.tolist())
+            resp_len = response_ids.size(0)
+
+            if resp_len < self.min_response_len:
+                continue
+            if resp_len > self.max_response_len:
+                response_ids = response_ids[: self.max_response_len]
+                resp_len = self.max_response_len
+
+            score = learning_potential_score(
+                self.student,
+                prompt_ids,
+                response_ids,
+                device=self.device,
+            )
+
+            results.append(
+                {
+                    "prompt": prompt_text,
+                    "prompt_ids": prompt_ids.cpu(),
+                    "response": response_text,
+                    "response_ids": response_ids.cpu(),
+                    "length": resp_len,
+                    "score": score,
+                    "correct": None,
+                }
+            )
+
+        if was_training:
+            self.teacher.train()
+
+        return results
+
+    def filter_by_learning_potential(
+        self,
+        trajectories: list[dict[str, Any]],
+        references: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Filter trajectories by correctness and learning-potential score.
+
+        If references are provided, only correct trajectories are kept
+        (verified by math_verify). Then, within length buckets, trajectories
+        are ranked by learning-potential score and the middle-to-high range
+        is selected.
+
+        Args:
+            trajectories: output from collect_trajectories.
+            references: optional list of reference answers for verification.
+
+        Returns:
+            Filtered list of trajectory dicts.
+        """
+        from hagi.train.rewards import math_verify
+
+        filtered = trajectories
+
+        if references is not None:
+            verified = []
+            for traj, ref in zip(trajectories, references, strict=True):
+                is_correct = math_verify(traj["response"], ref)
+                if is_correct:
+                    traj["correct"] = True
+                    verified.append(traj)
+            filtered = verified
+
+        if not filtered:
+            return []
+
+        lengths = torch.tensor([t["length"] for t in filtered], dtype=torch.float32)
+
+        length_min = float(lengths.min())
+        length_max = float(lengths.max())
+        if length_max <= length_min:
+            bucket_edges = [length_min]
+        else:
+            bucket_edges = torch.linspace(length_min, length_max, self.num_length_buckets + 1)
+
+        selected: list[dict[str, Any]] = []
+        for i in range(self.num_length_buckets):
+            lo = float(bucket_edges[i])
+            hi = float(bucket_edges[i + 1]) if i + 1 < len(bucket_edges) else float(length_max + 1)
+
+            bucket = [
+                (idx, t)
+                for idx, t in enumerate(filtered)
+                if lo <= t["length"] < hi
+            ]
+            if not bucket:
+                continue
+
+            bucket_scores = torch.tensor(
+                [t["score"] for _, t in bucket], dtype=torch.float32
+            )
+            lo_pct = torch.quantile(
+                bucket_scores, self.score_percentile_low
+            ).item()
+            hi_pct = torch.quantile(
+                bucket_scores, self.score_percentile_high
+            ).item()
+
+            for _, t in bucket:
+                if lo_pct <= t["score"] <= hi_pct:
+                    selected.append(t)
+
+        return selected
+
+    def build_sft_dataset(
+        self,
+        selected: list[dict[str, Any]],
+    ) -> list[dict[str, torch.Tensor]]:
+        """Convert selected trajectories into an SFT-ready dataset.
+
+        Returns list of dicts with keys:
+            input_ids: [prompt_len + response_len] tensor
+            labels: [prompt_len + response_len] tensor (prompt = -100, response = token)
+        """
+        dataset: list[dict[str, torch.Tensor]] = []
+        for traj in selected:
+            prompt_ids = traj["prompt_ids"]
+            response_ids = traj["response_ids"]
+            full = torch.cat([prompt_ids, response_ids])
+            labels = full.clone()
+            labels[: prompt_ids.size(0)] = -100
+            dataset.append({"input_ids": full, "labels": labels})
+        return dataset

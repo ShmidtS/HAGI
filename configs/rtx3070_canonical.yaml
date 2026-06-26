@@ -518,10 +518,7 @@ model:
 
   # Group checkpointing size: wrap N consecutive transformer blocks in ONE
   # checkpoint call. 2 = checkpoint block pairs -> 7-block reasoning core
-  # groups into [2,2,2,1] = 4 recompute passes per l_cycle. Across 2 l_cycles:
-  # 8 recomputes. gc=3 ([3,3,1]=3 passes) tested within noise — bwd bottleneck
-  # is matmul gradients, not recompute launch overhead. Kept at 2 for VRAM
-  # headroom safety. 1 = per-block (legacy, max recompute).
+
   # Read in: HAGIConfig.gc_group_size (hagi.py), hagi.py _run_stage
   gc_group_size: 2
 
@@ -664,18 +661,13 @@ training:
   # Read in: loop.py:351 (build_loop_config), loop.py:136
   cooldown_frac: 0.10
 
-  # With train_tokens=3e9, batch 12 × grad_accum 4 × seq 1024 = 49152 tok/step ->
-  # ceil(3e9/49152) = 61035 steps (~1 epoch over the 3B-token corpus).
+
   # Read in: loop.py:336 (build_loop_config), train.py:44 (_resolve_max_steps)
-  max_steps: 61035
+  max_steps: 146485
 
   # --- Gradient ---
 
   # Gradient accumulation steps. Effective batch = batch_size × grad_accum.
-  # Raised 2->3 to keep effective batch ~36 (12*3) after batch_size 16->12,
-  # matching the prior 16*2=32 effective batch so optimizer dynamics / LR
-  # calibration carry over. VRAM is unchanged (grad accum adds no activation
-  # memory — each micro-batch is processed and freed before the next).
   # Read in: loop.py:340 (build_loop_config), loop.py:547
   grad_accum_steps: 2
 
@@ -941,4 +933,28 @@ distillation:
   # Teacher micro-batch: process B tokens in chunks of 4 to bound peak
   # activation VRAM. At micro_batch=4, seq=1024, 32 layers, 15 heads:
   # peak attention = 4 * 15 * 1024 * 1024 * 2B = 120MB per layer.
-  teacher_micro_batch: 4
+  teacher_micro_batch: 0
+
+# =============================================================================
+# CURRICULUM — two-stage SFT (VibeThinker-inspired)
+# Stage 1: broad capability coverage (all data sources, sequential cycling)
+# Stage 2: hard-reasoning subset (math + edu + web, focused on long-horizon)
+# When enabled, train.py builds a second dataloader for stage 2 and switches
+# at stage2_start_step. The LR schedule (WSD) naturally decays during stage 2,
+# acting as a fine-tuning phase.
+# Read in: scripts/train.py (CurriculumBatchProvider, build_stage2_dataloader)
+# =============================================================================
+curriculum:
+  enabled: true
+  stage2_start: 100000  # Optimizer step to switch to hard-reasoning subset
+  stage2_mix_paths:
+  - name: openwebmath
+    path: v4_3b/openwebmath.bin
+    weight: 0.15
+  - name: edu
+    path: v4_3b/edu.bin
+    weight: 0.50
+  - name: slimpajama
+    path: v4_3b/slimpajama.bin
+    weight: 0.35
+  stage2_sequential_cycles: 2
