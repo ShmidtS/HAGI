@@ -128,6 +128,19 @@ class HAGIConfig:
     # Label smoothing for the token cross-entropy. 0 disables (default). Small
     # values (0.05-0.1) improve generalization/calibration for small LMs.
     label_smoothing: float = 0.0
+    # Reasoning Cache (RC): iterative generate→summarize→cache decoding.
+    # RC replaces standard autoregressive decoding with an iterative loop:
+    # each turn generates a reasoning trace (H_R tokens), summarizes it into
+    # a compact summary (H_S << H_R), and conditions the next turn on the
+    # summary. This decouples the effective reasoning horizon (T × (H_R +
+    # H_S)) from the per-step context length, enabling extrapolation beyond
+    # training lengths. See: arXiv:2602.03773 (Wu et al., 2026).
+    rc_enabled: bool = False
+    rc_iterations: int = 3
+    rc_reasoning_budget: int = 512
+    rc_summary_budget: int = 128
+    rc_train_probability: float = 0.0
+    rc_train_iterations: int = 2
     compile: bool = False
     # torch.compile dynamic-shapes toggle. False (default) for fixed-length
     # training (data.min_seq_len == max_seq_len): inductor specializes on the
