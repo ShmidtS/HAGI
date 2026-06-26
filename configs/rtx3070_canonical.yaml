@@ -512,13 +512,14 @@ model:
   # --- Memory / performance ---
 
   # Gradient checkpointing for transformer blocks. Saves activation memory
-  # at cost of recomputation in backward.
+  # at cost of recomputation in backward. Required for distillation phase
+  # (teacher + fp32 grads + activations → OOM without GC on 8GB).
   # Read in: HAGIConfig.gradient_checkpointing (hagi.py:56), hagi.py:376
   gradient_checkpointing: true
 
   # Group checkpointing size: wrap N consecutive transformer blocks in ONE
-  # checkpoint call. 2 = checkpoint block pairs -> 7-block reasoning core
-
+  # checkpoint call. IRRELEVANT when gradient_checkpointing=false (no
+  # checkpointing happens). Kept for backward compatibility.
   # Read in: HAGIConfig.gc_group_size (hagi.py), hagi.py _run_stage
   gc_group_size: 2
 
@@ -598,6 +599,59 @@ model:
   rc_summary_budget: 128
   rc_train_probability: 0.0
   rc_train_iterations: 2
+
+  # --- Performance optimizations (all enabled by default) ---
+  # Stochastic HRM depth: probability of skipping l_cycle 1 during training.
+  # 0.3 = 30% of steps use 1 l_cycle (7 passes) instead of 2 (14 passes),
+  # saving ~15% reasoning compute on average. Also acts as regularization
+  # (stochastic depth), forcing cycle 0 to be self-sufficient.
+  # Read in: HAGIConfig.hrm_stochastic_depth, hrm_full.py HRMCore.forward
+  hrm_stochastic_depth: 0.3
+  # Progressive reasoning budget: use 1 l_cycle for the first N steps, then
+  # switch to full (2 l_cycles with stochastic depth). 30000 = 1 cycle for
+  # steps 0-30K, then full. Early training focuses on basic token prediction
+  # (doesn't need deep reasoning), saving ~10% total training time.
+  # 0 disables (always full from start).
+  # Read in: HAGIConfig.hrm_progressive_start_step, loop.py
+  hrm_progressive_start_step: 30000
+  # Adaptive MSA top_k: reduce top_k for trivial tokens (high MoD skip score).
+  # Trivial tokens (articles, punctuation) get 1-2 memory slots instead of 6,
+  # saving ~25% MSA attention compute. Content tokens keep full top_k=6.
+  # Read in: HAGIConfig.msa_adaptive_top_k, hagi.py MSA routing
+  msa_adaptive_top_k: true
+
+  # --- Precision shamanism ---
+  # fp16 attention: cast bf16 Q,K,V to fp16 for SDPA softmax. fp16 has 10
+  # mantissa bits vs bf16's 7 → 8x better softmax resolution (1024 vs 128
+  # distinct probability levels). On Ampere, fp16 and bf16 tensor cores
+  # have identical throughput — zero speed cost. The output is cast back
+  # to bf16. Toggled off when flash attention is unavailable (Windows
+  # fallback path). Pure dtype cast, no clamp.
+  # Read in: HAGIConfig.fp16_attention, transformer.py set_precision_flags
+  fp16_attention: true
+
+  # fp32 RMSNorm: upcast to fp32 for the variance computation (mean(x²))
+  # then cast result back to original dtype. bf16's 7 mantissa bits cause
+  # significant rounding error in mean(x²) over H=576 elements; fp32 gives
+  # 23 bits → exact variance. Pure precision upcast, no clamp.
+  # Read in: HAGIConfig.fp32_rmsnorm, transformer.py RMSNorm.forward
+  fp32_rmsnorm: true
+
+  # fp32 gradient accumulation: cast bf16 grads to fp32 after backward so
+  # small gradients aren't lost in bf16 (ULP=0.0078). DISABLED: fused AdamW
+  # kernel requires params, grads, and moment buffers to share dtype. With
+  # bf16 params, fp32 grads crash the kernel. The bf16 accum error over 2
+  # micro-batches is negligible (< 1 ULP per addition). Re-enable only if
+  # using the non-fused AdamW path or after casting moment buffers to fp32.
+  # Read in: HAGIConfig.fp32_grad_accum, loop.py training loop
+  fp32_grad_accum: false
+
+  # INT8 KV cache at inference: quantize K/V to int8 with per-head scales.
+  # 2x cache memory reduction → longer generation sequences within VRAM.
+  # Training is unaffected (KV cache is inference-only). Quantization is
+  # symmetric (abs_max / 127), dequantization is exact (int8 * scale).
+  # Read in: HAGIConfig.int8_kv_cache, kv_cache.py Int8StaticLayerCache
+  int8_kv_cache: true
 
 # =============================================================================
 # TRAINING — optimizer, schedule, loss, and loop configuration
@@ -695,6 +749,12 @@ training:
 
   # Gradient checkpointing in training loop (separate from model setting).
   # When true, overrides model.gradient_checkpointing at runtime.
+  # RE-ENABLED: without GC, the teacher model (SmolLM2-360M, 722MB bf16) +
+  # fp32 grads (238MB) + all activations without recompute → OOM on 8GB.
+  # GC trades 2x forward recompute for ~2x less activation memory. After
+  # the teacher is freed (step 87891), GC can be turned off — but that
+  # requires runtime switching, so it stays on for simplicity. The ns_steps
+  # reduction (5→3) and stochastic depth partially offset the GC cost.
   # Read in: loop.py:343 (build_loop_config), loop.py:410
   gradient_checkpointing: true
 
@@ -810,6 +870,13 @@ training:
   # Read in: loop.py:356 (build_loop_config), loop.py:171 (update_ema)
   ema:
     decay: 0.9995
+
+    # EMA stride: update EMA every N steps instead of every step. 4 = update
+    # every 4 steps with decay adjusted to 0.9995^4 ≈ 0.998, mathematically
+    # equivalent in expectation. Saves 75% of EMA update compute (foreach
+    # mul+add over 59.5M params).
+    # Read in: loop.py build_loop_config (ema_stride), loop.py train loop
+    stride: 4
 
     # Start EMA from this step. 1000 (down from 3500): aligned with
     # warmup_steps=1000 — begin averaging at warmup's end so the EMA only
@@ -942,7 +1009,7 @@ distillation:
   # Run teacher every 2 steps (not every step). Halves teacher forward cost
   # and VRAM pressure. On non-teacher steps, pure CE is used. The KL signal
   # is still fresh enough (teacher hidden doesn't change much between steps).
-  every: 1
+  every: 2
   # Teacher micro-batch: process B tokens in chunks of 4 to bound peak
   # activation VRAM. At micro_batch=4, seq=1024, 32 layers, 15 heads:
   # peak attention = 4 * 15 * 1024 * 1024 * 2B = 120MB per layer.

@@ -192,6 +192,7 @@ class HRMCore(nn.Module):
         msa_registry: Optional["SlotRegistry"] = None,
         hrm_memory_aware: bool = False,
         gc_group_size: int = 1,
+        stochastic_depth: float = 0.0,
     ):
         h = hidden_states
         B, T, H = h.shape
@@ -238,6 +239,14 @@ class HRMCore(nn.Module):
         gdr_state = None
         pre_gdr_h = None
         block_list = list(reasoning_blocks)
+        active_l_cycles = self.l_cycles
+        if (
+            training_mode
+            and stochastic_depth > 0.0
+            and self.l_cycles > 1
+            and torch.rand(1).item() < stochastic_depth
+        ):
+            active_l_cycles = 1
         for h_cycle in range(self.h_cycles):
             if training_mode and noise_sigma > 0.0:
                 z_H = z_H + torch.randn_like(z_H) * noise_sigma
@@ -245,7 +254,7 @@ class HRMCore(nn.Module):
             # updates after the l-cycle loop via h_transition). Lift its
             # projection out so it runs once per h_cycle instead of l_cycles.
             h_term = self.z_h_to_hidden(z_H).unsqueeze(1)
-            for l_cycle in range(self.l_cycles):
+            for l_cycle in range(active_l_cycles):
                 # Loop reassignments can widen the inferred type back to the
                 # parameter union; narrow before each use.
                 z_L = cast(torch.Tensor, z_L)
@@ -334,8 +343,8 @@ class HRMCore(nn.Module):
                             h = result
                 assert isinstance(h, torch.Tensor)
                 if gdr is not None:
-                    current_step = h_cycle * self.l_cycles + l_cycle
-                    total_steps = self.h_cycles * self.l_cycles
+                    current_step = h_cycle * active_l_cycles + l_cycle
+                    total_steps = self.h_cycles * active_l_cycles
                     if (
                         training_mode
                         and hasattr(gdr, "delay_steps")

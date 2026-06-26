@@ -52,7 +52,7 @@ class DomainRotor(nn.Module):
         assert isinstance(self.even_mask, torch.Tensor)
         rotors = self.rotor_params * self.even_mask
         norm_sq = (
-            geometric_product(rotors, reverse(rotors))[..., :1].abs().clamp_min(1e-8)
+            geometric_product(rotors, reverse(rotors))[..., :1].abs() + 1e-12
         )
         return rotors / torch.sqrt(norm_sq)
 
@@ -221,10 +221,6 @@ class HDIMFull(nn.Module):
                 }
             return hidden_states
         multivector = self.project(hidden_states)
-        # Normalize all rotors ONCE per forward (was 6× via value/inverse in
-        # extract/transfer/extract). Each normalization calls geometric_product
-        # on a [num_rotors, heads, 8] stack; reusing one result removes 5 of
-        # them — the dominant cost in the GDR/HDIM block.
         rotors = self.rotors._normalized_rotors()
         invariant = self.extract(multivector, self.rotors, src_rotor_idx, rotors)
         target = self.transfer(invariant, self.rotors, tgt_rotor_idx, rotors)

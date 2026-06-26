@@ -59,6 +59,22 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # fp32 RMSNorm: upcast to fp32 for the variance computation when input
+        # is bf16/fp16. bf16 has only 7 mantissa bits → mean(x²) over H=576
+        # accumulates significant rounding error. fp32 gives 23 bits → exact
+        # variance. The elementwise multiply returns the original dtype.
+        # Toggled by cfg.fp32_rmsnorm (module-level flag).
+        if (
+            x.dtype in (torch.bfloat16, torch.float16)
+            and x.is_cuda
+            and _FP32_RMSNORM_ENABLED
+        ):
+            orig_dtype = x.dtype
+            x_f32 = x.float()
+            out = torch.nn.functional.rms_norm(
+                x_f32, x_f32.shape[-1:], self.weight.float(), self.eps
+            )
+            return out.to(orig_dtype)
         return torch.nn.functional.rms_norm(x, x.shape[-1:], self.weight, self.eps)
 
 
@@ -109,6 +125,21 @@ def _probe_flash() -> bool:
 
 _flash_available: bool = _probe_flash()
 
+# Module-level flags set by HAGI.__init__ from HAGIConfig.
+# fp16_attention: cast bf16 Q,K,V to fp16 for SDPA softmax (8x better
+#   resolution, zero speed cost on Ampere). Toggled by cfg.fp16_attention.
+# fp32_rmsnorm: upcast to fp32 for RMSNorm variance computation.
+#   Toggled by cfg.fp32_rmsnorm.
+_FP16_ATTENTION_ENABLED: bool = True
+_FP32_RMSNORM_ENABLED: bool = True
+
+
+def set_precision_flags(fp16_attention: bool, fp32_rmsnorm: bool) -> None:
+    """Set module-level precision flags from HAGIConfig."""
+    global _FP16_ATTENTION_ENABLED, _FP32_RMSNORM_ENABLED
+    _FP16_ATTENTION_ENABLED = fp16_attention
+    _FP32_RMSNORM_ENABLED = fp32_rmsnorm
+
 
 def _use_enable_gqa(q: torch.Tensor) -> bool:
     """Use enable_gqa only when the flash SDPA backend can actually run.
@@ -157,22 +188,47 @@ def _sdpa_gqa(q, k, v, attn_mask, is_causal: bool, nq: int, nkv: int):
     when head_dim <= 128 and dtype is FP16/BF16; no explicit context manager
     needed. The fallback's reshape after expand materializes K/V copies, which
     enable_gqa avoids entirely.
+
+    Mixed-precision attention: when the model is bf16, Q/K/V are cast to fp16
+    for the SDPA call. fp16 has 10 mantissa bits (vs bf16's 7), giving 8x
+    better softmax resolution (1024 vs 128 distinct probability levels). On
+    Ampere, fp16 and bf16 tensor cores have identical throughput, so the
+    cast is free. The output is cast back to the original dtype.
     """
+    orig_dtype = q.dtype
+    # fp16 attention: cast bf16 Q,K,V to fp16 for SDPA. fp16 has 10 mantissa
+    # bits vs bf16's 7 → 8x better softmax resolution. On Ampere, fp16 and
+    # bf16 tensor cores have identical throughput. Toggled by cfg.fp16_attention.
+    use_fp16_attn = (
+        orig_dtype == torch.bfloat16
+        and q.is_cuda
+        and _flash_available
+        and attn_mask is None
+        and _FP16_ATTENTION_ENABLED
+    )
+    if use_fp16_attn:
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        v = v.to(torch.float16)
     if nq == nkv:
-        return F.scaled_dot_product_attention(
+        out = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attn_mask, is_causal=is_causal
         )
-    if _use_enable_gqa(q):
-        return F.scaled_dot_product_attention(
+    elif _use_enable_gqa(q):
+        out = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attn_mask, is_causal=is_causal, enable_gqa=True
         )
-    rep = nq // nkv
-    B, _, T, D = k.shape
-    attn_k = k.unsqueeze(2).expand(B, nkv, rep, T, D).reshape(B, nq, T, D)
-    attn_v = v.unsqueeze(2).expand(B, nkv, rep, T, D).reshape(B, nq, T, D)
-    return F.scaled_dot_product_attention(
-        q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal
-    )
+    else:
+        rep = nq // nkv
+        B, _, T, D = k.shape
+        attn_k = k.unsqueeze(2).expand(B, nkv, rep, T, D).reshape(B, nq, T, D)
+        attn_v = v.unsqueeze(2).expand(B, nkv, rep, T, D).reshape(B, nq, T, D)
+        out = F.scaled_dot_product_attention(
+            q, attn_k, attn_v, attn_mask=attn_mask, is_causal=is_causal
+        )
+    if use_fp16_attn:
+        out = out.to(orig_dtype)
+    return out
 
 
 def _make_linear(
