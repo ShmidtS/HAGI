@@ -115,17 +115,17 @@ def transfer_embeddings(
     if model_type == "seq2seq_lm":
         from transformers import AutoModelForSeq2SeqLM
         teacher: Any = AutoModelForSeq2SeqLM.from_pretrained(
-            teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+            teacher_model_name, dtype=torch.bfloat16
         )
     elif model_type == "multimodal_lm":
         from transformers import AutoModelForMultimodalLM
         teacher = AutoModelForMultimodalLM.from_pretrained(
-            teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+            teacher_model_name, dtype=torch.bfloat16
         )
     else:
         from transformers import AutoModelForCausalLM
         teacher = AutoModelForCausalLM.from_pretrained(
-            teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+            teacher_model_name, dtype=torch.bfloat16
         )
 
     teacher_emb = _get_embeddings(teacher, model_type)  # [V, H]
@@ -178,13 +178,13 @@ class DistillationTeacher:
         if self._model_type == "seq2seq_lm":
             from transformers import AutoModelForSeq2SeqLM
             self.model: Any = AutoModelForSeq2SeqLM.from_pretrained(
-                teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+                teacher_model_name, dtype=torch.bfloat16
             )
             self._base_model = self.model.model  # encoder-decoder base
         elif self._model_type == "multimodal_lm":
             from transformers import AutoModelForMultimodalLM
             self.model = AutoModelForMultimodalLM.from_pretrained(
-                teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+                teacher_model_name, dtype=torch.bfloat16
             )
             # Keep the FULL multimodal model (vision + audio + text).
             # Text-only forward is used for KL distillation; vision/audio
@@ -193,7 +193,7 @@ class DistillationTeacher:
         else:
             from transformers import AutoModelForCausalLM
             self.model = AutoModelForCausalLM.from_pretrained(
-                teacher_model_name, dtype=torch.bfloat16, local_files_only=True
+                teacher_model_name, dtype=torch.bfloat16
             )
             self._base_model = self.model.model
 
