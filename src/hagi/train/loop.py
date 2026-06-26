@@ -71,6 +71,7 @@ class LoopConfig:
     # EMA
     ema_decay: float = 0.9995
     ema_start_step: int = 1000
+    ema_stride: int = 1
     enable_ema: bool = True
     # Composite-loss weights (final targets) and per-term warmup.
     composite_weights: dict[str, float] = field(default_factory=dict)
@@ -398,6 +399,7 @@ def build_loop_config(
         tf32=True,
         ema_decay=float(ema_cfg.get("decay", 0.9995)),
         ema_start_step=int(ema_cfg.get("start_step", 1000)),
+        ema_stride=int(ema_cfg.get("stride", 1)),
         enable_ema="ema" in train_cfg or "ema_decay" in train_cfg,
         composite_weights=composite_weights,
         w_aux_start=float(train_cfg.get("w_aux_start", 0.0)),
@@ -498,6 +500,15 @@ def train(
             f"Using manual {precision}: model cast to {cast_dtype}, no autocast "
             "(fp32 master weights lost; EMA shadow kept in fp32)"
         )
+        # fp32 gradient accumulation: set grad_dtype to fp32 on all params so
+        # backward writes fp32 grads directly (no bf16 ULP rounding loss).
+        # This is the correct PyTorch way: grad_dtype controls the storage
+        # dtype of .grad, set BEFORE backward, not after. Pure dtype setting,
+        # no clamp. Gated by cfg.fp32_grad_accum.
+        if bool(getattr(getattr(model, "cfg", None), "fp32_grad_accum", True)):
+            for p in model.parameters():
+                p.grad_dtype = torch.float32  # type: ignore[attr-defined]
+            print("fp32 gradient accumulation enabled (grad_dtype=float32)")
 
         # Realign optimizer moment buffers to the (now low-precision) param
         # dtype. Fresh run: state is lazy (empty) -> no-op. On resume,
@@ -516,20 +527,31 @@ def train(
         # NaN downstream).
         if optimizer is not None:
             sub_opts = getattr(optimizer, "optimizers", [optimizer])
+            # When fp32 grad accum is on, grads are fp32 (grad_dtype=float32).
+            # Optimizer moment buffers must match the GRAD dtype, not the param
+            # dtype, for fused kernels. Use fp32 when grad_dtype is set,
+            # otherwise fall back to param dtype (legacy bf16 path).
+            use_fp32_grads = bool(
+                getattr(getattr(model, "cfg", None), "fp32_grad_accum", True)
+            )
             for opt in sub_opts:
                 for group in opt.param_groups:
                     for p in group["params"]:
                         st = opt.state.get(p)
                         if not st:
                             continue
-                        pdt = p.data.dtype
+                        target_dt = (
+                            torch.float32
+                            if use_fp32_grads and manual_lowprec
+                            else p.data.dtype
+                        )
                         for _k, v in st.items():
                             if (
                                 isinstance(v, torch.Tensor)
                                 and _k != "step"
-                                and v.dtype != pdt
+                                and v.dtype != target_dt
                             ):
-                                st[_k] = v.to(dtype=pdt, device=p.data.device)
+                                st[_k] = v.to(dtype=target_dt, device=p.data.device)
 
     # EMA: eager init to avoid copy.deepcopy inside the hot loop.
     if cfg.enable_ema and model_ema is None:
@@ -567,6 +589,10 @@ def train(
     # summary-conditioned generation. See: arXiv:2602.03773.
     rc_train_prob = float(getattr(getattr(model, "cfg", None), "rc_train_probability", 0.0))
     rc_enabled = rc_train_prob > 0.0
+
+    # Progressive reasoning depth: use reduced l_cycles for early training.
+    # The model learns basic token prediction first, then deep reasoning.
+    progressive_start = int(getattr(getattr(model, "cfg", None), "hrm_progressive_start_step", 0))
 
     # Distillation config
     distill_enabled = teacher_model is not None and distill_cfg is not None
@@ -667,6 +693,22 @@ def train(
             )
 
         optimizer.zero_grad(set_to_none=True)
+
+        # Progressive reasoning depth: force 1 l_cycle (stochastic_depth=1.0)
+        # before the progressive_start step, then use the configured value.
+        if progressive_start > 0 and step < progressive_start:
+            if hasattr(model, "cfg"):
+                model.cfg.hrm_stochastic_depth = 1.0
+        elif progressive_start > 0 and step == progressive_start:
+            if hasattr(model, "cfg"):
+                model.cfg.hrm_stochastic_depth = float(
+                    getattr(model.cfg, "hrm_stochastic_depth", 0.0)
+                )
+                print(
+                    f"progressive: switching to full l_cycles at step {step} "
+                    f"(stochastic_depth={model.cfg.hrm_stochastic_depth})"
+                )
+                progressive_start = 0  # stop checking
         accum_loss_tensor: torch.Tensor | None = None
         accum_components: dict[str, torch.Tensor] = {}
         need_components = cfg.log_interval > 0 and step % cfg.log_interval == 0
@@ -875,8 +917,12 @@ def train(
             print(f"distillation: teacher freed at step {step}, solo phase begins")
         t_opt = time.perf_counter() - t_opt_start
 
-        if step >= cfg.ema_start_step and model_ema is not None:
-            update_ema(model, model_ema, cfg.ema_decay)
+        if (
+            step >= cfg.ema_start_step
+            and model_ema is not None
+            and (cfg.ema_stride <= 1 or step % cfg.ema_stride == 0)
+        ):
+            update_ema(model, model_ema, cfg.ema_decay if cfg.ema_stride <= 1 else cfg.ema_decay ** cfg.ema_stride)
 
         # NARS HRM: observe every step (cheap), re-apply policy on a coarse
         # interval to avoid per-step cycle churn destabilising training.

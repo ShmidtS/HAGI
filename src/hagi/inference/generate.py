@@ -180,16 +180,20 @@ def _maybe_static_cache(
     use_cache: bool,
     use_static_cache: bool,
 ) -> Any:
-    """Preallocate a static KV cache (write-by-index, no per-step torch.cat)."""
+    """Preallocate a static KV cache (write-by-index, no per-step torch.cat).
+
+    When ``model.cfg.int8_kv_cache`` is True, uses INT8-quantized cache
+    (2x memory reduction). Falls back to bf16 cache otherwise.
+    """
     if cache is not None or not use_static_cache or not use_cache or torch is None:
         return cache
     try:
-        from hagi.model.kv_cache import make_static_cache
+        from hagi.model.kv_cache import make_int8_static_cache, make_static_cache
     except ImportError:
         return cache
-    layers = make_static_cache(
-        model, generated.size(0), generated.size(1) + max_new_tokens
-    )
+    use_int8 = bool(getattr(getattr(model, "cfg", None), "int8_kv_cache", False))
+    factory = make_int8_static_cache if use_int8 else make_static_cache
+    layers = factory(model, generated.size(0), generated.size(1) + max_new_tokens)
     if layers is None:
         return cache
     return CacheKeyValues(layers)
@@ -269,7 +273,18 @@ def generate(
     training_mode: bool = False,
     use_static_cache: bool = False,
     external_msa_registry: Any | None = None,
+    early_exit_confidence: float = 0.0,
 ) -> Any:
+    """Generate token ids with optional KV-cache acceleration.
+
+    Args:
+        early_exit_confidence: When >0, enable confidence-based early exit.
+            After generating each token, compute the top-2 logit gap as a
+            confidence proxy. If the running average confidence exceeds this
+            threshold, stop generation early. This trades a few low-confidence
+            tokens for significant compute savings on "easy" prompts.
+            0.0 disables (default). 1.0 = very high confidence required.
+    """
     """Generate token ids with optional KV-cache acceleration.
 
     use_static_cache=True preallocates per-block buffers written by index
@@ -294,6 +309,7 @@ def generate(
             model, prompt_ids, max_new_tokens, cache, use_cache, use_static_cache
         )
         generated_tokens: list[Any] = []
+        _ee_confidences: list[float] = []
         for _ in range(max_new_tokens):
             logits, active_cache = _forward(
                 model, next_input, active_cache, use_cache, external_msa_registry
@@ -304,6 +320,13 @@ def generate(
             generated_tokens.append(next_token.unsqueeze(-1))
             if eos_token_id is not None and torch.all(next_token == eos_token_id):
                 break
+            if early_exit_confidence > 0.0:
+                _ee_confidences.append(confidence_score(logits))
+                if (
+                    len(_ee_confidences) >= 16
+                    and sum(_ee_confidences[-16:]) / 16 >= early_exit_confidence
+                ):
+                    break
             next_input = next_token.unsqueeze(-1)
         if generated_tokens:
             generated = torch.cat([generated, *generated_tokens], dim=-1)
