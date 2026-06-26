@@ -4,7 +4,6 @@ import argparse
 import array
 import concurrent.futures
 import hashlib
-import os
 from pathlib import Path
 from typing import Any
 
@@ -12,16 +11,8 @@ import json as _json
 import numpy as np
 
 from hagi.data.tokenizer import SMOLLM2_TOKENIZER, TokenizerWrapper
-
-# Load HF_TOKEN from project root .env file
-_env_path = Path(__file__).resolve().parent.parent / ".env"
-if _env_path.exists():
-    with _env_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("HF_TOKEN="):
-                os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip().strip("\"'")
-                break
+from hagi.utils.env import load_env
+load_env()
 
 
 def _tokenize_chunk(
@@ -634,7 +625,7 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         dest="output",
-        default=Path("E:/HAGI/data/fineweb_edu_smollm2"),
+        default=Path(__file__).resolve().parents[1] / "data" / "fineweb_edu_smollm2",
     )
     parser.add_argument("--name", default="sample-10BT")
     parser.add_argument("--split", default="train")
