@@ -31,32 +31,37 @@ data:
     python_instruct: 0.02
 
   mix_paths:
+  # NOTE: paths point to v4_3b_gemma/ — Gemma-tokenized uint32 data.
+  # Generate with:
+  #   python scripts/download_data.py --materialize-mix --mix v4_3b \
+  #     --output data/v4_3b_gemma --tokenizer google/t5gemma-2-1b-1b \
+  #     --dtype uint32 --subset 3B --skip-existing
   - name: tinystories
-    path: v4_3b/tinystories.bin
+    path: v4_3b_gemma/tinystories.bin
     weight: 0.02
   - name: python_instruct
-    path: v4_3b/python_instruct.bin
+    path: v4_3b_gemma/python_instruct.bin
     weight: 0.02
   - name: smoltalk
-    path: v4_3b/smoltalk.bin
+    path: v4_3b_gemma/smoltalk.bin
     weight: 0.03
   - name: wikipedia_en
-    path: v4_3b/wikipedia_en.bin
+    path: v4_3b_gemma/wikipedia_en.bin
     weight: 0.1
   - name: wikipedia_ru
-    path: v4_3b/wikipedia_ru.bin
+    path: v4_3b_gemma/wikipedia_ru.bin
     weight: 0.08
   - name: openwebmath
-    path: v4_3b/openwebmath.bin
+    path: v4_3b_gemma/openwebmath.bin
     weight: 0.03
   - name: oscar_ru
-    path: v4_3b/oscar_ru.bin
+    path: v4_3b_gemma/oscar_ru.bin
     weight: 0.07
   - name: slimpajama
-    path: v4_3b/slimpajama.bin
+    path: v4_3b_gemma/slimpajama.bin
     weight: 0.25
   - name: edu
-    path: v4_3b/edu.bin
+    path: v4_3b_gemma/edu.bin
     weight: 0.4
 
   num_workers: 0
@@ -339,11 +344,11 @@ curriculum:
   stage2_start: 60000
   stage2_mix_paths:
   - name: openwebmath
-    path: v4_3b/openwebmath.bin
+    path: v4_3b_gemma/openwebmath.bin
     weight: 0.15
   - name: edu
-    path: v4_3b/edu.bin
+    path: v4_3b_gemma/edu.bin
     weight: 0.50
   - name: slimpajama
-    path: v4_3b/slimpajama.bin
+    path: v4_3b_gemma/slimpajama.bin
     weight: 0.35
