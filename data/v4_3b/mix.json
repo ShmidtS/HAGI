@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "packing": "bfd",
+  "sources": [
+    {
+      "name": "edu",
+      "ratio": 0.4
+    },
+    {
+      "name": "slimpajama",
+      "ratio": 0.25
+    },
+    {
+      "name": "wikipedia_en",
+      "ratio": 0.1
+    },
+    {
+      "name": "wikipedia_ru",
+      "ratio": 0.08
+    },
+    {
+      "name": "oscar_ru",
+      "ratio": 0.07
+    },
+    {
+      "name": "openwebmath",
+      "ratio": 0.03
+    },
+    {
+      "name": "smoltalk",
+      "ratio": 0.03
+    },
+    {
+      "name": "tinystories",
+      "ratio": 0.02
+    },
+    {
+      "name": "python_instruct",
+      "ratio": 0.02
+    }
+  ],
+  "mix": {
+    "edu": 0.4,
+    "slimpajama": 0.25,
+    "wikipedia_en": 0.1,
+    "wikipedia_ru": 0.08,
+    "oscar_ru": 0.07,
+    "openwebmath": 0.03,
+    "smoltalk": 0.03,
+    "tinystories": 0.02,
+    "python_instruct": 0.02
+  },
+  "token_count": 3000000000,
+  "presets": {
+    "edu": {
+      "dataset": "HuggingFaceFW/fineweb-edu",
+      "name": "sample-10BT",
+      "split": "train",
+      "license_note": "Use streaming/subsampling for RTX 3070 experiments."
+    },
+    "slimpajama": {
+      "dataset": "DKYoon/SlimPajama-6B",
+      "split": "train",
+      "license_note": "6B token deduplicated subset of RedPajama; Apache-2.0."
+    },
+    "wikipedia_en": {
+      "dataset": "wikimedia/wikipedia",
+      "name": "20231101.simple",
+      "split": "train",
+      "license_note": "CC-BY-SA-4.0; simple-English Wikipedia, high-quality factual."
+    },
+    "wikipedia_ru": {
+      "dataset": "wikimedia/wikipedia",
+      "name": "20231101.ru",
+      "split": "train",
+      "license_note": "CC-BY-SA-4.0; Russian Wikipedia, factual text for multilingual coverage."
+    },
+    "oscar_ru": {
+      "dataset": "HuggingFaceFW/fineweb-2",
+      "name": "rus_Cyrl",
+      "split": "train",
+      "license_note": "FineWeb-2 (CC-BY-SA-4.0); OSCAR-2301 ru is gated, FineWeb-2 rus_Cyrl is the open alternative."
+    },
+    "openwebmath": {
+      "dataset": "OpenCoder-LLM/opc-fineweb-math-corpus",
+      "split": "train",
+      "license_note": "Open math web extraction; math reasoning signal. openbmb/openwebmath is unavailable on HF."
+    },
+    "smoltalk": {
+      "dataset": "HuggingFaceTB/smoltalk",
+      "name": "all",
+      "split": "train",
+      "license_note": "Conversational SFT corpus; validate dataset card before redistribution."
+    },
+    "tinystories": {
+      "dataset": "roneneldan/TinyStories",
+      "split": "train",
+      "license_note": "CDLA-Sharing-1.0; synthetic short stories for simple-language modeling."
+    },
+    "python_instruct": {
+      "dataset": "iamtarun/python_code_instructions_18k_alpaca",
+      "split": "train",
+      "license_note": "Open Python instruction/code corpus used as an unauthenticated code-data fallback."
+    }
+  }
+}
