@@ -153,7 +153,7 @@ model:
   l_dim: 256
   hrm_h_cycles: 1
   # 3 l_cycles: 24GB allows more reasoning passes (10x3=30 vs 7x2=14).
-  hrm_l_cycles: 3
+  hrm_l_cycles: 2
 
   # --- MSA (Memory Sparse Attention) ---
   use_msa: true
@@ -219,7 +219,7 @@ model:
 training:
   learning_rate: 0.0004
 
-  # 24GB VRAM: larger batch than 8GB config.
+  # 24GB+ VRAM: larger batch.
   # Student ~300M params + 262K embedding table (~604MB bf16).
   # batch=16, grad_accum=2, effective batch=32.
   batch_size: 16
@@ -299,25 +299,28 @@ training:
 
 # =============================================================================
 # DISTILLATION — Google teacher + embedding model
-# Teacher: google/gemma-4-12B-it-qat-w4a16-ct (W4A16, full multimodal)
-#   Full model loaded: text decoder (~7GB W4A16) + vision encoder (~1.1GB bf16)
-#   + audio encoder (~0.6GB bf16) = ~8.7GB total weights.
-#   Frozen, text-only forward for KL (vision/audio inactive but loaded).
+# Teacher: google/gemma-4-E2B-it-qat-w4a16-ct (W4A16, full multimodal)
+#   2.3B effective params (5.1B with embeddings), 35 text layers.
+#   W4A16 compressed ~1.2GB, decompressed bf16 ~10GB (full multimodal).
+#   Decompression runs on CPU RAM, then model moves to GPU.
+#   Frozen, text-only forward for KL (vision/audio loaded but inactive).
 # Embedding: google/t5gemma-2-1b-1b (hidden=1152, vocab=262144)
 # Both share Gemma vocab (262,144) — KL distillation on matching vocab.
-# VRAM: teacher ~9GB + student ~7GB + KL ~1.6GB + overhead ~1GB = ~19GB.
+# VRAM: teacher ~10GB (decompressed bf16) + student ~7GB + KL ~1.6GB
+#   + overhead ~1GB = ~20GB. Fits 24GB.
+# NOTE: 12B teacher (24GB decompressed) does NOT fit alongside student.
+#       Use 12B only with >=48GB GPU (A6000, A100, etc.).
 # Read in: scripts/train.py (teacher load + embedding transfer),
 #          src/hagi/train/loop.py (teacher forward + distill loss),
 #          src/hagi/train/distillation.py (implementation)
 # =============================================================================
 distillation:
   enabled: true
-  # Gemma 4 12B QAT W4A16: full multimodal model (text + vision + audio).
-  # W4A16 text decoder ~6.5GB + vision ~1.1GB + audio ~0.6GB = ~8.7GB.
-  # Text-only forward used for KL; vision/audio loaded but inactive.
-  # Same vocab (262,144) as student. Hidden_size=3840 (mismatch OK:
+  # Gemma 4 E2B QAT W4A16: full multimodal model (text + vision + audio).
+  # 2.3B effective, decompresses to ~10GB bf16. Fits 24GB alongside student.
+  # Same vocab (262,144) as student. hidden_size=1536 (mismatch OK:
   # KL projects each model's hidden through its own lm_head).
-  teacher_model: google/gemma-4-12B-it-qat-w4a16-ct
+  teacher_model: google/gemma-4-E2B-it-qat-w4a16-ct
   # T5Gemma 2 1B-1B: encoder-decoder, hidden=1152, vocab=262144.
   # Used for embedding transfer at init (hidden matches student exactly).
   # Tied embeddings (encoder = decoder), so encoder.embed_tokens is the source.

@@ -16,9 +16,10 @@ from hagi.train.checkpoint import load_checkpoint, save_checkpoint
 from hagi.train.loop import LoopConfig, train
 
 
-DEFAULT_CONFIG_PATH = Path("E:/HAGI/configs/rtx3070_canonical.yaml")
-DEFAULT_CHECKPOINT_DIR = Path("E:/HAGI/checkpoints/rtx3070")
-TOY_CHECKPOINT_PATH = Path("E:/HAGI/checkpoints/toy_chat.pt")
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_PATH = ROOT / "configs" / "rtx3070_canonical.yaml"
+DEFAULT_CHECKPOINT_DIR = ROOT / "checkpoints" / "rtx3070"
+TOY_CHECKPOINT_PATH = ROOT / "checkpoints" / "toy_chat.pt"
 
 TOY_VOCAB_SIZE = 49152
 TOY_SEQ_LEN = 40

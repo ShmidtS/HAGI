@@ -1,18 +1,9 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
-# Load HF_TOKEN from project root .env automatically
-_env_path = Path(__file__).resolve().parents[3] / ".env"
-if _env_path.exists():
-    with _env_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("HF_TOKEN="):
-                os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip().strip("\"'")
-                break
+from hagi.utils.env import load_env
+load_env()
 
 SMOLLM2_TOKENIZER = "HuggingFaceTB/SmolLM2-135M"
 

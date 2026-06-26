@@ -9,16 +9,11 @@ from pathlib import Path
 from typing import Any, cast
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-# Load HF_TOKEN from project root .env (needed for SmolLM2-135M teacher download)
-_env_path = Path(__file__).resolve().parent.parent / ".env"
-if _env_path.exists():
-    with _env_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("HF_TOKEN="):
-                os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip().strip("\"'")
-                break
+from hagi.utils.env import load_env  # noqa: E402
+load_env()  # reads all KEY=VALUE from .env (HF_TOKEN, OPENAI_API_BASE, etc.)
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
