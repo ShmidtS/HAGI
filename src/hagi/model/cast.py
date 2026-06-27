@@ -45,12 +45,20 @@ class CASTConfig:
     always includes k=0 (next-token), randomly samples the rest.
     Reduces CE compute by block_size/train_k with no architecture change.
     Inference always uses all K positions.
+
+    k_loss_decay: exponential decay weight per k position. k=0 gets weight
+    1.0, k=1 gets decay^1, k=2 gets decay^2, etc. Weights are normalized
+    so they sum to 1.0. With decay=0.5 and train_k=3:
+    weights = [0.571, 0.286, 0.143] — k=0 gets 57% of gradient vs 34%
+    with uniform weighting. This prevents loss dilution where multi-token
+    predictions overwhelm the primary next-token signal.
     """
 
     block_size: int = 8
     use_coherence: bool = True
     gate_init: float = 0.0
     train_k: int | None = None
+    k_loss_decay: float = 0.5
 
 
 class CASTHead(nn.Module):

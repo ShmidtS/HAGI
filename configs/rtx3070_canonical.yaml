@@ -210,6 +210,11 @@ model:
     # Reduces CE compute 8/3 ~ 2.7x. Inference uses all 8 positions.
     # With train_k=3: B*T*3=30720 CE rows (vs 81920 for K=8), 8 chunks (vs 20).
     train_k: 3
+    # Per-k loss weighting: exponential decay. k=0 gets decay^0=1.0,
+    # k=1 gets 0.5, k=2 gets 0.25. Normalized: [0.571, 0.286, 0.143].
+    # Prevents loss dilution: k=0 (next-token) gets 57% of gradient
+    # vs 34% with uniform weighting. Closer predictions are weighted higher.
+    k_loss_decay: 0.5
 
   # --- Architecture: layer counts ---
 

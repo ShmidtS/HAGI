@@ -953,37 +953,53 @@ class HAGI(nn.Module):
                     ).sort().values
                     virtual_states = virtual_states[:, :, k_idx]
                     cast_targets = cast_targets[:, :, k_idx]
-                    ce_rows = B * T * tk
+                    n_k = tk
                 else:
-                    ce_rows = B * T * K
+                    k_idx = None
+                    n_k = K
 
-                h_flat = virtual_states.reshape(ce_rows, H)
-                h_normed = self.final_norm(h_flat)
                 ce_cs = (
                     self.cfg.ce_chunk_size
                     if self.cfg.ce_chunk_size > 0
                     else self.cfg.ce_fused_chunk_size
                 )
                 lbl_smooth = getattr(self.cfg, "label_smoothing", 0.0)
-                if self.cfg.use_fused_ce:
-                    loss = fused_linear_cross_entropy(
-                        h_normed,
-                        self.lm_head.weight,
-                        cast_targets.reshape(-1),
-                        ignore_index=ignore_index,
-                        chunk_size=ce_cs,
-                        label_smoothing=lbl_smooth,
-                        checkpoint_chunks=ce_rows > ce_cs,
-                    )
+
+                decay = getattr(self.cfg.cast_config, "k_loss_decay", 1.0)
+                if decay < 1.0 and n_k > 1:
+                    raw_w = [decay ** i for i in range(n_k)]
+                    w_sum = sum(raw_w)
+                    k_weights = [w / w_sum for w in raw_w]
                 else:
-                    logits_flat = self.lm_head(h_normed)
-                    loss = cross_entropy_loss(
-                        logits_flat.reshape(-1, logits_flat.size(-1)),
-                        cast_targets.reshape(-1),
-                        ignore_index=ignore_index,
-                        chunk_size=ce_cs,
-                        label_smoothing=lbl_smooth,
-                    )
+                    k_weights = [1.0 / n_k] * n_k
+
+                loss = None
+                for ki, k in enumerate(range(n_k)):
+                    h_k = virtual_states[:, :, k]
+                    tgt_k = cast_targets[:, :, k]
+                    h_flat = h_k.reshape(B * T, H)
+                    h_normed = self.final_norm(h_flat)
+                    if self.cfg.use_fused_ce:
+                        ce_k = fused_linear_cross_entropy(
+                            h_normed,
+                            self.lm_head.weight,
+                            tgt_k.reshape(-1),
+                            ignore_index=ignore_index,
+                            chunk_size=ce_cs,
+                            label_smoothing=lbl_smooth,
+                            checkpoint_chunks=B * T > ce_cs,
+                        )
+                    else:
+                        logits_flat = self.lm_head(h_normed)
+                        ce_k = cross_entropy_loss(
+                            logits_flat.reshape(-1, logits_flat.size(-1)),
+                            tgt_k.reshape(-1),
+                            ignore_index=ignore_index,
+                            chunk_size=ce_cs,
+                            label_smoothing=lbl_smooth,
+                        )
+                    w_k = k_weights[ki]
+                    loss = ce_k * w_k if loss is None else loss + ce_k * w_k
                 logits = None
             else:
                 virtual_states = self.cast_head(h)
