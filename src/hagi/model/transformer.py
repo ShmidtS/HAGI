@@ -93,7 +93,13 @@ def build_rope_cache(seq_len: int, head_dim: int, theta: float, device, dtype):
 def _apply_rope_impl(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
-    x1, x2 = x[..., 0::2], x[..., 1::2]
+    # Contiguous reshape for RoPE: view as [*, 2, D//2] instead of strided
+    # x[..., 0::2], x[..., 1::2] access. The reshape produces contiguous
+    # even/odd pairs without a copy when the input is contiguous, avoiding
+    # the non-contiguous strided views that slow down the elementwise mul.
+    # Mathematically identical: rotate_pairs(x_even, x_odd) = rotation.
+    x_pairs = x.reshape(*x.shape[:-1], -1, 2)  # [*, D//2, 2]
+    x1, x2 = x_pairs.unbind(-1)  # [*, D//2] each, contiguous views
     cos = cos[None, None, :, :]
     sin = sin[None, None, :, :]
     rx1 = x1 * cos - x2 * sin

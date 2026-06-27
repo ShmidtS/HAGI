@@ -915,6 +915,21 @@ def train(
             if device.startswith("cuda"):
                 torch.cuda.empty_cache()
             print(f"distillation: teacher freed at step {step}, solo phase begins")
+            # Auto-disable gradient checkpointing after teacher is freed.
+            # Without the teacher (~870MB), VRAM headroom allows GC=False
+            # which eliminates 14 recompute passes in backward → ~15% faster
+            # steps for the remaining 40% of training. The torch.compile
+            # guard on cfg.gradient_checkpointing triggers a one-time
+            # recompilation (amortized over ~58K remaining steps).
+            if (
+                getattr(getattr(model, "cfg", None), "gradient_checkpointing", False)
+                and device.startswith("cuda")
+            ):
+                model.cfg.gradient_checkpointing = False
+                print(
+                    f"gradient_checkpointing: auto-disabled at step {step} "
+                    f"(teacher freed, VRAM headroom available)"
+                )
         t_opt = time.perf_counter() - t_opt_start
 
         if (

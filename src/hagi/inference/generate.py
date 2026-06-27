@@ -421,6 +421,7 @@ def generate(
 
         if cast_k > 0:
             remaining = max_new_tokens
+            _ee_confidences: list[float] = []
             while remaining > 0:
                 logits, active_cache = _forward(
                     model, next_input, active_cache, use_cache, external_msa_registry
@@ -448,6 +449,14 @@ def generate(
                         break
 
                 generated_tokens.extend(tok.unsqueeze(-1) for tok in block_tokens)
+
+                if early_exit_confidence > 0.0 and block_logits.dim() == 3:
+                    _ee_confidences.append(confidence_score(block_logits[:, 0]))
+                    if (
+                        len(_ee_confidences) >= 4
+                        and sum(_ee_confidences[-4:]) / 4 >= early_exit_confidence
+                    ):
+                        stop = True
 
                 if not stop and _check_stop_sequences(
                     [t.squeeze() for t in block_tokens], stop_sequences
@@ -629,6 +638,14 @@ def stream_generate(
 
             if stop or remaining <= 0:
                 break
+
+            if early_exit_confidence > 0.0 and block_logits.dim() == 3:
+                _ee_confidences.append(confidence_score(block_logits[:, 0]))
+                if (
+                    len(_ee_confidences) >= 4
+                    and sum(_ee_confidences[-4:]) / 4 >= early_exit_confidence
+                ):
+                    break
 
             next_input = torch.stack(block_tokens, dim=-1)
     else:

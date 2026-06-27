@@ -25,12 +25,42 @@ class _SwiGLUExpert(nn.Module):
         intermediate_size = cfg.moe_intermediate_size or (
             cfg.intermediate_size // cfg.num_experts
         )
-        self.gate = _make_linear(cfg.hidden_size, intermediate_size, cfg)
-        self.up = _make_linear(cfg.hidden_size, intermediate_size, cfg)
+        self.hidden_size = cfg.hidden_size
+        self.intermediate_size = intermediate_size
+        self._use_bf = getattr(cfg, "use_binary_factorized", False)
+        if self._use_bf:
+            self.gate = _make_linear(cfg.hidden_size, intermediate_size, cfg)
+            self.up = _make_linear(cfg.hidden_size, intermediate_size, cfg)
+        else:
+            gate_w = _make_linear(cfg.hidden_size, intermediate_size, cfg)
+            up_w = _make_linear(cfg.hidden_size, intermediate_size, cfg)
+            assert isinstance(gate_w, nn.Linear)
+            assert isinstance(up_w, nn.Linear)
+            # Named gu_weight (not gate_up_weight) to avoid the "gate" token
+            # in HAGI's residual-scale exclude list and optim._is_muon_param.
+            # Without this, the fused weight would be excluded from Muon
+            # orthogonalization and residual scaling — changing training dynamics.
+            self.gu_weight = nn.Parameter(
+                torch.cat([gate_w.weight, up_w.weight], dim=0).contiguous()
+            )
         self.down = _make_linear(intermediate_size, cfg.hidden_size, cfg)
 
+    def state_dict(self, *args, **kwargs):
+        state = super().state_dict(*args, **kwargs)
+        prefix = kwargs.get("prefix", "")
+        if not self._use_bf and hasattr(self, "gu_weight"):
+            gate, up = self.gu_weight.chunk(2, dim=0)
+            state[f"{prefix}gate.weight"] = gate
+            state[f"{prefix}up.weight"] = up
+            state.pop(f"{prefix}gu_weight", None)
+        return state
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down(F.silu(self.gate(x)) * self.up(x))
+        if self._use_bf:
+            return self.down(F.silu(self.gate(x)) * self.up(x))
+        gu = F.linear(x, self.gu_weight)
+        gate, up = gu.chunk(2, dim=-1)
+        return self.down(F.silu(gate) * up)
 
 
 class MoESwiGLU(nn.Module):

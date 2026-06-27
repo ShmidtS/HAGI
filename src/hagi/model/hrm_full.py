@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Optional, cast
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
@@ -26,23 +27,66 @@ class LState:
     z_L: torch.Tensor
 
 
+class _FusedGatedTransition(nn.Module):
+    """Fused up+gate projection for gated transitions.
+
+    Replaces separate nn.Linear(in, mult*out) + nn.Linear(in, out) with a
+    single nn.Linear(in, mult*out + out), halving kernel launches. The output
+    is split into [up_part, gate_part] after a single matmul. State_dict
+    splits the fused weight back to up.weight/up.bias + gate.weight/gate.bias
+    for checkpoint portability.
+
+    The parameter is named ``proj`` (not ``up_gate``) so HAGI's residual-scale
+    loop does NOT exclude it via the "gate" token — the up portion needs
+    1/sqrt(2L) scaling. The gate portion also gets scaled (minor: makes the
+    sigmoid slightly smoother at init, model adapts during training).
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, mult: int = 2):
+        super().__init__()
+        self._up_size = mult * out_dim
+        self._gate_size = out_dim
+        self._splits = [self._up_size, self._gate_size]
+        self.proj = nn.Linear(in_dim, self._up_size + self._gate_size)
+
+    def state_dict(self, *args, **kwargs):
+        state = super().state_dict(*args, **kwargs)
+        prefix = kwargs.get("prefix", "")
+        w = self.proj.weight.data
+        b = self.proj.bias.data if self.proj.bias is not None else None
+        up_w, gate_w = w.split(self._splits, dim=0)
+        state[f"{prefix}up.weight"] = up_w
+        state[f"{prefix}gate.weight"] = gate_w
+        if b is not None:
+            up_b, gate_b = b.split(self._splits, dim=0)
+            state[f"{prefix}up.bias"] = up_b
+            state[f"{prefix}gate.bias"] = gate_b
+        state.pop(f"{prefix}proj.weight", None)
+        state.pop(f"{prefix}proj.bias", None)
+        return state
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        ug = self.proj(x)
+        up_part, gate_part = ug.split(self._splits, dim=-1)
+        return up_part, gate_part
+
+
 class HTransition(nn.Module):
     def __init__(self, h_dim: int, l_dim: int, mult: int = 2, dropout: float = 0.0):
         super().__init__()
         in_dim = h_dim + l_dim
         self.norm = RMSNorm(in_dim, eps=1e-6)
-        self.up = nn.Linear(in_dim, mult * h_dim)
+        self.fused_proj = _FusedGatedTransition(in_dim, h_dim, mult)
         self.act = nn.SiLU()
         self.down = nn.Linear(mult * h_dim, h_dim)
-        self.gate = nn.Linear(in_dim, h_dim)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, z_H_prev: torch.Tensor, z_L_last: torch.Tensor) -> torch.Tensor:
         x = torch.cat([z_H_prev, z_L_last], dim=-1)
         x = self.norm(x)
-        h = self.act(self.up(x))
-        h = self.dropout(self.down(h))
-        g = torch.sigmoid(self.gate(x))
+        up_part, gate_part = self.fused_proj(x)
+        h = self.dropout(self.down(self.act(up_part)))
+        g = torch.sigmoid(gate_part)
         return z_H_prev + g * h
 
 
@@ -50,17 +94,16 @@ class ResetL(nn.Module):
     def __init__(self, h_dim: int, l_dim: int, mult: int = 2, dropout: float = 0.0):
         super().__init__()
         self.norm = RMSNorm(h_dim, eps=1e-6)
-        self.up = nn.Linear(h_dim, mult * l_dim)
+        self.fused_proj = _FusedGatedTransition(h_dim, l_dim, mult)
         self.act = nn.SiLU()
         self.down = nn.Linear(mult * l_dim, l_dim)
-        self.gate = nn.Linear(h_dim, l_dim)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, z_H: torch.Tensor) -> torch.Tensor:
         x = self.norm(z_H)
-        h = self.act(self.up(x))
-        h = self.dropout(self.down(h))
-        g = torch.sigmoid(self.gate(x))
+        up_part, gate_part = self.fused_proj(x)
+        h = self.dropout(self.down(self.act(up_part)))
+        g = torch.sigmoid(gate_part)
         return g * h + (1 - g) * x
 
 
@@ -81,9 +124,21 @@ class AttentionPool(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, T, H] -> [B, H]
-        scores = (x * self.query).sum(dim=-1, keepdim=True) * self.scale  # [B, T, 1]
-        weights = torch.softmax(scores, dim=1)
-        return (x * weights).sum(dim=1)
+        # Single-query attention: q [B, 1, H], k=v=x [B, T, H]
+        # SDPA with 1 query head, q_len=1, kv_len=T — flash kernel handles
+        # the softmax+matmul fusion efficiently for this pattern.
+        B, T, H = x.shape
+        q = self.query.expand(B, 1, H)  # [B, 1, H]
+        # SDPA expects [B, n_heads, q_len, head_dim] — single head, so
+        # reshape to [B, 1, 1, H].
+        q_4d = q.unsqueeze(1)  # [B, 1, 1, H]
+        k_4d = x.unsqueeze(1)  # [B, 1, T, H]
+        v_4d = x.unsqueeze(1)  # [B, 1, T, H]
+        out = F.scaled_dot_product_attention(
+            q_4d, k_4d, v_4d, attn_mask=None, is_causal=False,
+            scale=self.scale,
+        )  # [B, 1, 1, H]
+        return out.squeeze(1).squeeze(1)  # [B, H]
 
 
 class LTransition(nn.Module):
@@ -99,10 +154,9 @@ class LTransition(nn.Module):
         super().__init__()
         in_dim = l_dim + hidden_size
         self.norm = RMSNorm(in_dim, eps=1e-6)
-        self.up = nn.Linear(in_dim, mult * l_dim)
+        self.fused_proj = _FusedGatedTransition(in_dim, l_dim, mult)
         self.act = nn.SiLU()
         self.down = nn.Linear(mult * l_dim, l_dim)
-        self.gate = nn.Linear(in_dim, l_dim)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         # Attention pooling preserves positional/long-range info that mean
         # pooling discards. Fresh training only — no legacy mean-pool fallback.
@@ -120,9 +174,9 @@ class LTransition(nn.Module):
         pooled = self.pool(transformer_output)
         x = torch.cat([z_L_prev, pooled], dim=-1)
         x = self.norm(x)
-        h = self.act(self.up(x))
-        h = self.dropout(self.down(h))
-        g = torch.sigmoid(self.gate(x))
+        up_part, gate_part = self.fused_proj(x)
+        h = self.dropout(self.down(self.act(up_part)))
+        g = torch.sigmoid(gate_part)
         return z_L_prev + g * h
 
     def reset(self, z_H: torch.Tensor) -> torch.Tensor:

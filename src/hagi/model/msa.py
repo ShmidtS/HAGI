@@ -925,9 +925,7 @@ class MSAAttention(nn.Module):
             .view(B, T, self.num_query_heads, self.head_dim)
             .transpose(1, 2)
         )
-        # q: [B, nq, T, head_dim]
 
-        # Fetch K/V from slots
         k_all, v_all, offsets = self._fetch_kv_from_slots(slot_ids, registry)
         nkv = k_all.size(-3)
         rep = self.num_query_heads // nkv
@@ -952,19 +950,15 @@ class MSAAttention(nn.Module):
             k_all = k_all.view(B, top_k, nkv, -1, self.head_dim)
             v_all = v_all.view(B, top_k, nkv, -1, self.head_dim)
 
-        # Vectorized attention using matmul (avoids einsum bugs with singleton dims)
-        scale = self.head_dim**0.5
+        scale = self.head_dim ** 0.5
 
         if is_3d:
-            # GQA: broadcast KV heads instead of repeat_interleave (zero-copy)
-            # k_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, nq, T, top_k, T_slot, head_dim]
             kk = (
                 k_all.unsqueeze(3)
                 .expand(-1, -1, -1, rep, -1, -1, -1)
                 .reshape(B, T, top_k, self.num_query_heads, -1, self.head_dim)
                 .permute(0, 3, 1, 2, 4, 5)
             )
-            # v_all: [B, T, top_k, nkv, T_slot, head_dim] -> [B, nq, T, top_k, T_slot, head_dim]
             vk = (
                 v_all.unsqueeze(3)
                 .expand(-1, -1, -1, rep, -1, -1, -1)
@@ -972,20 +966,15 @@ class MSAAttention(nn.Module):
                 .permute(0, 3, 1, 2, 4, 5)
             )
 
-            qk = q.unsqueeze(3)  # [B, nq, T, 1, head_dim]
+            qk = q.unsqueeze(3)
             qk_mat = qk.reshape(B * self.num_query_heads * T, 1, self.head_dim)
             kk_mat = kk.reshape(
                 B * self.num_query_heads * T, top_k * kk.size(4), self.head_dim
             )
             scores = torch.matmul(qk_mat, kk_mat.transpose(-2, -1)) / scale
             scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(4))
-            # Valid-len mask: padded K positions (>= real slot length) get -inf
-            # so mixed-T_slot generation (prefill chunk_size vs decode per-token)
-            # does not bleed attention mass onto zero-padded tail rows. Training
-            # has uniform T_slot == real_len, so the mask is all-True (no-op).
             T_slot = kk.size(4)
             if T_slot > 1:
-                # offsets: [B, T, top_k] -> broadcast against scores [B, nq, T, top_k, T_slot]
                 pos = torch.arange(T_slot, device=scores.device)
                 valid = pos[None, None, None, None, :] < offsets[:, None, :, :, None]
                 scores = scores.masked_fill(~valid, float("-inf"))
@@ -993,17 +982,15 @@ class MSAAttention(nn.Module):
                 scores = scores + attn_mask
             attn = F.softmax(scores, dim=-1).to(q.dtype)
             if nars_weights is not None:
-                w = nars_weights.unsqueeze(1).unsqueeze(-1)  # [B, 1, T, top_k, 1]
+                w = nars_weights.unsqueeze(1).unsqueeze(-1)
                 attn = attn * w
             attn_mat = attn.reshape(B * self.num_query_heads * T, 1, top_k * kk.size(4))
             vk_mat = vk.reshape(
                 B * self.num_query_heads * T, top_k * vk.size(4), self.head_dim
             )
-            out_k = torch.matmul(attn_mat, vk_mat)  # [B*nq*T, 1, head_dim]
+            out_k = torch.matmul(attn_mat, vk_mat)
             out_k = out_k.view(B, self.num_query_heads, T, self.head_dim)
         else:
-            # GQA: broadcast KV heads instead of repeat_interleave
-            # k_all: [B, top_k, nkv, T_slot, head_dim] -> [B, nq, top_k, T_slot, head_dim]
             kk = (
                 k_all.unsqueeze(2)
                 .expand(-1, -1, rep, -1, -1, -1)
@@ -1017,16 +1004,14 @@ class MSAAttention(nn.Module):
                 .permute(0, 2, 1, 3, 4)
             )
 
-            qk = q.unsqueeze(2)  # [B, nq, 1, T, head_dim]
+            qk = q.unsqueeze(2)
             qk_mat = qk.reshape(B * self.num_query_heads, T, self.head_dim)
             kk_mat = kk.reshape(
                 B * self.num_query_heads, top_k * kk.size(3), self.head_dim
             )
             scores = torch.matmul(qk_mat, kk_mat.transpose(-2, -1)) / scale
             scores = scores.view(B, self.num_query_heads, T, top_k, kk.size(3))
-            scores = scores.permute(0, 1, 3, 2, 4)  # [B, nq, top_k, T, T_slot]
-            # Valid-len mask (mirror of is_3d branch): pad positions >= real
-            # slot length get -inf. No-op when all slots share T_slot == lens.
+            scores = scores.permute(0, 1, 3, 2, 4)
             T_slot = kk.size(3)
             if T_slot > 1:
                 pos = torch.arange(T_slot, device=scores.device)
@@ -1036,9 +1021,7 @@ class MSAAttention(nn.Module):
                 scores = scores + attn_mask
             attn = F.softmax(scores, dim=-1).to(q.dtype)
             if nars_weights is not None:
-                w = (
-                    nars_weights.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
-                )  # [B, 1, top_k, 1, 1]
+                w = nars_weights.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
                 attn = attn * w
             attn_mat = attn.permute(0, 1, 3, 2, 4).reshape(
                 B * self.num_query_heads * T, 1, top_k * kk.size(3)
@@ -1051,8 +1034,8 @@ class MSAAttention(nn.Module):
                     B * self.num_query_heads * T, top_k * vk.size(3), self.head_dim
                 )
             )
-            out_k = torch.matmul(attn_mat, vk_mat)  # [B*nq*T, 1, head_dim]
-            out_k = out_k.squeeze(1)  # [B*nq*T, head_dim]
+            out_k = torch.matmul(attn_mat, vk_mat)
+            out_k = out_k.squeeze(1)
             out_k = out_k.view(B, self.num_query_heads, T, self.head_dim)
 
         out = out_k.transpose(1, 2).reshape(B, T, -1)

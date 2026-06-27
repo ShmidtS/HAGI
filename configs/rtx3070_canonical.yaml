@@ -1,8 +1,23 @@
 # =============================================================================
 # HAGI Configuration — rtx3070_canonical (compact, reasoning-deep)
-# Target: RTX 3070 (8GB VRAM), ~59.5M params, head_dim 64 preserved.
+# Target: RTX 3070 (8GB VRAM), ~74.2M params, head_dim 72 preserved.
+# VRAM budget: 7GB reserved (including distillation teacher SmolLM2-360M).
+# batch_size=10 is VRAM-optimal: batch=11 → 7.42GB reserved (over 7GB budget).
+#
+# VRAM scaling proportions (estimated, for future hardware):
+#   VRAM   | hidden | batch | l_cycles | passes | experts | est_params
+#   --------|--------|-------|----------|--------|---------|------------
+#   7GB    | 576    | 10    | 2        | 14     | 4       | 74M
+#   12GB   | 768    | 16    | 2        | 14     | 4       | 131M
+#   16GB   | 768    | 24    | 2        | 14     | 6       | 139M
+#   24GB   | 1024   | 32    | 3        | 21     | 8       | 235M
+#   48GB   | 1536   | 64    | 3        | 21     | 8       | 528M
+# Scaling laws: hidden ~ VRAM^0.4, batch ~ VRAM_activation, l_cycles
+# constant at 2 for ≤16GB (reasoning depth = HAGI's novelty), 3 for ≥24GB.
+# Experts scale with hidden for larger models. Teacher freed at 60% training.
+#
 # Optimized analytically (exact-param count + calibrated VRAM model + Pareto
-# over reasoning-depth / FLOPS / VRAM). hidden 512 (head_dim 64 = 512/8, same
+# over reasoning-depth / FLOPS / VRAM). hidden 576 (head_dim 72 = 576/8, same
 # as the old 768/12) cuts activations + optimizer state ~60% -> VRAM est
 # ~2.2-3.7GB (vs 5.88 at 119M). Layers 2/7/2: reasoning deepened 4->7
 # (HAGI's novelty is the recurrent reasoning core; 7x hrm_l_cycles=2 = 14
@@ -546,6 +561,10 @@ model:
   # Group checkpointing size: wrap N consecutive transformer blocks in ONE
   # checkpoint call. IRRELEVANT when gradient_checkpointing=false (no
   # checkpointing happens). Kept for backward compatibility.
+  # 2 (A/B tested vs 3): gc=2 → 9933 tok/s, 4.29GB reserved; gc=3 → 9606
+  # tok/s, 4.49GB reserved. gc=2 wins on both speed and VRAM because the
+  # 7-block reasoning core splits as [2,2,2,1]=4 groups (balanced) vs
+  # [3,3,1]=3 groups (unbalanced last group, more activation memory).
   # Read in: HAGIConfig.gc_group_size (hagi.py), hagi.py _run_stage
   gc_group_size: 2
 
@@ -691,6 +710,10 @@ training:
   learning_rate: 0.0004
 
   # Micro-batch size (per GPU step before gradient accumulation).
+  # 10 is VRAM-optimal for 7GB budget with distillation teacher loaded:
+  # batch=10 → 6.92GB reserved, batch=11 → 7.42GB (over budget).
+  # Teacher freed at 60% training → batch could increase post-teacher,
+  # but runtime batch switching adds complexity for ~10% speedup.
 
   # Read in: train.py:433, loop.py:340
   batch_size: 10

@@ -76,11 +76,35 @@ for _a in range(BLADE_COUNT):
 # Triton kernel expects [c, a, b] layout (cab einsum).
 _STRUCT_TRITON = _STRUCT.permute(2, 0, 1).contiguous()
 
+# --- Fused sandwich structure tensor ---
+# The rotor sandwich R*G*R^-1 = geometric_product(geometric_product(R, G), R_inv)
+# involves two geometric products. Fusing them into a single einsum:
+#   result[c] = sum_{a,b,d,e} STRUCT[c,d,e] * STRUCT[d,a,b] * R[a] * G[b] * R_inv[e]
+# Precompute SANDWICH_STRUCT[c,a,b,e] = sum_d STRUCT_TRITON[c,d,e] * STRUCT_TRITON[d,a,b]
+# Then the sandwich is a single einsum: "cabe,...a,...b,...e->...c"
+# This halves the geometric product calls in HDIM (6 -> 3 per forward).
+_SANDWICH_STRUCT = torch.einsum("cde,dab->cabe", _STRUCT_TRITON, _STRUCT_TRITON).contiguous()
+
+# --- Reduced self-product structure for grade-0 and grade-2 ---
+# GDR's geometric_interaction computes geometric_product(mv, mv) then projects
+# to grade 0 (blade 0) and grade 2 (blades 3,5,6). Only 4 of 8 output blades
+# are needed. Precompute the reduced structure with just those rows.
+# SELF_PROD_G02_STRUCT[r,a,b] = STRUCT_TRITON[g02_indices[r], a, b]
+_G02_INDICES = [i for i in range(BLADE_COUNT) if GRADE[i] in (0, 2)]  # [0, 3, 5, 6]
+_SELF_PROD_G02_STRUCT = _STRUCT_TRITON[_G02_INDICES].contiguous()  # [4, 8, 8]
+# Scatter matrix from reduced [4] back to full [8] (for grade_projection compatibility)
+_SCATTER_G02 = torch.zeros(BLADE_COUNT, len(_G02_INDICES), dtype=torch.float32)
+for _i, _idx in enumerate(_G02_INDICES):
+    _SCATTER_G02[_idx, _i] = 1.0
+
 
 # Cache per (device, dtype) to avoid repeated .to() sync
 _STRUCT_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _GRADE_MASK_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
 _REVERSE_SIGNS_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+_SANDWICH_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+_SELF_PROD_G02_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+_SCATTER_G02_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
 
 def _prime_caches() -> None:
@@ -106,6 +130,9 @@ def _prime_caches() -> None:
                 dtype=dt,
                 device=dev,
             )
+        _SANDWICH_CACHE[(dev, dt)] = _SANDWICH_STRUCT.to(device=dev, dtype=dt)
+        _SELF_PROD_G02_CACHE[(dev, dt)] = _SELF_PROD_G02_STRUCT.to(device=dev, dtype=dt)
+        _SCATTER_G02_CACHE[(dev, dt)] = _SCATTER_G02.to(device=dev, dtype=dt)
 
 
 _prime_caches()
@@ -140,6 +167,27 @@ def _get_reverse_signs(device: torch.device, dtype: torch.dtype) -> torch.Tensor
             device=device,
         )
     return _REVERSE_SIGNS_CACHE[key]
+
+
+def _get_sandwich_struct(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (device, dtype)
+    if key not in _SANDWICH_CACHE:
+        _SANDWICH_CACHE[key] = _SANDWICH_STRUCT.to(device=device, dtype=dtype)
+    return _SANDWICH_CACHE[key]
+
+
+def _get_self_prod_g02_struct(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (device, dtype)
+    if key not in _SELF_PROD_G02_CACHE:
+        _SELF_PROD_G02_CACHE[key] = _SELF_PROD_G02_STRUCT.to(device=device, dtype=dtype)
+    return _SELF_PROD_G02_CACHE[key]
+
+
+def _get_scatter_g02(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (device, dtype)
+    if key not in _SCATTER_G02_CACHE:
+        _SCATTER_G02_CACHE[key] = _SCATTER_G02.to(device=device, dtype=dtype)
+    return _SCATTER_G02_CACHE[key]
 
 
 def geometric_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -177,3 +225,56 @@ def reverse(mv: torch.Tensor) -> torch.Tensor:
     """Clifford reverse: sign (-1)^(k(k-1)/2) per grade k. Returns [..., 8]."""
     signs = _get_reverse_signs(mv.device, mv.dtype)
     return mv * signs
+
+
+def geometric_product_sandwich(
+    rotor: torch.Tensor, mv: torch.Tensor, rotor_inv: torch.Tensor
+) -> torch.Tensor:
+    """Fused rotor sandwich: rotor * mv * rotor_inv in a single einsum.
+
+    Mathematically identical to:
+        geometric_product(geometric_product(rotor, mv), rotor_inv)
+
+    but fuses two geometric products into one contraction, halving kernel
+    launches and intermediate memory. Used by HDIM DomainRotor.
+
+    Args:
+        rotor: [..., 8] rotor multivector (left multiplier).
+        mv: [..., 8] multivector to be sandwiched.
+        rotor_inv: [..., 8] inverse rotor (right multiplier, typically reverse(rotor)).
+
+    Returns:
+        [..., 8] sandwiched multivector.
+    """
+    s = _get_sandwich_struct(mv.device, mv.dtype)
+    return torch.einsum("cabe,...a,...b,...e->...c", s, rotor, mv, rotor_inv)
+
+
+def geometric_product_self_g02(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Grade-0 and grade-2 projections of the self-product x*x in one fused step.
+
+    Mathematically identical to:
+        prod = geometric_product(x, x)
+        g0 = grade_projection(prod, 0)
+        g2 = grade_projection(prod, 2)
+
+    but computes only the 4 needed output blades (grade 0: blade 0;
+    grade 2: blades 3,5,6) instead of all 8, cutting self-product compute ~50%.
+    Used by GDR geometric_interaction.
+
+    Args:
+        x: [..., 8] multivector coefficients.
+
+    Returns:
+        (g0, g2) where g0 has only blade 0 non-zero and g2 has only
+        blades 3,5,6 non-zero — same format as grade_projection output.
+    """
+    struct = _get_self_prod_g02_struct(x.device, x.dtype)
+    scatter = _get_scatter_g02(x.device, x.dtype)
+    reduced = torch.einsum("rab,...a,...b->...r", struct, x, x)
+    full = torch.einsum("cr,...r->...c", scatter, reduced)
+    g0_mask = _get_grade_mask(x.device, x.dtype, 0)
+    g2_mask = _get_grade_mask(x.device, x.dtype, 2)
+    return full * g0_mask, full * g2_mask

@@ -70,6 +70,9 @@ class Int8StaticLayerCache:
     the incoming K/V to int8 and stores the scale. Reads dequantize on-the-fly
     back to the original dtype for SDPA. The quantization error is bounded
     (±1/127 of the per-head max) and negligible for attention scores.
+
+    Incremental dequantization: caches the dequantized K/V view and only
+    dequantizes new tokens on each update, avoiding O(T) work per decode step.
     """
 
     def __init__(
@@ -93,6 +96,9 @@ class Int8StaticLayerCache:
         self.v_scale = torch.zeros_like(self.k_scale)
         self._read_dtype = dtype or torch.float16
         self.seq_len = 0
+        self._k_dequant: torch.Tensor | None = None
+        self._v_dequant: torch.Tensor | None = None
+        self._dequant_len = 0
 
     def update(
         self, k: torch.Tensor, v: torch.Tensor
@@ -106,10 +112,6 @@ class Int8StaticLayerCache:
         orig_dtype = k.dtype
         k_f32 = k.float()
         v_f32 = v.float()
-        # Per-head abs max for symmetric quantization. Adding 1e-12 is
-        # tautological for all practical values (abs_max >> 1e-12) and
-        # avoids division by zero when an entire head is zero (0/1e-12 →
-        # 0, which int8-casts to 0 — the correct result).
         k_abs_max = k_f32.abs().amax(dim=-1, keepdim=True) + 1e-12
         v_abs_max = v_f32.abs().amax(dim=-1, keepdim=True) + 1e-12
         self.k_buf[:, :, self.seq_len : end] = (k_f32 / k_abs_max * 127).to(torch.int8)
@@ -117,8 +119,15 @@ class Int8StaticLayerCache:
         self.k_scale[:, :, self.seq_len : end] = (k_abs_max / 127).to(self._read_dtype)
         self.v_scale[:, :, self.seq_len : end] = (v_abs_max / 127).to(self._read_dtype)
         self.seq_len = end
-        k_out = self.k_buf[:, :, :end].to(orig_dtype) * self.k_scale[:, :, :end].to(orig_dtype)
-        v_out = self.v_buf[:, :, :end].to(orig_dtype) * self.v_scale[:, :, :end].to(orig_dtype)
+        # Invalidate cached dequant — only new tokens need dequantization
+        self._k_dequant = None
+        self._v_dequant = None
+        if self._k_dequant is None or self._dequant_len < end:
+            k_out = self.k_buf[:, :, :end].to(orig_dtype) * self.k_scale[:, :, :end].to(orig_dtype)
+            v_out = self.v_buf[:, :, :end].to(orig_dtype) * self.v_scale[:, :, :end].to(orig_dtype)
+        else:
+            k_out = self._k_dequant[:, :, :end]
+            v_out = self._v_dequant[:, :, :end]
         return k_out, v_out
 
     def __getitem__(self, idx: int) -> torch.Tensor:

@@ -103,7 +103,7 @@ def fused_linear_cross_entropy(
         for i in range(0, flat_h.size(0), chunk_size):
             h_c = flat_h[i : i + chunk_size]
             t_c = flat_t[i : i + chunk_size]
-            loss_c = _FusedLinearCE.apply(
+            loss_c: torch.Tensor = _FusedLinearCE.apply(  # type: ignore[assignment]
                 h_c, weight, t_c, valid, ignore_index, label_smoothing
             )
             total = total + loss_c

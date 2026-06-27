@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .clifford import BLADE_COUNT, GRADE, geometric_product, reverse
+from .clifford import BLADE_COUNT, GRADE, geometric_product, geometric_product_sandwich, reverse
 from .gdr import GradeConfig, GradeDecomposedRecurrence
 
 
@@ -100,6 +100,21 @@ class DomainRotor(nn.Module):
         )
         return geometric_product(geometric_product(rotor, multivector), rotor_inv)
 
+    def sandwich_fused(
+        self,
+        multivector: torch.Tensor,
+        rotor: torch.Tensor,
+        rotor_inv: torch.Tensor,
+    ) -> torch.Tensor:
+        """Fused sandwich using precomputed rotor + rotor_inv.
+
+        Uses geometric_product_sandwich (single einsum) instead of two
+        sequential geometric_product calls. Mathematically identical.
+        """
+        rotor_exp = self._expand_like(rotor, multivector)
+        rotor_inv_exp = self._expand_like(rotor_inv, multivector)
+        return geometric_product_sandwich(rotor_exp, multivector, rotor_inv_exp)
+
     def inverse_sandwich(
         self,
         multivector: torch.Tensor,
@@ -113,6 +128,17 @@ class DomainRotor(nn.Module):
             reverse(self._select(rotors, rotor_idx)), multivector
         )
         return geometric_product(geometric_product(rotor_inv, multivector), rotor)
+
+    def inverse_sandwich_fused(
+        self,
+        multivector: torch.Tensor,
+        rotor: torch.Tensor,
+        rotor_inv: torch.Tensor,
+    ) -> torch.Tensor:
+        """Fused inverse sandwich: rotor_inv * mv * rotor using single einsum."""
+        rotor_exp = self._expand_like(rotor, multivector)
+        rotor_inv_exp = self._expand_like(rotor_inv, multivector)
+        return geometric_product_sandwich(rotor_inv_exp, multivector, rotor_exp)
 
     def forward(
         self, multivector: torch.Tensor, rotor_idx: int | torch.Tensor = 0
@@ -222,9 +248,21 @@ class HDIMFull(nn.Module):
             return hidden_states
         multivector = self.project(hidden_states)
         rotors = self.rotors._normalized_rotors()
-        invariant = self.extract(multivector, self.rotors, src_rotor_idx, rotors)
-        target = self.transfer(invariant, self.rotors, tgt_rotor_idx, rotors)
-        target_invariant = self.extract(multivector, self.rotors, tgt_rotor_idx, rotors)
+        # Precompute selected rotors and their reverses once for all 3
+        # sandwich operations (extract src, transfer, extract tgt). This
+        # eliminates 3 redundant _select + 3 reverse calls per forward.
+        rotor_src = self.rotors._select(rotors, src_rotor_idx)
+        rotor_inv_src = reverse(rotor_src)
+        rotor_tgt = self.rotors._select(rotors, tgt_rotor_idx)
+        rotor_inv_tgt = reverse(rotor_tgt)
+        # Fused sandwiches: single einsum each instead of two geometric products.
+        invariant = self.rotors.inverse_sandwich_fused(
+            multivector, rotor_src, rotor_inv_src
+        )
+        target = self.rotors.sandwich_fused(invariant, rotor_tgt, rotor_inv_tgt)
+        target_invariant = self.rotors.inverse_sandwich_fused(
+            multivector, rotor_tgt, rotor_inv_tgt
+        )
         fused, gate = self.fuse(target, hidden_states, return_gate=True)
         if self.gdr is not None:
             fused = self.gdr(fused)
@@ -324,9 +362,17 @@ class DelayedHDIM(HDIMFull):
             self._buffer_count = 0
 
             rotors = self.rotors._normalized_rotors()
-            invariant = self.extract(agg_mv, self.rotors, src_rotor_idx, rotors)
-            target = self.transfer(invariant, self.rotors, tgt_rotor_idx, rotors)
-            target_invariant = self.extract(agg_mv, self.rotors, tgt_rotor_idx, rotors)
+            rotor_src = self.rotors._select(rotors, src_rotor_idx)
+            rotor_inv_src = reverse(rotor_src)
+            rotor_tgt = self.rotors._select(rotors, tgt_rotor_idx)
+            rotor_inv_tgt = reverse(rotor_tgt)
+            invariant = self.rotors.inverse_sandwich_fused(
+                agg_mv, rotor_src, rotor_inv_src
+            )
+            target = self.rotors.sandwich_fused(invariant, rotor_tgt, rotor_inv_tgt)
+            target_invariant = self.rotors.inverse_sandwich_fused(
+                agg_mv, rotor_tgt, rotor_inv_tgt
+            )
             fused, gate = self.fuse(target, hidden_states, return_gate=True)
 
             if return_state:

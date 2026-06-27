@@ -37,9 +37,21 @@ def _pad_shift_collate(
     token at position i never attends to positions > i, so right padding does
     not alter the hidden states of real tokens (A/B: real-L loss == padded
     loss, diff 0.0).
+
+    Fast path: when all samples share the same length (fixed-length training,
+    min_seq_len == max_seq_len), skips the per-sample copy loop and uses
+    np.stack for a single vectorized batch assembly — ~3x faster collate.
     """
-    max_len = max(len(s) for s in samples)
+    lengths = [len(s) for s in samples]
+    max_len = max(lengths)
     width = max_len - 1
+    # Fast path: all same length → stack + shift, no padding needed
+    if all(ln == max_len for ln in lengths) and max_len > 1:
+        stacked = np.stack(samples).astype(np.int64)  # [B, max_len]
+        x = stacked[:, :-1]
+        y = stacked[:, 1:]
+        return _as_long_tensor(x), _as_long_tensor(y)
+    # Variable-length path: per-sample copy with padding
     x = np.full((len(samples), width), pad_token, dtype=np.int64)
     y = np.full((len(samples), width), ignore_index, dtype=np.int64)
     for i, s in enumerate(samples):

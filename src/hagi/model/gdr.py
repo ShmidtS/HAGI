@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from .clifford import BLADE_COUNT, geometric_product, grade_projection
+from .clifford import BLADE_COUNT, geometric_product_self_g02
 
 
 @dataclass
@@ -200,13 +200,17 @@ class GradeDecomposedRecurrence(nn.Module):
         )
 
     def geometric_interaction(self, vector: torch.Tensor):
-        """Self geometric product of the vector grade, projected to scalar+bivector."""
+        """Self geometric product of the vector grade, projected to scalar+bivector.
+
+        Uses geometric_product_self_g02: computes only grade-0 and grade-2
+        output blades (4 of 8) in a single fused einsum, ~50% less compute
+        than the full geometric_product + grade_projection path. Mathematically
+        identical."""
         *lead, _ = vector.shape
         mv = vector.reshape(*lead, self.n_mv, BLADE_COUNT)
-        prod = geometric_product(mv, mv)  # [..., n_mv, 8]
-        # Keep grade-0 and grade-2 parts, flatten back to [..., vector_dim].
-        g0 = grade_projection(prod, 0).reshape(*lead, self.cfg.vector)
-        g2 = grade_projection(prod, 2).reshape(*lead, self.cfg.vector)
+        g0_raw, g2_raw = geometric_product_self_g02(mv)
+        g0 = g0_raw.reshape(*lead, self.cfg.vector)
+        g2 = g2_raw.reshape(*lead, self.cfg.vector)
         scalar_signal = torch.sigmoid(self.gate_scalar) * self.geo_to_scalar(g0)
         bivector_signal = torch.sigmoid(self.gate_bivector) * self.geo_to_bivector(g2)
         return scalar_signal, bivector_signal
