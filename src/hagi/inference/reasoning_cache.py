@@ -39,7 +39,7 @@ else:
     except ImportError:
         torch = None
 
-from hagi.inference.generate import generate
+from hagi.inference.generate import generate, stream_generate
 
 
 @dataclass
@@ -334,8 +334,6 @@ def stream_generate_with_rc(
         ("summary", turn, token_ids) — one token from a summary
         ("final", -1, token_ids) — one token from the final answer
     """
-    from hagi.inference.generate import stream_generate
-
     if rc_config is None:
         rc_config = RCConfig()
 
