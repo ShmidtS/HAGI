@@ -361,6 +361,9 @@ class HAGI(nn.Module):
 
         self.apply(self._init_weights)
 
+        if self.cast_head is not None:
+            self.cast_head._init_block_proj()
+
         # Set module-level precision flags in transformer.py so all
         # TransformerBlock instances inherit the config.
         set_precision_flags(
@@ -387,7 +390,7 @@ class HAGI(nn.Module):
             cfg.perception_layers + cfg.reasoning_layers + cfg.expression_layers
         )
         residual_scale = 1.0 / math.sqrt(2 * max(1, total_layers))
-        exclude_tokens = ("embed", "lm_head", "norm", "router", "gate", "iter_embed")
+        exclude_tokens = ("embed", "lm_head", "norm", "router", "gate", "iter_embed", "cast")
         with torch.no_grad():
             for name, p in self.named_parameters():
                 if p.ndim == 2 and not any(

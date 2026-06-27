@@ -200,6 +200,10 @@ model:
   cast_config:
     block_size: 8
     use_coherence: true
+    # gate_init: 0.0 means -5.0 (auto-override in CASTHead.__init__).
+    # sigmoid(-5) ~ 0.007, coherence disabled at init. Model learns to
+    # activate gate as k>0 positions start predicting useful tokens.
+    # Set explicit positive value to enable coherence from start.
     gate_init: 0.0
     # Sparse K sampling: only compute CE loss on 3 of 8 positions per step.
     # Always includes k=0 (next-token), randomly samples 2 from k=1..7.

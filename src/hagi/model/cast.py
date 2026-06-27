@@ -87,9 +87,39 @@ class CASTHead(nn.Module):
         self.n_mv = hidden_size // BLADE_COUNT
 
         self.block_proj = nn.Linear(hidden_size, block_size * hidden_size, bias=False)
-        nn.init.normal_(self.block_proj.weight, mean=0.0, std=0.02)
+        with torch.no_grad():
+            self.block_proj.weight.zero_()
+            self.block_proj.weight[:hidden_size] = torch.eye(
+                hidden_size, dtype=torch.float32
+            ).to(self.block_proj.weight.dtype)
+            if block_size > 1:
+                nn.init.normal_(
+                    self.block_proj.weight[hidden_size:],
+                    mean=0.0,
+                    std=0.01,
+                )
 
+        gate_init = gate_init if gate_init != 0.0 else -5.0
         self.area_gate = nn.Parameter(torch.tensor(gate_init))
+
+    def _init_block_proj(self) -> None:
+        """Re-initialize block_proj after HAGI._init_weights overwrites it.
+
+        k=0 = identity (preserves pretrained h→lm_head mapping),
+        k>0 = small noise (learns multi-token prediction from scratch).
+        """
+        H = self.hidden_size
+        with torch.no_grad():
+            self.block_proj.weight.zero_()
+            self.block_proj.weight[:H] = torch.eye(
+                H, dtype=torch.float32
+            ).to(self.block_proj.weight.dtype)
+            if self.block_size > 1:
+                nn.init.normal_(
+                    self.block_proj.weight[H:],
+                    mean=0.0,
+                    std=0.01,
+                )
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         """Project hidden into K virtual states with geometric coherence.
