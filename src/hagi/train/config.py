@@ -23,11 +23,12 @@ def config_to_dict(cfg: Any) -> Any:
 
 def config_from_dict(d: Mapping[str, Any]):
     """Rebuild HAGIConfig from a plain nested dictionary."""
-    from hagi.model import GradeConfig, HAGIConfig, TransformerConfig
+    from hagi.model import CASTConfig, GradeConfig, HAGIConfig, TransformerConfig
 
     values = dict(d)
     transformer = values.get("transformer")
     grades = values.get("grades")
+    cast_cfg = values.get("cast_config")
 
     if isinstance(transformer, Mapping):
         assert isinstance(transformer, dict)
@@ -40,5 +41,11 @@ def config_from_dict(d: Mapping[str, Any]):
         values["grades"] = GradeConfig(**cast(dict[str, Any], grades))
     elif grades is None:
         values.pop("grades", None)
+
+    if isinstance(cast_cfg, Mapping):
+        assert isinstance(cast_cfg, dict)
+        values["cast_config"] = CASTConfig(**cast(dict[str, Any], cast_cfg))
+    elif cast_cfg is None:
+        values.pop("cast_config", None)
 
     return HAGIConfig(**values)

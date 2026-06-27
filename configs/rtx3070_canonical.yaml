@@ -190,6 +190,23 @@ model:
   # Read in: HAGIConfig.label_smoothing (hagi.py:94), hagi.py:657,667
   label_smoothing: 0.05
 
+  # --- CAST (Clifford Algebra Symbolic Reasoning Tokens) ---
+  # Block-wise generation: each forward pass predicts K=8 tokens via
+  # multivector virtual states with geometric product coherence (bivector
+  # "area" between adjacent predictions). Reduces sequential forward passes
+  # by 8x during generation. Training uses multi-token prediction (position t
+  # predicts tokens t+1..t+8). ~4.7M new params (Linear 576->4608).
+  # Read in: HAGIConfig.cast_config (hagi.py), model/cast.py CASTHead
+  cast_config:
+    block_size: 8
+    use_coherence: true
+    gate_init: 0.0
+    # Sparse K sampling: only compute CE loss on 3 of 8 positions per step.
+    # Always includes k=0 (next-token), randomly samples 2 from k=1..7.
+    # Reduces CE compute 8/3 ~ 2.7x. Inference uses all 8 positions.
+    # With train_k=3: B*T*3=30720 CE rows (vs 81920 for K=8), 8 chunks (vs 20).
+    train_k: 3
+
   # --- Architecture: layer counts ---
 
   # Perception stage: transformer blocks for primary input processing.

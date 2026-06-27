@@ -277,6 +277,10 @@ def generate(
 ) -> Any:
     """Generate token ids with optional KV-cache acceleration.
 
+    When the model has CAST (Clifford Algebra Symbolic Reasoning Tokens) enabled,
+    generation runs in block-wise mode: each forward pass produces K tokens
+    instead of 1, reducing the number of sequential forward passes by K.
+
     Args:
         early_exit_confidence: When >0, enable confidence-based early exit.
             After generating each token, compute the top-2 logit gap as a
@@ -304,30 +308,75 @@ def generate(
 
     model = _maybe_compile(model, compile_model)
 
+    cast_cfg = getattr(getattr(model, "cfg", None), "cast_config", None)
+    cast_k = cast_cfg.block_size if cast_cfg is not None else 0
+
     if torch is not None:
         generated, next_input, active_cache = _prepare_torch_inputs(
             model, prompt_ids, max_new_tokens, cache, use_cache, use_static_cache
         )
         generated_tokens: list[Any] = []
         _ee_confidences: list[float] = []
-        for _ in range(max_new_tokens):
-            logits, active_cache = _forward(
-                model, next_input, active_cache, use_cache, external_msa_registry
-            )
-            next_token = sample_next_token(logits, temperature, top_k, top_p)
-            if next_token.dim() == 0:
-                next_token = next_token.unsqueeze(0)
-            generated_tokens.append(next_token.unsqueeze(-1))
-            if eos_token_id is not None and torch.all(next_token == eos_token_id):
-                break
-            if early_exit_confidence > 0.0:
-                _ee_confidences.append(confidence_score(logits))
-                if (
-                    len(_ee_confidences) >= 16
-                    and sum(_ee_confidences[-16:]) / 16 >= early_exit_confidence
-                ):
+
+        if cast_k > 0:
+            remaining = max_new_tokens
+            while remaining > 0:
+                logits, active_cache = _forward(
+                    model, next_input, active_cache, use_cache, external_msa_registry
+                )
+                assert logits is not None
+                if logits.dim() == 4:
+                    last_logits = logits[:, -1]
+                elif logits.dim() == 3:
+                    last_logits = logits
+                else:
+                    last_logits = logits
+
+                block_tokens: list[Any] = []
+                stop = False
+                for k in range(min(cast_k, remaining)):
+                    if last_logits.dim() == 3:
+                        tok = sample_next_token(
+                            last_logits[:, k], temperature, top_k, top_p
+                        )
+                    else:
+                        tok = sample_next_token(
+                            last_logits, temperature, top_k, top_p
+                        )
+                    if tok.dim() == 0:
+                        tok = tok.unsqueeze(0)
+                    block_tokens.append(tok)
+                    if eos_token_id is not None and torch.all(tok == eos_token_id):
+                        stop = True
+                        break
+
+                for tok in block_tokens:
+                    generated_tokens.append(tok.unsqueeze(-1))
+
+                remaining -= len(block_tokens)
+                if stop or remaining <= 0:
                     break
-            next_input = next_token.unsqueeze(-1)
+
+                next_input = torch.stack(block_tokens, dim=-1)
+        else:
+            for _ in range(max_new_tokens):
+                logits, active_cache = _forward(
+                    model, next_input, active_cache, use_cache, external_msa_registry
+                )
+                next_token = sample_next_token(logits, temperature, top_k, top_p)
+                if next_token.dim() == 0:
+                    next_token = next_token.unsqueeze(0)
+                generated_tokens.append(next_token.unsqueeze(-1))
+                if eos_token_id is not None and torch.all(next_token == eos_token_id):
+                    break
+                if early_exit_confidence > 0.0:
+                    _ee_confidences.append(confidence_score(logits))
+                    if (
+                        len(_ee_confidences) >= 16
+                        and sum(_ee_confidences[-16:]) / 16 >= early_exit_confidence
+                    ):
+                        break
+                next_input = next_token.unsqueeze(-1)
         if generated_tokens:
             generated = torch.cat([generated, *generated_tokens], dim=-1)
     else:
@@ -403,17 +452,60 @@ def stream_generate(
     _generated, next_input, active_cache = _prepare_torch_inputs(
         model, prompt_ids, max_new_tokens, cache, use_cache, use_static_cache
     )
-    for _ in range(max_new_tokens):
-        logits, active_cache = _forward(
-            model, next_input, active_cache, use_cache, external_msa_registry
-        )
-        next_token = sample_next_token(logits, temperature, top_k, top_p)
-        if next_token.dim() == 0:
-            next_token = next_token.unsqueeze(0)
-        yield next_token
-        if eos_token_id is not None and torch.all(next_token == eos_token_id):
-            break
-        next_input = next_token.unsqueeze(-1)
+
+    cast_cfg = getattr(getattr(model, "cfg", None), "cast_config", None)
+    cast_k = cast_cfg.block_size if cast_cfg is not None else 0
+
+    if cast_k > 0:
+        remaining = max_new_tokens
+        while remaining > 0:
+            logits, active_cache = _forward(
+                model, next_input, active_cache, use_cache, external_msa_registry
+            )
+            assert logits is not None
+            if logits.dim() == 4:
+                last_logits = logits[:, -1]
+            elif logits.dim() == 3:
+                last_logits = logits
+            else:
+                last_logits = logits
+
+            block_tokens: list[Any] = []
+            stop = False
+            for k in range(min(cast_k, remaining)):
+                if last_logits.dim() == 3:
+                    tok = sample_next_token(
+                        last_logits[:, k], temperature, top_k, top_p
+                    )
+                else:
+                    tok = sample_next_token(
+                        last_logits, temperature, top_k, top_p
+                    )
+                if tok.dim() == 0:
+                    tok = tok.unsqueeze(0)
+                block_tokens.append(tok)
+                yield tok
+                remaining -= 1
+                if eos_token_id is not None and torch.all(tok == eos_token_id):
+                    stop = True
+                    break
+
+            if stop or remaining <= 0:
+                break
+
+            next_input = torch.stack(block_tokens, dim=-1)
+    else:
+        for _ in range(max_new_tokens):
+            logits, active_cache = _forward(
+                model, next_input, active_cache, use_cache, external_msa_registry
+            )
+            next_token = sample_next_token(logits, temperature, top_k, top_p)
+            if next_token.dim() == 0:
+                next_token = next_token.unsqueeze(0)
+            yield next_token
+            if eos_token_id is not None and torch.all(next_token == eos_token_id):
+                break
+            next_input = next_token.unsqueeze(-1)
     if was_training and hasattr(model, "train"):
         model.train()
 

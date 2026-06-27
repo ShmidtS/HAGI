@@ -1,5 +1,6 @@
 """Model components for HAGI."""
 
+from .cast import CASTConfig, CASTHead, build_cast_targets
 from .gdr import GradeConfig, GradeDecomposedRecurrence
 from .hagi import HAGI, HAGIConfig
 from .hdim_full import (
@@ -37,6 +38,9 @@ __all__ = [
     "LTransition",
     "GradeConfig",
     "GradeDecomposedRecurrence",
+    "CASTConfig",
+    "CASTHead",
+    "build_cast_targets",
     "DelayedHDIM",
     "HDIMFull",
     "HiddenToMultivector",
