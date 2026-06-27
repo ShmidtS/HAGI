@@ -729,18 +729,19 @@ def generate_with_rollouts(
                 if isinstance(score_output, dict) and "quality_score" in score_output:
                     score = score_output["quality_score"].mean().item()
                 else:
-                    last_logits = (
+                    last_logits: Any = (
                         score_output[0]
                         if isinstance(score_output, tuple)
                         else score_output.get("logits")
                         if isinstance(score_output, dict)
                         else score_output
                     )
-                    if last_logits.dim() == 4:
-                        last_logits = last_logits[:, -1, 0]
-                    elif last_logits.dim() == 3:
-                        pass
-                    score = confidence_score(last_logits[..., -1, :])
+                    if last_logits is None:
+                        score = 0.0
+                    else:
+                        if last_logits.dim() == 4:
+                            last_logits = last_logits[:, -1, 0]
+                        score = confidence_score(last_logits[..., -1, :])
                 if score > best_score:
                     best_score = score
                     best_generated = result
