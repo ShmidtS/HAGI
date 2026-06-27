@@ -20,6 +20,7 @@ from torch.utils.checkpoint import checkpoint
 
 from ..losses import cross_entropy_loss, fused_linear_cross_entropy
 from ..nars.adapters import NarsHdimReasoner, NarsHrmController, NarsMsaReasoner
+from .cast import CASTConfig, CASTHead, build_cast_targets
 from .gdr import GradeConfig, GradeDecomposedRecurrence
 from .hdim_full import DelayedHDIM, DomainRotor, HDIMFull
 from .hrm_full import HRMCore
@@ -178,14 +179,10 @@ class HAGIConfig:
     # Training is unaffected (KV cache is inference-only).
     int8_kv_cache: bool = True
     compile: bool = False
-    # torch.compile dynamic-shapes toggle. False (default) for fixed-length
-    # training (data.min_seq_len == max_seq_len): inductor specializes on the
-    # single T -> tighter static kernels, no dynamic-dispatch overhead. True
-    # for variable-length training (min_seq_len < max_seq_len, fresh T per
-    # batch) so one graph covers the whole T range without recompile storms.
     use_dynamic_shapes: bool = False
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     grades: GradeConfig = field(default_factory=GradeConfig)
+    cast_config: CASTConfig | None = None
 
     def __post_init__(self):
         assert self.hidden_size == self.transformer.hidden_size
@@ -325,6 +322,16 @@ class HAGI(nn.Module):
         self.final_norm = RMSNorm(cfg.hidden_size, tcfg.norm_eps)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight  # weight tying
+
+        self.cast_head: CASTHead | None = None
+        if cfg.cast_config is not None:
+            self.cast_head = CASTHead(
+                hidden_size=cfg.hidden_size,
+                block_size=cfg.cast_config.block_size,
+                use_coherence=cfg.cast_config.use_coherence,
+                gate_init=cfg.cast_config.gate_init,
+                train_k=cfg.cast_config.train_k,
+            )
 
         self.quality_head = None
         if cfg.use_quality_head:
@@ -927,31 +934,87 @@ class HAGI(nn.Module):
         pre_logits_hidden = (
             h if need_quality and self.quality_head is not None else None
         )
-        h = self.final_norm(h)
 
         logits = None
         loss = None
-        if targets is not None and self.cfg.use_fused_ce and not use_cache:
-            # Memory-efficient opt-in path: lm_head + CE per chunk, the full
-            # [B, T, V] logits tensor is never materialized.
-            loss = fused_linear_cross_entropy(
-                h,
-                self.lm_head.weight,
-                targets,
-                ignore_index=ignore_index,
-                chunk_size=(
+        if self.cast_head is not None:
+            K = self.cast_head.block_size
+
+            if targets is not None and not use_cache:
+                cast_targets = build_cast_targets(targets, K)
+                virtual_states = self.cast_head(h)
+                B, T, H = h.shape
+
+                tk = self.cast_head.train_k
+                if tk is not None and tk < K:
+                    extra = torch.randperm(K - 1)[: tk - 1] + 1
+                    k_idx = torch.cat(
+                        [torch.tensor([0], device=extra.device), extra]
+                    ).sort().values
+                    virtual_states = virtual_states[:, :, k_idx]
+                    cast_targets = cast_targets[:, :, k_idx]
+                    n_k = tk
+                else:
+                    k_idx = None
+                    n_k = K
+
+                ce_cs = (
                     self.cfg.ce_chunk_size
                     if self.cfg.ce_chunk_size > 0
                     else self.cfg.ce_fused_chunk_size
-                ),
-                label_smoothing=getattr(self.cfg, "label_smoothing", 0.0),
-            )
+                )
+                lbl_smooth = getattr(self.cfg, "label_smoothing", 0.0)
+
+                decay = getattr(self.cfg.cast_config, "k_loss_decay", 1.0)
+                if decay < 1.0 and n_k > 1:
+                    raw_w = [decay ** i for i in range(n_k)]
+                    w_sum = sum(raw_w)
+                    k_weights = [w / w_sum for w in raw_w]
+                else:
+                    k_weights = [1.0 / n_k] * n_k
+
+                loss = None
+                for ki, k in enumerate(range(n_k)):
+                    h_k = virtual_states[:, :, k]
+                    tgt_k = cast_targets[:, :, k]
+                    h_flat = h_k.reshape(B * T, H)
+                    h_normed = self.final_norm(h_flat)
+                    if self.cfg.use_fused_ce:
+                        ce_k = fused_linear_cross_entropy(
+                            h_normed,
+                            self.lm_head.weight,
+                            tgt_k.reshape(-1),
+                            ignore_index=ignore_index,
+                            chunk_size=ce_cs,
+                            label_smoothing=lbl_smooth,
+                            checkpoint_chunks=B * T > ce_cs,
+                        )
+                    else:
+                        logits_flat = self.lm_head(h_normed)
+                        ce_k = cross_entropy_loss(
+                            logits_flat.reshape(-1, logits_flat.size(-1)),
+                            tgt_k.reshape(-1),
+                            ignore_index=ignore_index,
+                            chunk_size=ce_cs,
+                            label_smoothing=lbl_smooth,
+                        )
+                    w_k = k_weights[ki]
+                    loss = ce_k * w_k if loss is None else loss + ce_k * w_k
+                logits = None
+            else:
+                virtual_states = self.cast_head(h)
+                all_cast_logits = []
+                for k in range(K):
+                    h_k = self.final_norm(virtual_states[:, :, k])
+                    all_cast_logits.append(self.lm_head(h_k))
+                logits = torch.stack(all_cast_logits, dim=2)
         else:
-            logits = self.lm_head(h)
-            if targets is not None:
-                loss = cross_entropy_loss(
-                    logits.reshape(-1, logits.size(-1)),
-                    targets.reshape(-1),
+            h = self.final_norm(h)
+            if targets is not None and self.cfg.use_fused_ce and not use_cache:
+                loss = fused_linear_cross_entropy(
+                    h,
+                    self.lm_head.weight,
+                    targets,
                     ignore_index=ignore_index,
                     chunk_size=(
                         self.cfg.ce_chunk_size
@@ -960,6 +1023,20 @@ class HAGI(nn.Module):
                     ),
                     label_smoothing=getattr(self.cfg, "label_smoothing", 0.0),
                 )
+            else:
+                logits = self.lm_head(h)
+                if targets is not None:
+                    loss = cross_entropy_loss(
+                        logits.reshape(-1, logits.size(-1)),
+                        targets.reshape(-1),
+                        ignore_index=ignore_index,
+                        chunk_size=(
+                            self.cfg.ce_chunk_size
+                            if self.cfg.ce_chunk_size > 0
+                            else self.cfg.ce_fused_chunk_size
+                        ),
+                        label_smoothing=getattr(self.cfg, "label_smoothing", 0.0),
+                    )
 
         if (
             self.gdr_aux_proj is not None

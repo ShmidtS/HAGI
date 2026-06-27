@@ -83,26 +83,14 @@ def fused_linear_cross_entropy(
     ignore_index: int = -100,
     chunk_size: int = 4096,
     label_smoothing: float = 0.0,
+    checkpoint_chunks: bool = False,
 ) -> torch.Tensor:
     """Chunked lm_head projection + cross-entropy without materializing [N, V] logits.
 
-    Each row-chunk is projected and reduced via plain row-chunking (no activation
-    checkpointing — see comment below), so at most ``chunk_size x V`` logits exist
-    at any time in forward (the chunk's logits are held for the reduction, then
-    dropped). With V = 32k and N = B*T the full logits tensor is the dominant
-    activation-memory term; this path cuts it by a factor of N / chunk_size.
-    Numerically identical to the unchunked path (sum over chunks / valid-token
-    count == mean).
-
-    ``@torch.compiler.disable``: this is called from inside the compiled model
-    graph (hagi.py:647), and the chunk loop ``for i in range(0, flat_h.size(0),
-    chunk_size)`` has a data-dependent trip count (variable-length training ->
-    B*T varies -> ceil(B*T/chunk_size) is 1..3). Dynamo specializes a guard on
-    the trip count and hits recompile_limit(8) -> eager fallback, wasting the
-    step-0 compile. Disabling keeps the eager chunk loop (it is just
-    F.linear + F.cross_entropy on a [chunk, V] slab — the CUDA kernels are
-    already optimal, compile adds nothing) and stops the guard. Mirrors the
-    SlotRegistry disable pattern (msa.py).
+    When ``checkpoint_chunks=True``, each chunk's logits are not saved for
+    backward — recomputed via a custom autograd Function instead. This avoids
+    the Python overhead of ``torch.utils.checkpoint`` (hooks, saved_tensors
+    callbacks) while achieving the same memory savings.
     """
     flat_h = hidden.reshape(-1, hidden.size(-1))
     flat_t = targets.reshape(-1)
@@ -110,11 +98,19 @@ def fused_linear_cross_entropy(
         chunk_size = 4096
     valid = (flat_t != ignore_index).sum().clamp(min=1)
 
+    if checkpoint_chunks:
+        total = flat_h.new_zeros((), dtype=torch.float32)  # type: ignore[reportPrivateImportUsage]
+        for i in range(0, flat_h.size(0), chunk_size):
+            h_c = flat_h[i : i + chunk_size]
+            t_c = flat_t[i : i + chunk_size]
+            loss_c = _FusedLinearCE.apply(  # type: ignore[assignment]
+                h_c, weight, t_c, valid, ignore_index, label_smoothing
+            )
+            total = total + loss_c  # type: ignore[operator]
+        return (total / valid).to(hidden.dtype)
+
     def _chunk_loss(h_chunk: torch.Tensor, t_chunk: torch.Tensor) -> torch.Tensor:
         logits = F.linear(h_chunk, weight)
-        # No explicit .float(): the native CUDA CE kernel accumulates in fp32
-        # internally for bf16/fp16 input, so upcasting the full [chunk, V]
-        # logits is pure bandwidth overhead (halves the chunk's memory spike).
         return F.cross_entropy(
             logits,
             t_chunk,
@@ -123,16 +119,72 @@ def fused_linear_cross_entropy(
             label_smoothing=label_smoothing,
         )
 
-    # Chunking (not checkpointing) bounds peak memory: only one [chunk, V]
-    # logits tensor is alive at a time. Checkpointing the chunk would recompute
-    # the lm_head matmul + log_softmax on backward — ~30% slower here for no
-    # memory benefit, since the chunk is already small (chunk_size * V * 2B).
     total = flat_h.new_zeros((), dtype=torch.float32)  # type: ignore[reportPrivateImportUsage]
     for i in range(0, flat_h.size(0), chunk_size):
         h_c = flat_h[i : i + chunk_size]
         t_c = flat_t[i : i + chunk_size]
         total = total + _chunk_loss(h_c, t_c)
     return (total / valid).to(hidden.dtype)
+
+
+class _FusedLinearCE(torch.autograd.Function):
+    """Fused linear + cross-entropy that discards logits after forward.
+
+    Saves only ``hidden`` and ``targets`` (small), NOT ``logits`` (large).
+    During backward, recomputes ``logits = F.linear(hidden, weight)`` and
+    derives the CE gradient analytically — no double-backward, no hooks.
+    """
+
+    @staticmethod
+    def forward(  # type: ignore[reportMissingParameterType]
+        ctx,
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        targets: torch.Tensor,
+        num_valid: torch.Tensor,
+        ignore_index: int,
+        label_smoothing: float,
+    ) -> torch.Tensor:
+        logits = F.linear(hidden, weight)
+        loss = F.cross_entropy(
+            logits,
+            targets,
+            ignore_index=ignore_index,
+            reduction="sum",
+            label_smoothing=label_smoothing,
+        )
+        ctx.save_for_backward(hidden, weight, targets)
+        ctx.ignore_index = ignore_index
+        ctx.label_smoothing = label_smoothing
+        ctx.num_valid = num_valid
+        return loss
+
+    @staticmethod
+    def backward(  # type: ignore[reportMissingParameterType]
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, None, None, None, None]:
+        hidden, weight, targets = ctx.saved_tensors
+        logits = F.linear(hidden, weight)
+        grad_logits = F.softmax(logits, dim=-1)
+        grad_logits.mul_(grad_output.to(grad_logits.dtype))
+        n_cls = logits.size(-1)
+        alpha = ctx.label_smoothing
+        mask = targets != ctx.ignore_index
+        valid_targets = targets.clamp(min=0)
+        if alpha > 0.0:
+            grad_logits.add_(
+                -(alpha / n_cls) * grad_output.to(grad_logits.dtype)
+                * mask.unsqueeze(-1).to(grad_logits.dtype)
+            )
+        scatter_src = (
+            -(1.0 - alpha) * grad_output.to(grad_logits.dtype)
+            * mask.unsqueeze(-1).to(grad_logits.dtype)
+        )
+        grad_logits.scatter_add_(-1, valid_targets.unsqueeze(-1), scatter_src)
+        grad_logits[~mask] = 0.0
+        grad_hidden = F.linear(grad_logits, weight.t())
+        grad_weight = grad_logits.t() @ hidden
+        return grad_hidden, grad_weight, None, None, None, None
 
 
 def compute_auxiliary_loss(

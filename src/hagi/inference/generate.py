@@ -746,3 +746,328 @@ def generate_with_rollouts(
                     best_score = score
                     best_generated = result
     return best_generated if best_generated is not None else result
+
+
+_NEWLINE_TOKEN_ID = 198
+_DEFAULT_ROW_WIDTH = 32
+_PAD_TOKEN_ID = 3
+
+
+@dataclass(frozen=True)
+class MatrixConfig:
+    """Configuration for 2D matrix generation.
+
+    The model decides grid dimensions:
+    - Width: detected from first newline token in output (or default_row_width)
+    - Height: determined by EOS generation (or ceil(max_tokens / width))
+
+    Tokens fill the grid row-by-row. Each row is decoded independently,
+    producing natural line breaks without relying on space tokens.
+    """
+
+    max_tokens: int = 256
+    default_row_width: int = _DEFAULT_ROW_WIDTH
+    min_row_width: int = 8
+    max_row_width: int = 128
+    temperature: float = 0.8
+    top_k: int | None = 50
+    top_p: float | None = 0.9
+    eos_token_id: int | None = None
+    pad_token_id: int = _PAD_TOKEN_ID
+    newline_token_id: int = _NEWLINE_TOKEN_ID
+    use_cache: bool = True
+    use_static_cache: bool = False
+
+
+@dataclass
+class MatrixResult:
+    """Structured output from matrix_generate.
+
+    Attributes:
+        grid_ids: [B, Y, X] tensor of token ids (padded with pad_token_id)
+        rows: list of decoded text strings, one per row
+        dimensions: (width, height) of the filled grid
+        tokens_generated: actual number of non-pad tokens
+        forward_passes: number of model forward calls
+        finish_reason: "eos", "max_tokens", or "grid_full"
+    """
+
+    grid_ids: Any
+    rows: list[str]
+    dimensions: tuple[int, int]
+    tokens_generated: int
+    forward_passes: int
+    finish_reason: str = "max_tokens"
+
+
+RowSink = Callable[[str, int], None]
+
+
+@torch.no_grad() if torch is not None else (lambda fn: fn)
+def matrix_generate(
+    model: Any,
+    prompt_ids: Any,
+    config: MatrixConfig | None = None,
+    *,
+    tokenizer: Any | None = None,
+    on_row: RowSink | None = None,
+    **kwargs: Any,
+) -> MatrixResult:
+    """Generate tokens in a 2D grid with model-predicted dimensions.
+
+    Process:
+    1. First CAST block: generate K tokens, detect row width from newline.
+    2. Pre-allocate grid [B, Y, X] where X=width, Y=ceil(max_tokens/X).
+    3. Fill row-by-row using CAST block generation (K tokens per pass).
+    4. Decode each row independently for natural line breaks.
+    5. Stop on EOS, grid full, or max_tokens reached.
+
+    The model "decides" dimensions:
+    - Width: where it places the first newline (or default_row_width)
+    - Height: when it generates EOS (or fills the grid)
+
+    Args:
+        config: MatrixConfig with grid parameters.
+        tokenizer: TokenizerWrapper with .decode() method for row text.
+        on_row: Callback(row_text, row_index) after each completed row.
+        **kwargs: Override config fields (temperature, top_k, etc.).
+    """
+    cfg: MatrixConfig = config if config is not None else MatrixConfig()
+
+    for k, v in kwargs.items():
+        if hasattr(cfg, k):
+            cfg = _replace_field(cfg, k, v)
+
+    if torch is None:
+        raise RuntimeError("matrix_generate requires torch")
+
+    cast_k = _get_cast_k(model)
+    if cast_k <= 0:
+        cast_k = 1
+
+    if hasattr(model, "clear_rope_cache"):
+        model.clear_rope_cache()
+    was_training = bool(getattr(model, "training", False))
+    if hasattr(model, "eval"):
+        model.eval()
+
+    generated, next_input, active_cache = _prepare_torch_inputs(
+        model,
+        prompt_ids,
+        cfg.max_tokens,
+        None,
+        cfg.use_cache,
+        cfg.use_static_cache,
+    )
+
+    B = generated.shape[0]
+    all_tokens: list[Any] = []
+    forward_passes = 0
+    finish_reason = "max_tokens"
+
+    # Phase 1: Detect row width from first CAST block
+    logits, active_cache = _forward(
+        model, next_input, active_cache, cfg.use_cache, None
+    )
+    forward_passes += 1
+    block_logits = _extract_block_logits(logits)
+
+    first_block: list[Any] = []
+    row_width = cfg.default_row_width
+
+    for k in range(cast_k):
+        if block_logits.dim() == 3:
+            tok = sample_next_token(
+                block_logits[:, k], cfg.temperature, cfg.top_k, cfg.top_p
+            )
+        else:
+            tok = sample_next_token(
+                block_logits, cfg.temperature, cfg.top_k, cfg.top_p
+            )
+        if tok.dim() == 0:
+            tok = tok.unsqueeze(0)
+        first_block.append(tok)
+        all_tokens.append(tok)
+
+        if tok.item() == cfg.newline_token_id:
+            row_width = max(k, cfg.min_row_width)
+            row_width = min(row_width, cfg.max_row_width)
+            break
+
+        if cfg.eos_token_id is not None and tok.item() == cfg.eos_token_id:
+            finish_reason = "eos"
+            break
+
+    if finish_reason == "eos":
+        rows_text = _decode_tokens(all_tokens, tokenizer)
+        grid_ids = _build_grid(
+            all_tokens, B, 1, len(all_tokens), cfg.pad_token_id
+        )
+        if on_row is not None:
+            on_row(rows_text[0] if rows_text else "", 0)
+        if was_training and hasattr(model, "train"):
+            model.train()
+        return MatrixResult(
+            grid_ids=grid_ids,
+            rows=rows_text,
+            dimensions=(len(all_tokens), 1),
+            tokens_generated=len(all_tokens),
+            forward_passes=forward_passes,
+            finish_reason=finish_reason,
+        )
+
+    next_input = torch.stack(first_block, dim=-1)
+
+    # Phase 2: Compute grid dimensions
+    height = (cfg.max_tokens + row_width - 1) // row_width
+    total_slots = height * row_width
+    slots_remaining = total_slots - len(all_tokens)
+
+    # Phase 3: Fill grid row-by-row
+    while slots_remaining > 0 and finish_reason == "max_tokens":
+        logits, active_cache = _forward(
+            model, next_input, active_cache, cfg.use_cache, None
+        )
+        forward_passes += 1
+        block_logits = _extract_block_logits(logits)
+
+        block_tokens: list[Any] = []
+        row_ended = False
+
+        for k in range(min(cast_k, slots_remaining)):
+            if block_logits.dim() == 3:
+                tok = sample_next_token(
+                    block_logits[:, k],
+                    cfg.temperature,
+                    cfg.top_k,
+                    cfg.top_p,
+                )
+            else:
+                tok = sample_next_token(
+                    block_logits, cfg.temperature, cfg.top_k, cfg.top_p
+                )
+            if tok.dim() == 0:
+                tok = tok.unsqueeze(0)
+            block_tokens.append(tok)
+            all_tokens.append(tok)
+            slots_remaining -= 1
+
+            if cfg.eos_token_id is not None and tok.item() == cfg.eos_token_id:
+                finish_reason = "eos"
+                row_ended = True
+                break
+
+            if tok.item() == cfg.newline_token_id:
+                row_ended = True
+                current_col = len(all_tokens) % row_width
+                if current_col != 0:
+                    pad_count = row_width - current_col
+                    for _ in range(pad_count):
+                        if slots_remaining > 0:
+                            all_tokens.append(
+                                torch.tensor(
+                                    [cfg.pad_token_id] * B,
+                                    device=generated.device,
+                                    dtype=generated.dtype if hasattr(generated, 'dtype') else torch.long,
+                                )
+                            )
+                            slots_remaining -= 1
+                break
+
+        if not row_ended and len(block_tokens) > 0:
+            next_input = torch.stack(block_tokens, dim=-1)
+        else:
+            if finish_reason != "eos" and slots_remaining > 0:
+                next_input = torch.stack(block_tokens, dim=-1) if block_tokens else next_input
+
+    # Phase 4: Build grid and decode rows
+    grid_ids = _build_grid(
+        all_tokens, B, height, row_width, cfg.pad_token_id, generated.device
+    )
+
+    rows_text = _decode_grid_rows(grid_ids, tokenizer, cfg.pad_token_id)
+
+    filled_rows = 0
+    for y, row_text in enumerate(rows_text):
+        if on_row is not None:
+            on_row(row_text, y)
+        if row_text.strip():
+            filled_rows = y + 1
+
+    if finish_reason == "max_tokens" and len(all_tokens) >= total_slots:
+        finish_reason = "grid_full"
+
+    if was_training and hasattr(model, "train"):
+        model.train()
+
+    return MatrixResult(
+        grid_ids=grid_ids,
+        rows=rows_text[:filled_rows] if finish_reason == "eos" else rows_text,
+        dimensions=(row_width, height),
+        tokens_generated=len([t for t in all_tokens if t.item() != cfg.pad_token_id]),
+        forward_passes=forward_passes,
+        finish_reason=finish_reason,
+    )
+
+
+def _replace_field(config: Any, field_name: str, value: Any) -> Any:
+    """Replace a field in a frozen dataclass."""
+    from dataclasses import replace
+    return replace(config, **{field_name: value})
+
+
+def _build_grid(
+    tokens: list[Any],
+    batch_size: int,
+    height: int,
+    width: int,
+    pad_token_id: int,
+    device: Any = None,
+) -> Any:
+    """Build a [B, Y, X] grid from a flat list of token tensors."""
+    if torch is None:
+        return None
+    if device is None and tokens:
+        device = tokens[0].device
+
+    flat = torch.cat([t.unsqueeze(-1) for t in tokens], dim=-1) if tokens else torch.empty(batch_size, 0, device=device, dtype=torch.long)
+    total = height * width
+    if flat.shape[1] < total:
+        pad_len = total - flat.shape[1]
+        pad_tensor = torch.full(
+            (batch_size, pad_len), pad_token_id, device=device, dtype=flat.dtype
+        )
+        flat = torch.cat([flat, pad_tensor], dim=-1)
+    elif flat.shape[1] > total:
+        flat = flat[:, :total]
+
+    grid = flat.reshape(batch_size, height, width)
+    return grid
+
+
+def _decode_tokens(tokens: list[Any], tokenizer: Any | None) -> list[str]:
+    """Decode a flat list of token tensors into a single-row text list."""
+    if tokenizer is None or torch is None or not tokens:
+        return [""]
+    ids = [t.item() for t in tokens]
+    text = tokenizer.decode(ids)
+    return [text]
+
+
+def _decode_grid_rows(
+    grid_ids: Any, tokenizer: Any | None, pad_token_id: int
+) -> list[str]:
+    """Decode each row of the grid independently."""
+    if tokenizer is None or grid_ids is None:
+        return []
+    rows: list[str] = []
+    for y in range(grid_ids.shape[1]):
+        row_ids = grid_ids[0, y].cpu().tolist()
+        while row_ids and row_ids[-1] == pad_token_id:
+            row_ids.pop()
+        if not row_ids:
+            rows.append("")
+            continue
+        row_text = tokenizer.decode(row_ids)
+        rows.append(row_text)
+    return rows
