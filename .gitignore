@@ -18,6 +18,8 @@ AGENTS.md
 /.kilo/
 .omc/
 meta.json
+.env
+/data/
 
 # cargo install artifacts
 .crates.toml
@@ -25,28 +27,24 @@ meta.json
 .context-mode/
 
 # untracked / wip artifacts
-formalization/.lake/config/\[anonymous]/lakefile.olean
-formalization/.lake/config/\[anonymous]/lakefile.olean.trace
+formalization/.lake/
 formalization/.lake-build.log
 
 # Python
 __pycache__/
-*.py[cod]
-*.egg-info/
 .venv/
-venv/
+*.egg-info/
 .pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+.mypy_cache/
+dist/
+tests/
 
-# ML artifacts
+# checkpoints and model weights
 checkpoints/
-*.safetensors
-*.ckpt
 *.pt
-wandb/
-/data/
-!prototype/data/
-benchmarks/results/*/
-!benchmarks/results/.gitkeep
+*.pth
+*.ckpt
+*.log
+torch-compile.bat
+profile_*
+profiler_logs/

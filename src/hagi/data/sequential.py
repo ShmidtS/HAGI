@@ -1,0 +1,227 @@
+"""Sequential cycling dataset loader — train on one source for N cycles, then next."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, cast
+
+import numpy as np
+
+try:
+    from torch.utils.data import (
+        DataLoader,
+        Dataset as _TorchDataset,
+        Sampler as _TorchSampler,
+    )
+
+    Dataset = cast(Any, _TorchDataset)
+    Sampler = cast(Any, _TorchSampler)
+except ImportError:
+    DataLoader: Any = None  # type: ignore[assignment]
+
+    class Dataset:  # type: ignore[no-redef]
+        pass
+
+    class Sampler:  # type: ignore[no-redef]
+        pass
+
+
+def _shift_collate(batch: list[Any]) -> tuple[Any, Any]:
+    # Variable-length aware: right-pads with ignore_index when window lengths
+    # differ (variable-length training); identical to np.stack when equal.
+    from hagi.utils import _pad_shift_collate
+
+    return _pad_shift_collate(batch)
+
+
+class ChunkedRandomSampler(Sampler):
+    """Random sampler that yields indices in small chunks to avoid OOM on randperm."""
+
+    def __init__(self, data_source: Any, seed: int = 0, chunk_size: int = 4096):
+        self.data_source = data_source
+        self.seed = seed
+        self.chunk_size = chunk_size
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed)
+        n = len(self.data_source)
+        for i in range(0, n, self.chunk_size):
+            chunk = min(self.chunk_size, n - i)
+            indices = rng.integers(0, n, size=chunk)
+            for idx in indices:
+                yield int(idx)
+
+    def __len__(self):
+        return len(self.data_source)
+
+
+class RandomSubsetDataset(Dataset):  # type: ignore[type-arg, misc]
+    """Wraps a dataset and yields a random subset of a fixed size."""
+
+    def __init__(self, base_dataset: Any, subset_size: int, seed: int = 0) -> None:
+        self.base = base_dataset
+        self.subset_size = subset_size
+        self.seed = seed
+        self._indices: np.ndarray | None = None
+
+    def _build_indices(self) -> np.ndarray:
+        if self._indices is None:
+            rng = np.random.default_rng(self.seed)
+            self._indices = rng.integers(0, len(self.base), size=self.subset_size)
+        return self._indices
+
+    def __len__(self) -> int:
+        return self.subset_size
+
+    def __getitem__(self, index: int) -> Any:
+        indices = self._build_indices()
+        return self.base[int(indices[index])]
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "base": self.base,
+            "subset_size": self.subset_size,
+            "seed": self.seed,
+            "_indices": self._indices,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.base = state["base"]
+        self.subset_size = state["subset_size"]
+        self.seed = state["seed"]
+        self._indices = state.get("_indices")
+
+
+class SequentialCyclingIterator:
+    """Cycles through memmap datasets sequentially, N cycles per source.
+
+    Each source is fully iterated (one epoch) per cycle when ``steps_per_cycle``
+    is not set.  When ``steps_per_cycle`` is set, a random subset of that many
+    batches is drawn per cycle.  After ``cycles_per_dataset`` cycles the iterator
+    switches to the next source.  The iterator never raises ``StopIteration`` —
+    it loops forever.
+    """
+
+    def __init__(
+        self,
+        entries: list[dict[str, Any]],
+        batch_size: int,
+        seq_len: int,
+        num_workers: int = 0,
+        pin_memory: bool = True,
+        dtype: str = "uint16",
+        cycles_per_dataset: int = 1,
+        steps_per_cycle: int | None = None,
+        min_seq_len: int | None = None,
+    ):
+        self.entries = entries
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.dtype = dtype
+        self.cycles_per_dataset = cycles_per_dataset
+        self.steps_per_cycle = steps_per_cycle
+        # Variable-length training floor; MemmapDataset samples a window in
+        # [min_seq_len, seq_len] per item. None/seq_len = fixed length.
+        self.min_seq_len = int(min_seq_len) if min_seq_len is not None else seq_len
+        self.current_idx = 0
+        self.current_cycle = 0
+        self._current_iter: Any = None
+        self._dataset_cache: dict[str, Any] = {}
+        self._loader_cache: dict[tuple[int, int], Any] = {}
+
+    def _make_loader(self, path: str | Path, seed: int = 0) -> Any:
+        from hagi.data.dataloader import MemmapDataset
+
+        path_key = str(path)
+        if path_key not in self._dataset_cache:
+            self._dataset_cache[path_key] = MemmapDataset(
+                path,
+                seq_len=self.seq_len,
+                dtype=self.dtype,
+                preload=True,
+                min_seq_len=self.min_seq_len,
+            )
+        base = self._dataset_cache[path_key]
+        cache_key = (self.current_idx, self.current_cycle)
+        if cache_key in self._loader_cache:
+            return self._loader_cache[cache_key]
+        if self.steps_per_cycle is not None and self.steps_per_cycle > 0:
+            subset_size = self.steps_per_cycle * self.batch_size
+            dataset = RandomSubsetDataset(base, subset_size, seed=seed)
+            sampler = None
+        else:
+            dataset = base
+            sampler = ChunkedRandomSampler(base, seed=seed)
+        kwargs: dict[str, Any] = {
+            "batch_size": self.batch_size,
+            "shuffle": False,
+            "num_workers": self.num_workers,
+            "pin_memory": self.pin_memory,
+            "collate_fn": _shift_collate,
+            "drop_last": True,
+        }
+        if sampler is not None:
+            kwargs["sampler"] = sampler
+        if self.num_workers > 0:
+            kwargs["prefetch_factor"] = 4
+            kwargs["persistent_workers"] = True
+        loader = DataLoader(  # pyright: ignore[reportOptionalCall]
+            dataset, **kwargs  # pyright: ignore[reportArgumentType]
+        )
+        self._loader_cache[cache_key] = loader
+        return loader
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> tuple[Any, Any]:
+        while True:
+            if self._current_iter is None:
+                self._advance()
+            current_iter = self._current_iter
+            assert current_iter is not None
+            try:
+                return next(current_iter)
+            except StopIteration:
+                self.current_cycle += 1
+                if self.current_cycle >= self.cycles_per_dataset:
+                    self.current_idx = (self.current_idx + 1) % len(self.entries)
+                    self.current_cycle = 0
+                self._current_iter = None
+
+    def _advance(self) -> None:
+        entry = self.entries[self.current_idx]
+        path = entry["path"]
+        name = entry.get("name", f"dataset_{self.current_idx}")
+        seed = self.current_idx * 1000 + self.current_cycle
+        self._current_iter = iter(self._make_loader(path, seed))
+        print(
+            f"[SequentialCycling] {name} (cycle {self.current_cycle + 1}/{self.cycles_per_dataset})"
+        )
+
+    def state_dict(self) -> dict[str, int]:
+        """Persist the current dataset/cycle position for resume."""
+        return {"current_idx": self.current_idx, "current_cycle": self.current_cycle}
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore the dataset/cycle position.
+
+        ``self._current_iter`` is set to None so ``__next__`` re-advances from
+        the restored position (rebuilds the loader for the correct dataset/cycle
+        via ``_advance``).
+        """
+        if not self.entries:
+            return
+        self.current_idx = int(state.get("current_idx", 0))
+        self.current_idx = min(self.current_idx, len(self.entries) - 1)
+        self.current_cycle = int(state.get("current_cycle", 0))
+        self._current_iter = None
+        name = self.entries[self.current_idx].get(
+            "name", f"dataset_{self.current_idx}"
+        )
+        print(
+            f"[SequentialCycling] restored to {name} "
+            f"(cycle {self.current_cycle + 1}/{self.cycles_per_dataset})"
+        )

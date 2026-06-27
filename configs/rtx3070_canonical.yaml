@@ -1,0 +1,1138 @@
+# =============================================================================
+# HAGI Configuration — rtx3070_canonical (compact, reasoning-deep)
+# Target: RTX 3070 (8GB VRAM), ~74.2M params, head_dim 72 preserved.
+# VRAM budget: 7GB reserved (including distillation teacher SmolLM2-360M).
+# batch_size=10 is VRAM-optimal: batch=11 → 7.42GB reserved (over 7GB budget).
+#
+# VRAM scaling proportions (estimated, for future hardware):
+#   VRAM   | hidden | batch | l_cycles | passes | experts | est_params
+#   --------|--------|-------|----------|--------|---------|------------
+#   7GB    | 576    | 10    | 2        | 14     | 4       | 74M
+#   12GB   | 768    | 16    | 2        | 14     | 4       | 131M
+#   16GB   | 768    | 24    | 2        | 14     | 6       | 139M
+#   24GB   | 1024   | 32    | 3        | 21     | 8       | 235M
+#   48GB   | 1536   | 64    | 3        | 21     | 8       | 528M
+# Scaling laws: hidden ~ VRAM^0.4, batch ~ VRAM_activation, l_cycles
+# constant at 2 for ≤16GB (reasoning depth = HAGI's novelty), 3 for ≥24GB.
+# Experts scale with hidden for larger models. Teacher freed at 60% training.
+#
+# Optimized analytically (exact-param count + calibrated VRAM model + Pareto
+# over reasoning-depth / FLOPS / VRAM). hidden 576 (head_dim 72 = 576/8, same
+# as the old 768/12) cuts activations + optimizer state ~60% -> VRAM est
+# ~2.2-3.7GB (vs 5.88 at 119M). Layers 2/7/2: reasoning deepened 4->7
+# (HAGI's novelty is the recurrent reasoning core; 7x hrm_l_cycles=2 = 14
+# reasoning passes/step vs 8 at the old 4x2), perception/expression trimmed
+# 4->2. FLOPS ~0.5x canonical -> ~2x faster steps. Train from scratch
+# (state_dict incompatible with the prior 119M step-26500.pt).
+# =============================================================================
+name: rtx3070_canonical
+
+# =============================================================================
+# DATA — training data sources, tokenization, and batching
+# Read in: scripts/train.py (build_dataloader, _resolve_max_steps)
+# =============================================================================
+data:
+  # Dataset format: "memmap_packed" → binary memmap with BFD packing.
+  # Mapped to "memmap" internally (train.py:437).
+  dataset_mode: memmap_packed
+
+  # Maximum sequence length (tokens). The MODEL accepts arbitrary T.
+  # Read in: train.py:170, train.py:427, train.py:700
+  max_seq_len: 1024
+
+  # Variable-length training: each sample draws a random length in
+  # [min_seq_len, max_seq_len]. Collate fn pads with ignore_index (-100)
+  # so padded positions are loss-free. Set = max_seq_len for fixed-length.
+  # Fixed at 1024 (= max_seq_len): every position carries gradient (densest
+  # signal/step), and the single T kills the compile recompile-spikes that
+  # variable-length (256->1024) triggers via Dynamo shape guards. VRAM is
+  # unchanged (batch x seq fixed); only window diversity is sacrificed.
+  # Read in: train.py:431-432
+  min_seq_len: 1024
+
+  # Data mix weights (source name → proportion). Must sum to ~1.0.
+  # Used for manifest generation in download_data.py.
+  mix:
+    edu: 0.4            # Educational content (largest source)
+    slimpajama: 0.25    # Web text (English, SlimPajama subset)
+    wikipedia_en: 0.1   # Encyclopedia (English)
+    wikipedia_ru: 0.08  # Encyclopedia (Russian)
+    oscar_ru: 0.07      # Web text (Russian, OSCAR)
+    openwebmath: 0.03   # Mathematics
+    smoltalk: 0.03      # Instruction-following dialogs
+    tinystories: 0.02   # Short stories (coherent narrative)
+    python_instruct: 0.02 # Python code instructions
+
+  # Explicit mix paths for memmap_packed mode. Each entry maps a source
+  # name to a .bin file path with its weight.
+  # Read in: train.py:477 (_resolve_sequential_entries), train.py:497
+  # Order = CURRICULUM (plan 3.3) for sequential_cycles>0: easy coherent short
+  # text first (tinystories/python_instruct/smoltalk), then facts+math mid
+  # (wikipedia/openwebmath), then web+edu hard (oscar/slimpajama/edu) last.
+  # Weights are used only in mixed mode (sequential_cycles=0); in sequential
+  # mode the list order IS the curriculum and weights are ignored.
+  mix_paths:
+  # Phase 1 (easy): coherent short narrative + simple instructions
+  - name: tinystories
+    path: v4_3b/tinystories.bin
+    weight: 0.02
+  - name: python_instruct
+    path: v4_3b/python_instruct.bin
+    weight: 0.02
+  - name: smoltalk
+    path: v4_3b/smoltalk.bin
+    weight: 0.03
+  # Phase 2 (mid): facts + math
+  - name: wikipedia_en
+    path: v4_3b/wikipedia_en.bin
+    weight: 0.1
+  - name: wikipedia_ru
+    path: v4_3b/wikipedia_ru.bin
+    weight: 0.08
+  - name: openwebmath
+    path: v4_3b/openwebmath.bin
+    weight: 0.03
+  # Phase 3 (hard): web + educational long-form
+  - name: oscar_ru
+    path: v4_3b/oscar_ru.bin
+    weight: 0.07
+  - name: slimpajama
+    path: v4_3b/slimpajama.bin
+    weight: 0.25
+  - name: edu
+    path: v4_3b/edu.bin
+    weight: 0.4
+
+  # DataLoader worker processes. 0 = synchronous (no multiprocessing).
+  # Read in: train.py:434 (data_cfg.get("num_workers", 4))
+  num_workers: 0
+
+  # Sequence packing strategy: "bfd" = Best-Fit-Decreasing on EOS boundaries.
+  # Used in download_data.py for manifest generation.
+  packing: bfd
+
+  # Sequential cycling: iterate datasets in order N times before shuffling.
+  # 0 = random mix. >0 = sequential cycling through mix_paths.
+  # Read in: train.py:694-698
+  sequential_cycles: 3
+
+  # Pin memory for faster CPU→GPU transfer.
+  # Read in: train.py:435 (data_cfg.get("pin_memory", ...))
+  pin_memory: true
+
+  # HuggingFace tokenizer model name. SmolLM2-135M has vocab=49,152.
+  # Read in: train.py:441 (data_cfg.get("tokenizer", ...))
+  tokenizer: HuggingFaceTB/SmolLM2-135M
+
+  # Total training tokens. If set, max_steps is derived:
+  #   max_steps = ceil(train_tokens / (batch_size * grad_accum * seq_len))
+  # Read in: train.py:47 (_resolve_max_steps)
+  train_tokens: 3000000000
+
+  # Memmap dtype for binary data files. "uint16" supports vocab up to 65535.
+  # Read in: train.py:190,457 (data_cfg.get("dtype", "uint16")), cli.py:94
+  dtype: uint16
+
+  # Optional: explicit path to a single .bin training file. When unset,
+  # train.py auto-discovers .bin files in data_dir or uses mix_paths.
+  # Read in: train.py:68,177 (data_cfg.get("train_path") or data_cfg.get("path"))
+  # train_path: data/v4_3b/edu.bin
+
+  # Optional: explicit path to eval .bin file. When unset, train.py holds
+  # out the last 10% of the training file for evaluation.
+  # Read in: train.py:403 (data_cfg.get("eval_path"))
+  # eval_path: data/v4_3b/eval.bin
+
+  # Optional: block size for memmap dataset (default = max_seq_len).
+  # Read in: cli.py:93 (data_cfg.get("block_size", seq_len))
+  # block_size: 1024
+
+  # SFT mode only: HuggingFace dataset name for instruction tuning.
+  # Read in: train.py:443 (data_cfg.get("dataset_name", ...))
+  # dataset_name: HuggingFaceTB/smoltalk
+
+  # SFT mode only: local path to pre-downloaded SFT dataset.
+  # Read in: train.py:444 (data_cfg.get("local_path"))
+  # local_path: data/smoltalk
+
+# =============================================================================
+# EVAL — benchmark evaluation during/after training
+# NOTE: eval section is read by hagi.eval.evaluate CLI, NOT by scripts/train.py.
+#       train.py reads eval_interval/eval_samples/eval_iters from TRAINING.
+# =============================================================================
+eval:
+  # Benchmarks to run via lm-eval-harness.
+  # Read in: hagi/eval/evaluate.py:55 (--benchmarks CLI arg, not from config)
+  benchmarks:
+  - gsm8k            # Grade School Math 8K (mathematical reasoning)
+  - arc_challenge    # AI2 Reasoning Challenge (science QA)
+  - boolq            # Boolean Yes/No questions (reading comprehension)
+  - hellaswag        # Commonsense NLI (sentence completion)
+  - winogrande       # Winograd schema challenge (coreference resolution)
+
+# =============================================================================
+# MODEL — HAGI architecture configuration
+# Read in: scripts/train.py:659 → config_from_dict(cfg["model"]) → HAGIConfig
+# =============================================================================
+model:
+  # --- Cross-entropy / loss computation ---
+
+  # Chunk size for CE computation. 0 = no chunking. >0 = process logits in
+  # row-chunks of this size to bound peak activation memory. Raised 2048->4096:
+  # the fused CE path (use_fused_ce=true) uses this value (hagi.py:652-655), so
+  # B*T=8192 rows split into 2 chunks instead of 4 — fewer Python-loop CE
+  # launches per step. Chunk peak = 4096*V*2B = 384MB, well inside the budget.
+  # Read in: HAGIConfig.ce_chunk_size (hagi.py:89), loop.py:354
+  ce_chunk_size: 0
+
+  # Fused lm_head + CE: compute loss without materializing [B, T, V] logits.
+  # When true, logits is None and loss is computed via fused_linear_cross_entropy.
+  # Read in: HAGIConfig.use_fused_ce (hagi.py:90), hagi.py:644
+  use_fused_ce: true
+
+  # Chunk size for the fused CE path (separate from ce_chunk_size for
+  # independent tuning). Used when use_fused_ce=true. Aligned to 4096 with
+  # ce_chunk_size (the fused path reads ce_chunk_size when >0; this is the
+  # fallback for ce_chunk_size=0).
+  # Read in: HAGIConfig.ce_fused_chunk_size (hagi.py:91), hagi.py:652-655
+  ce_fused_chunk_size: 4096
+
+  # Label smoothing for token cross-entropy. 0 disables. 0.05-0.1 improves
+  # generalization/calibration for small LMs. Lowered 0.1->0.05: 0.1 over-
+  # smooths a 119M model (caps achievable perplexity / inflates reported
+  # CE by a fixed constant), 0.05 keeps the calibration benefit with less
+  # entropy floor.
+  # Read in: HAGIConfig.label_smoothing (hagi.py:94), hagi.py:657,667
+  label_smoothing: 0.05
+
+  # --- CAST (Clifford Algebra Symbolic Reasoning Tokens) ---
+  # Block-wise generation: each forward pass predicts K=8 tokens via
+  # multivector virtual states with geometric product coherence (bivector
+  # "area" between adjacent predictions). Reduces sequential forward passes
+  # by 8x during generation. Training uses multi-token prediction (position t
+  # predicts tokens t+1..t+8). ~4.7M new params (Linear 576->4608).
+  # Read in: HAGIConfig.cast_config (hagi.py), model/cast.py CASTHead
+  cast_config:
+    block_size: 8
+    use_coherence: true
+    # gate_init: 0.0 means -5.0 (auto-override in CASTHead.__init__).
+    # sigmoid(-5) ~ 0.007, coherence disabled at init. Model learns to
+    # activate gate as k>0 positions start predicting useful tokens.
+    # Set explicit positive value to enable coherence from start.
+    gate_init: 0.0
+    # Sparse K sampling: only compute CE loss on 3 of 8 positions per step.
+    # Always includes k=0 (next-token), randomly samples 2 from k=1..7.
+    # Reduces CE compute 8/3 ~ 2.7x. Inference uses all 8 positions.
+    # With train_k=3: B*T*3=30720 CE rows (vs 81920 for K=8), 8 chunks (vs 20).
+    train_k: 3
+    # Per-k loss weighting: exponential decay. k=0 gets decay^0=1.0,
+    # k=1 gets 0.5, k=2 gets 0.25. Normalized: [0.571, 0.286, 0.143].
+    # Prevents loss dilution: k=0 (next-token) gets 57% of gradient
+    # vs 34% with uniform weighting. Closer predictions are weighted higher.
+    k_loss_decay: 0.5
+
+  # --- Architecture: layer counts ---
+
+  # Perception stage: transformer blocks for primary input processing.
+  # Trimmed 4->2: perception only lifts embeddings into the residual stream;
+  # the real work is downstream reasoning. Fewer perception layers = less
+  # FLOPS on plain encoding, params freed for reasoning depth.
+  # Read in: HAGIConfig.perception_layers (hagi.py:42), hagi.py:129
+  perception_layers: 2
+
+  # Reasoning stage: transformer blocks for recurrent reasoning (reused
+  # via HRM loop or iter_embed loop). Deepened 4->7: HAGI's novelty lives in
+  # the recurrent reasoning core (HRM hrm_l_cycles=2 x 7 = 14 reasoning
+  # passes/step vs 8 at the old 4x2). Pareto-optimal: max reasoning-depth at
+  # min FLOPS/VRAM for an 8GB GPU.
+  # Read in: HAGIConfig.reasoning_layers (hagi.py:43), hagi.py:132
+  reasoning_layers: 7
+
+  # Expression stage: transformer blocks for output generation.
+  # Trimmed 4->2: expression just projects the refined hidden to lm_head.
+  # Read in: HAGIConfig.expression_layers (hagi.py:44), hagi.py:135
+  expression_layers: 2
+
+  # --- Core dimensions ---
+
+  # 576 (up from 512): exact match with SmolLM2-135M for embedding transfer.
+  # head_dim = 576/8 = 72 (was 64). Grades: 64+96+96+64+256=576.
+  # VRAM: (576/512)^2 ~ 1.27x activations -> batch 16->12 keeps VRAM < 8GB.
+  # Read in: HAGIConfig.hidden_size (hagi.py:41), hagi.py:100
+  hidden_size: 576
+
+  # Vocabulary size (SmolLM2 tokenizer = 49,152).
+  # Read in: HAGIConfig.vocab_size (hagi.py:40), hagi.py:128
+  vocab_size: 49152
+
+  # --- Reasoning loop ---
+
+  # Number of reasoning iterations. Used when use_loop=true and hrm=false.
+  # When hrm=true, HRM controls iterations via hrm_h_cycles × hrm_l_cycles.
+  # Read in: HAGIConfig.loop_count (hagi.py:45), hagi.py:213,527
+  loop_count: 5
+
+  # Enable reasoning loop (iterative refinement through reasoning blocks).
+  # Read in: HAGIConfig.use_loop (hagi.py:46), hagi.py:213,527
+  use_loop: true
+
+  # --- GDR (Grade-Decomposed Recurrence) ---
+
+  # Enable Clifford algebra Cl(3,0,0) grade-decomposed recurrence.
+  # Read in: HAGIConfig.use_gdr (hagi.py:47), hagi.py:140
+  use_gdr: true
+
+  # Use full HDIM module (project → invariant → transfer → fuse → GDR).
+  # When false, uses standalone GradeDecomposedRecurrence.
+  # Read in: HAGIConfig.hdim_full (hagi.py:48), hagi.py:141
+  hdim_full: true
+
+  # HDIM heads: number of parallel multivector projections. 4 (down from 6):
+  # 4×8=32-dim multivector is enough for the invariant extractor at hidden 640;
+  # fewer heads cut HiddenToMultivector + GatedFusion params with no quality
+  # loss at this width.
+  # Read in: HAGIConfig.hdim_heads (hagi.py:49), hagi.py:146,150
+  hdim_heads: 4
+
+  # Number of parallel domain rotors in HDIM (DomainRotor). Each rotor is a
+  # distinct cross-domain invariant-transfer schedule picked per step via
+  # _pick_rotor_idx. More rotors = richer geometric alignment across domains
+  # but more rotor params. Default 4 reproduces legacy behavior.
+  # Read in: HAGIConfig.hdim_num_rotors (hagi.py), hagi.py rotor schedule,
+  #          hdim_full.py DomainRotor
+  hdim_num_rotors: 4
+
+  # HDIM delay steps for DelayedHDIM (DTP). >1 enables delayed aggregation.
+  # 1 = standard HDIMFull (no delay).
+  # Read in: HAGIConfig.hdim_delay_steps (hagi.py:50), hagi.py:143,149
+  hdim_delay_steps: 1
+
+  # Enable cross-domain transfer in HDIM (rotor sandwich invariant extraction).
+  # When false, HDIM returns hidden unchanged (identity).
+  # Read in: HAGIConfig.use_hdim_cross_domain (hagi.py:58), hagi.py:156-157
+  use_hdim_cross_domain: true
+
+  # Rotor seed for deterministic rotor schedule (LCG-based index selection).
+  # Read in: HAGIConfig.rotor_seed (hagi.py:57), hagi.py:442
+  rotor_seed: 42
+
+  # --- Grade configuration (Clifford algebra) ---
+
+  # Hidden state split into 5 geometric grades. Sum must = hidden_size
+  # when use_gdr=true and hdim_full=false and hrm=false.
+  # Read in: GradeConfig (gdr.py:37-50), hagi.py:147
+  grades:
+    scalar: 64           # Grade 0: confidence/resolution (slow, momentum)
+    vector: 96           # Grade 1: entities/concepts (medium, momentum)
+    bivector: 96         # Grade 2: relations (fast, full update)
+    trivector: 64        # Grade 3: higher-order structure (fast, full update)
+    residual: 256          # 576-64-96-96-64=256, unconstrained channel
+    # Grade momentum tiering: distinct update speeds per grade are the core GDR
+    # hypothesis. scalar (confidence) must change SLOWLY -> high momentum; vector
+    # (entities) MEDIUM; bivector/trivector (relations/structure) FAST (full
+    # update, momentum 0, hardcoded in gdr.py). scalar 0.5->0.8 restores the
+    # slow tier the canonical config had flattened to 0.5 (same as vector),
+    # which nulled the slow-vs-fast distinction GDR is built on.
+    scalar_momentum: 0.8 # Momentum for scalar grade update (slow tier)
+    vector_momentum: 0.5 # Momentum for vector grade update (medium tier)
+    # Learnable GDR capacity (MoE-style): a router gates the per-grade update
+    # magnitude so the model self-allocates update energy across
+    # scalar/vector/bivector/trivector instead of the fixed 64/96/96/64 split.
+    # The grade DIMENSIONS stay (Clifford needs vector % 8 == 0); the router
+    # scales magnitude, so geometric_product math is unchanged. A Shazeer/Switch
+    # load-balance aux (gdr_router_alpha) keeps the gate from collapsing.
+    # Read in: GradeConfig.gdr_router (gdr.py), GradeRouter (gdr.py)
+    gdr_router: true
+    gdr_router_alpha: 0.01
+    gdr_router_temperature: 1.0
+
+  # --- HRM (Hierarchical Recurrent Model) ---
+
+  # Enable HRM two-level recurrent reasoning controller.
+  # When true, HRM owns the reasoning loop (iter_embed is unused).
+  # Read in: HAGIConfig.hrm (hagi.py:51), hagi.py:168,217
+  hrm: true
+
+  # Memory-aware HRM: move MSA read+write INSIDE the l_cycle loop so each
+  # reasoning cycle reads the slot registry accumulated by the prior cycle and
+  # writes back the refined hidden. This makes the slot registry part of the
+  # thinking process (HRM <-> MSA bidirectional) instead of a bolt-on block run
+  # after reasoning. Requires hrm=true, use_msa=true, hrm_l_cycles>=2 (so a
+  # later cycle has memory written by an earlier one to read).
+  # Read in: HAGIConfig.hrm_memory_aware (hagi.py), hagi.py forward, hrm_full.py
+  hrm_memory_aware: true
+
+  # High-level state dimension (z_H). Updated once per h_cycle.
+  # Read in: HAGIConfig.h_dim (hagi.py:54), hagi.py:170
+  h_dim: 160
+
+  # Low-level state dimension (z_L). Updated every l_cycle.
+  # Read in: HAGIConfig.l_dim (hagi.py:55), hagi.py:171
+  l_dim: 160
+
+  # High-level cycles: z_H updates per forward pass. 1 = no h_transition.
+  # Read in: HAGIConfig.hrm_h_cycles (hagi.py:52), hagi.py:173
+  hrm_h_cycles: 1
+
+  # Low-level cycles: z_L updates per h_cycle. Effective reasoning
+  # iterations = hrm_h_cycles × hrm_l_cycles. 2: 7×2=14 reasoning passes/step.
+  # Memory-aware HRM: cycle 0 writes, cycle 1 reads+writes. 3 l_cycles
+  # tested: 21 passes -> 10583 tok/s (-38%), 7.88GB (near OOM) — too expensive.
+  # Read in: HAGIConfig.hrm_l_cycles (hagi.py:53), hagi.py:174
+  hrm_l_cycles: 2
+
+  # --- MSA (Memory Sparse Attention) ---
+
+  # Enable slot-based sparse attention with external memory.
+  # Read in: HAGIConfig.use_msa (hagi.py:59), hagi.py:184
+  use_msa: true
+
+  # Maximum memory slots in the registry. Slots are evicted (oldest first)
+  # when exceeded. More slots = more context at cost of routing compute.
+  # Raised 2048->4096: doubles the effective MSA memory context window from
+  # 2048*4=8192 to 4096*4=16384 tokens — the goal It16 tried via msa_chunk_size
+  # 4->8 (which OOM'd at 9.54GB via quadratic attention growth). This route is
+  # LINEAR in slot budget and TRAINING-NEUTRAL: hagi.py:576 clears the model
+  # registry every forward, so the training registry only ever holds the
+  # current batch's B*T/chunk=2048 slots; slot_count is just the eviction cap
+  # (never hit in training). The larger cap only matters at GENERATION, where
+  # chat.py:59 builds a persistent SlotRegistry(max_slots=msa_slot_count) that
+  # accumulates across decode steps. CPU-only cost: the _id_to_idx_tensor
+  # (msa.py:50) grows 2048*1000 -> 4096*1000 longs = 16MB -> 32MB on host RAM,
+  # not VRAM. Verify training reserved stays <7.4GB (expect ~6.46, unchanged).
+  # Read in: HAGIConfig.msa_slot_count (hagi.py:60), hagi.py:203,602
+  msa_slot_count: 4096
+
+  # Top-k slots selected per query token. Higher = more attention coverage.
+  # 8->6: each query attends to 6 memory slots instead of 8 — MSA attention
+  # matmul scales as top_k*T_slot, so 25% less routing compute. Coverage
+  # remains strong at 6 (4096*4=16384 token context, 6 slots/query is still
+  # broad retrieval). L_msa_lb floor = alpha*top_k=6.
+  # Read in: HAGIConfig.msa_top_k (hagi.py:61), hagi.py:621
+  msa_top_k: 6
+
+  # Slot compression: group C adjacent tokens into one slot via mean-pooling.
+  # Cx more context at the same slot budget. 1 = per-token (legacy).
+  # Effective MSA context = msa_slot_count × msa_chunk_size.
+  # KEPT AT 4: memory-aware HRM does MSA read+write inside every l_cycle (2x),
+  # and the MSA attention score tensor scales as [B, nq, T, top_k, T_slot] —
+  # T_slot=chunk_size, so chunk=8 doubled the score tensor and OOM'd at 9.1GB
+  # reserved (vs 5.97GB at chunk=4). chunk=4 keeps VRAM safely under 8GB while
+  # still giving 4096*4=16384 tokens of effective context. The per-cycle slot
+  # count B*T/4=4096 is the registry K/V term; it is bounded by detach + the
+  # model-owned registry clear between forwards.
+  # Read in: HAGIConfig.msa_chunk_size (hagi.py:68), hagi.py:595
+  msa_chunk_size: 4
+
+  # LSH sublinear routing: when registry exceeds this many slots, switch
+  # from exact matmul+topk to random-projection sign-hash pre-filter.
+  # 0 = disabled (always exact). Enables sublinear retrieval at scale.
+  # DISABLED for rtx3070: the LSH path runs a Python loop over every query
+  # (cand_idx_list, msa.py) with a GPU sync per query; at Q=B*T=8192 it
+  # dominates forward time (~6-7s/step) without changing routing quality.
+  # A vectorized packing was attempted but produced an [Q, max_cand] intermediate
+  # that leaked VRAM and hit a topk k-out-of-range when candidates < top_k.
+  # Exact matmul+topk over the registry (≤4096 keys) is cheaper and exact here.
+  # Read in: HAGIConfig.msa_lsh_threshold (hagi.py:69), hagi.py:197
+  msa_lsh_threshold: 0
+
+  # LSH: number of random projection hashes. More = better recall,
+  # more compute. Used only when msa_lsh_threshold > 0.
+  # Read in: HAGIConfig.msa_lsh_hashes (hagi.py:70), hagi.py:199
+  msa_lsh_hashes: 8
+
+  # LSH: bits per bucket. 2^bits = bucket count per hash.
+  # Read in: HAGIConfig.msa_lsh_bits (hagi.py:71), hagi.py:200
+  msa_lsh_bits: 10
+
+  # LSH: probe buckets per hash (top closest buckets to query).
+  # Read in: HAGIConfig.msa_lsh_probe (hagi.py:72), hagi.py:201
+  msa_lsh_probe: 2
+
+  # Load-balance aux loss on MSA router (mirror of MoE aux). Ensures
+  # router receives gradient even when MSAAttention recomputes its own softmax.
+  # Read in: HAGIConfig.msa_aux_loss (hagi.py:77), hagi.py:622
+  msa_aux_loss: true
+
+  # MSA load-balance loss coefficient (alpha in Shazeer/Switch formulation).
+  # Read in: HAGIConfig.msa_lb_alpha (hagi.py:78), hagi.py:624
+  msa_lb_alpha: 1.0
+
+  # --- MoE (Mixture of Experts) ---
+
+  # Enable MoE SwiGLU in transformer blocks (replaces standard SwiGLU).
+  # Read in: HAGIConfig.use_moe (hagi.py:84), hagi.py:103, transformer.py:406
+  use_moe: true
+
+  # Number of experts per MoE layer.
+  # Read in: HAGIConfig.num_experts (hagi.py:85), hagi.py:104
+  num_experts: 4
+
+  # Top-k experts selected per token. 1 = sparse (Switch Transformer style).
+  # Read in: HAGIConfig.moe_top_k (hagi.py:86), hagi.py:105
+  moe_top_k: 1
+
+  # Intermediate size per expert. None = intermediate_size // num_experts.
+  # 384 ~ 1536/4 (same per-expert ratio). Each expert: SwiGLU 576->384->576.
+  # Read in: HAGIConfig.moe_intermediate_size (hagi.py:87), hagi.py:106,108
+  moe_intermediate_size: 384
+
+  # MoE load-balance aux loss coefficient.
+  # Read in: HAGIConfig.moe_alpha (hagi.py:88), hagi.py:107, moe.py:46
+  moe_alpha: 0.01
+
+  # Router temperature: divides router logits before softmax/top-k (moe.py:63
+  # does logits / T). 1.0 = unchanged (legacy default); <1.0 sharpens (stickier
+  # expert routing), >1.0 flattens the expert distribution (more exploration and
+  # load balance).
+  # Read in: HAGIConfig.moe_router_temperature (hagi.py), transformer.py,
+  #          moe.py MoESwiGLU.router_temperature
+  moe_router_temperature: 1.0
+
+  # Mixture-of-Depths (plan 4.2): extra "skip" router slot. Tokens that win
+  # the skip slot bypass the experts (residual identity, output 0) — trivial
+  # tokens skip the MLP compute. Skip is excluded from the load-balance aux.
+  # Read in: HAGIConfig.moe_mod_skip (hagi.py), moe.py MoESwiGLU
+  moe_mod_skip: true
+
+  # --- NARS (Non-Axiomatic Reasoning System) ---
+
+  # Enable NARS controllers for HRM/HDIM/MSA. When false, NARS modules
+  # are not created and standard routing is used.
+  # Read in: HAGIConfig.use_nars (hagi.py:79), hagi.py:208
+  use_nars: false
+
+  # --- Quality head ---
+
+  # Enable auxiliary quality prediction head (binary CE on token correctness).
+  # DISABLED true->false: w_quality is 0.0 (the head never contributes to loss)
+  # and use_fused_ce=true makes logits=None in the training forward, so the
+  # quality-target branch (hagi.py:682-693) never fires. The head still gets
+  # built (hagi.py:227) and forces pre_logits_hidden = a full [B,T,H] copy of h
+  # (hagi.py:636-638) retained through the rest of forward — a dead activation
+  # held in VRAM for nothing. Turning it off drops that copy and the head params.
+  # Read in: HAGIConfig.use_quality_head (hagi.py:81), hagi.py:227
+  use_quality_head: false
+
+  # --- Binary factorized layers ---
+
+  # Replace nn.Linear with BinaryFactorizedLinear (1-bit ±1 weights via STE).
+  # Experimental: ~46x parameter reduction but significant quality loss.
+  # Read in: HAGIConfig.use_binary_factorized (hagi.py:82), hagi.py:101
+  use_binary_factorized: false
+
+  # Rank for binary factorized decomposition. W = (B1 @ B2).T * scale.
+  # Read in: HAGIConfig.binary_factorized_rank (hagi.py:83), hagi.py:102
+  binary_factorized_rank: 8
+
+  # --- Regularization ---
+
+  # Thinking noise: inject Gaussian noise into HRM recurrent states (z_H, z_L)
+  # during training for regularization. 0 disables.
+  # Read in: HAGIConfig.thinking_noise (hagi.py:80), hagi.py:471,556
+  thinking_noise: 0.0
+
+  # Runtime magnitude cap on the residual stream before final_norm / lm_head.
+  # 0 disables (default, backward compatible). When >0, any token whose ||h||
+  # exceeds the cap is rescaled down to the cap during training. Safety net for
+  # the forward-magnitude divergence: 69 unscaled 2D hidden weights grow under
+  # Muon (no weight_decay) -> ||h|| in the residual stream rises exponentially
+  # -> weight-tied logits blow up -> softmax saturates -> L_CE climbs. The cap
+  # runs in forward so it guards BOTH fresh models and resumed checkpoints
+  # (the __init__ residual_scale is overwritten by load_state_dict on resume).
+  # 30.0 is a conservative ceiling: at hidden=512 a healthy ||h|| is O(sqrt(H))
+  # ~ 22; the cap only bites when divergence is already underway. Lower to
+  # tighten, raise to loosen, 0 to disable.
+  # DISABLED (30.0 -> 0): crutch. The forward-magnitude divergence it guarded
+  # (||h|| exponential growth from unscaled 2D hidden weights under Muon) is
+  # root-fixed by muon_weight_decay=0.1 bounding ||W|| + the residual-scaled
+  # init (1/sqrt(2L)), so the residual stream stays bounded without a runtime cap.
+  # Read in: HAGIConfig.hidden_mag_cap (hagi.py), hagi.py forward (post-expression)
+  hidden_mag_cap: 0.0
+
+  # --- Memory / performance ---
+
+  # Gradient checkpointing for transformer blocks. Saves activation memory
+  # at cost of recomputation in backward. Required for distillation phase
+  # (teacher + fp32 grads + activations → OOM without GC on 8GB).
+  # Read in: HAGIConfig.gradient_checkpointing (hagi.py:56), hagi.py:376
+  gradient_checkpointing: true
+
+  # Group checkpointing size: wrap N consecutive transformer blocks in ONE
+  # checkpoint call. IRRELEVANT when gradient_checkpointing=false (no
+  # checkpointing happens). Kept for backward compatibility.
+  # 2 (A/B tested vs 3): gc=2 → 9933 tok/s, 4.29GB reserved; gc=3 → 9606
+  # tok/s, 4.49GB reserved. gc=2 wins on both speed and VRAM because the
+  # 7-block reasoning core splits as [2,2,2,1]=4 groups (balanced) vs
+  # [3,3,1]=3 groups (unbalanced last group, more activation memory).
+  # Read in: HAGIConfig.gc_group_size (hagi.py), hagi.py _run_stage
+  gc_group_size: 2
+
+  # torch.compile the whole model. When true, loop.py wraps model in
+  # torch.compile for kernel fusion. Checkpoint keys stay clean.
+  # Read in: HAGIConfig.compile (hagi.py:95), loop.py:416-421
+  compile: true
+
+  # --- Transformer block configuration ---
+  # Read in: config_from_dict → TransformerConfig (transformer.py:20)
+  transformer:
+    # Hidden size (must match model.hidden_size).
+    # Read in: TransformerConfig.hidden_size (transformer.py:21)
+    hidden_size: 576
+
+    # SwiGLU intermediate size (non-MoE path). When MoE is active, each
+    # expert uses moe_intermediate_size instead. 1536 = 576*2.67 (same SwiGLU
+    # ratio as 512/1365). Divisible by 8.
+    # Read in: TransformerConfig.intermediate_size (transformer.py:24)
+    intermediate_size: 1536
+
+    # Maximum sequence length for RoPE precomputation. T > max_seq_len
+    # falls back to dynamic cache. Raised 2048->4096 to extend the model's
+    # generation/attention window (the training window stays 1024 via
+    # data.max_seq_len; this governs inference + MSA document offsets).
+    # Read in: TransformerConfig.max_seq_len (transformer.py:27), hagi.py:235
+    max_seq_len: 4096
+
+    # Normalization type: "rmsnorm" (only option, kept for compatibility).
+    # Read in: TransformerConfig.norm (transformer.py:28)
+    norm: rmsnorm
+
+    # Epsilon for RMSNorm.
+    # Read in: TransformerConfig.norm_eps (transformer.py:26)
+    norm_eps: 1.0e-6
+
+    # Number of KV heads (GQA). Must divide num_query_heads. 4 (GQA ratio
+    # 8/4=2 keeps head_dim 64 = 512/8, same KV compression as the old 768/12/4).
+    # Read in: TransformerConfig.num_kv_heads (transformer.py:23)
+    num_kv_heads: 4
+
+    # Number of query heads (GQA). head_dim = hidden_size / num_query_heads.
+    # 8 (down from 12): head_dim stays 64 (512/8) — attention capacity per
+    # head unchanged, just fewer parallel heads.
+    # Read in: TransformerConfig.num_query_heads (transformer.py:22)
+    num_query_heads: 8
+
+    # QK-norm: apply RMSNorm to query and key projections after RoPE.
+    # Read in: TransformerConfig.qk_norm (transformer.py:29), transformer.py:196
+    qk_norm: true
+
+    # RoPE base frequency (theta). Higher = slower rotation = longer range.
+    # Raised 10000->500000 to extend extrapolation beyond the 1024 training
+    # window toward the 4096 max_seq_len (Llama-3/Qwen-style long-range RoPE).
+    # Read in: TransformerConfig.rope_theta (transformer.py:25)
+    rope_theta: 500000.0
+
+    # Fuse Q, K, V projections into a single matmul (3x fewer kernel launches).
+    # Disabled when use_binary_factorized=true.
+    # Read in: TransformerConfig.fuse_qkv (transformer.py:32), transformer.py:199
+    fuse_qkv: true
+
+    # Fuse gate and up projections in SwiGLU into a single matmul.
+    # Disabled when use_binary_factorized=true.
+    # Read in: TransformerConfig.fuse_gate_up (transformer.py:33), transformer.py:331
+    fuse_gate_up: true
+
+  # --- Reasoning Cache (RC) ---
+  # Iterative generate→summarize→cache decoding (arXiv:2602.03773).
+  # See the top-level `rc:` section for full documentation. These fields
+  # are read by config_from_dict → HAGIConfig and saved in checkpoints.
+  # Read in: HAGIConfig.rc_* (hagi.py), hagi.inference.reasoning_cache,
+  #          hagi.train.loop (rc_train_step integration)
+  rc_enabled: true
+  rc_iterations: 3
+  rc_reasoning_budget: 512
+  rc_summary_budget: 128
+  rc_train_probability: 0.0
+  rc_train_iterations: 2
+
+  # --- Performance optimizations (all enabled by default) ---
+  # Stochastic HRM depth: probability of skipping l_cycle 1 during training.
+  # 0.3 = 30% of steps use 1 l_cycle (7 passes) instead of 2 (14 passes),
+  # saving ~15% reasoning compute on average. Also acts as regularization
+  # (stochastic depth), forcing cycle 0 to be self-sufficient.
+  # Read in: HAGIConfig.hrm_stochastic_depth, hrm_full.py HRMCore.forward
+  hrm_stochastic_depth: 0.3
+  # Progressive reasoning budget: use 1 l_cycle for the first N steps, then
+  # switch to full (2 l_cycles with stochastic depth). 30000 = 1 cycle for
+  # steps 0-30K, then full. Early training focuses on basic token prediction
+  # (doesn't need deep reasoning), saving ~10% total training time.
+  # 0 disables (always full from start).
+  # Read in: HAGIConfig.hrm_progressive_start_step, loop.py
+  hrm_progressive_start_step: 30000
+  # Adaptive MSA top_k: reduce top_k for trivial tokens (high MoD skip score).
+  # Trivial tokens (articles, punctuation) get 1-2 memory slots instead of 6,
+  # saving ~25% MSA attention compute. Content tokens keep full top_k=6.
+  # Read in: HAGIConfig.msa_adaptive_top_k, hagi.py MSA routing
+  msa_adaptive_top_k: true
+
+  # --- Precision shamanism ---
+  # fp16 attention: cast bf16 Q,K,V to fp16 for SDPA softmax. fp16 has 10
+  # mantissa bits vs bf16's 7 → 8x better softmax resolution (1024 vs 128
+  # distinct probability levels). On Ampere, fp16 and bf16 tensor cores
+  # have identical throughput — zero speed cost. The output is cast back
+  # to bf16. Toggled off when flash attention is unavailable (Windows
+  # fallback path). Pure dtype cast, no clamp.
+  # Read in: HAGIConfig.fp16_attention, transformer.py set_precision_flags
+  fp16_attention: true
+
+  # fp32 RMSNorm: upcast to fp32 for the variance computation (mean(x²))
+  # then cast result back to original dtype. bf16's 7 mantissa bits cause
+  # significant rounding error in mean(x²) over H=576 elements; fp32 gives
+  # 23 bits → exact variance. Pure precision upcast, no clamp.
+  # Read in: HAGIConfig.fp32_rmsnorm, transformer.py RMSNorm.forward
+  fp32_rmsnorm: true
+
+  # fp32 gradient accumulation: cast bf16 grads to fp32 after backward so
+  # small gradients aren't lost in bf16 (ULP=0.0078). DISABLED: fused AdamW
+  # kernel requires params, grads, and moment buffers to share dtype. With
+  # bf16 params, fp32 grads crash the kernel. The bf16 accum error over 2
+  # micro-batches is negligible (< 1 ULP per addition). Re-enable only if
+  # using the non-fused AdamW path or after casting moment buffers to fp32.
+  # Read in: HAGIConfig.fp32_grad_accum, loop.py training loop
+  fp32_grad_accum: false
+
+  # INT8 KV cache at inference: quantize K/V to int8 with per-head scales.
+  # 2x cache memory reduction → longer generation sequences within VRAM.
+  # Training is unaffected (KV cache is inference-only). Quantization is
+  # symmetric (abs_max / 127), dequantization is exact (int8 * scale).
+  # Read in: HAGIConfig.int8_kv_cache, kv_cache.py Int8StaticLayerCache
+  int8_kv_cache: true
+
+# =============================================================================
+# TRAINING — optimizer, schedule, loss, and loop configuration
+# Read in: scripts/train.py:660 (train_cfg = dict(cfg["training"]))
+#          → build_loop_config, build_optimizer, build_dataloader
+# =============================================================================
+training:
+  # Peak learning rate for AdamW (non-Muon params). Cosine schedule scales
+  # from 0 → learning_rate → min_lr_ratio × learning_rate.
+  # Read in: loop.py:338 (build_loop_config), optim.py:537 (build_optimizer)
+  learning_rate: 0.0004
+
+  # Micro-batch size (per GPU step before gradient accumulation).
+  # 10 is VRAM-optimal for 7GB budget with distillation teacher loaded:
+  # batch=10 → 6.92GB reserved, batch=11 → 7.42GB (over budget).
+  # Teacher freed at 60% training → batch could increase post-teacher,
+  # but runtime batch switching adds complexity for ~10% speedup.
+
+  # Read in: train.py:433, loop.py:340
+  batch_size: 10
+
+  # Checkpoint save interval (steps).
+  # Read in: loop.py:346 (build_loop_config)
+  ckpt_interval: 500
+
+  # --- Composite loss weights (final targets) ---
+  # Read in: loop.py:332-334 (build_loop_config), losses.py:272-281
+  composite_loss:
+    w_ce: 1.0        # Cross-entropy (main LM loss)
+    # Contrastive auxiliary DISABLED (w_aux 0.01->0.0): its labels are the batch
+    # index (hagi.py:706, labels=arange(B).expand) — "tokens of one sequence are
+    # one class". That is a trivially-true task the gdr_aux_proj features already
+    # satisfy per-token, so the term CONTRADICTS the LM objective and on real data
+    # L_aux climbs (4.5->5.07 over steps 600-2075) instead of falling to its
+    # ln(B)=2.08 floor, dragging grad_norm up (0.85->1.64) with ~62% of the grad
+    # energy landing in `perception`. On synthetic data L_aux stays flat at 4.7
+    # (no LM signal to conflict with) — confirming the term is noise, not signal.
+    # Removing it cuts the grad-norm drift at the source; the real geometric
+    # alignment (L_iso) is kept below.
+    w_aux: 0.0       # Contrastive auxiliary (DISABLED — broken labels, see above)
+    # Isomorphic MSE (HDIM domain invariant). Lowered 0.05->0.02: L_iso was
+    # rising 5x (0.0001->0.0005) as the aux warmup completed — a 0.05 weight on a
+    # growing term added upward pressure to grad_norm. 0.02 keeps the geometric
+    # domain-invariant signal training without amplifying the drift.
+    w_iso: 0.02      # Isomorphic MSE (HDIM domain invariant alignment)
+    w_moe: 0.005     # MoE load-balance aux
+    w_msa_lb: 0.01   # MSA router load-balance aux
+    w_gdr_router: 0.005 # Learnable GDR grade-capacity router load-balance aux
+    w_quality: 0.0   # Quality head BCE (disabled when use_quality_head=false)
+
+  # Composite-loss warmup start values (ramp from start → final target).
+  # Read in: loop.py:360-363 (build_loop_config)
+  w_aux_start: 0.0
+  w_iso_start: 0.0
+  w_moe_start: 0.0
+  w_msa_lb_start: 0.0
+  w_gdr_router_start: 0.0
+
+  # --- Schedule ---
+
+  # WSD (Warmup-Stable-Decay): better for small models with embedding transfer.
+  # Warmup is short (1000 steps) because embeddings are pretrained — no early
+  # embedding chaos. Long stable phase at peak LR, then linear decay in the
+  # last 10%. Read in: loop.py:350 (build_loop_config), loop.py:135
+  schedule: wsd
+
+  # 1000 (down from 3500): embedding transfer from SmolLM2-135M skips the
+  # random-init chaos. Short warmup eases composite-loss terms onto a model
+  # whose embeddings are already stable.
+  # Read in: loop.py:337 (build_loop_config), loop.py:133
+  warmup_steps: 1000
+
+  # Minimum LR ratio: cosine decays to min_lr_ratio × learning_rate.
+  # Read in: loop.py:339 (build_loop_config), loop.py:147
+  min_lr_ratio: 0.1
+
+  # 0.10 (up from 0.05): WSD decay tail covers last 10% of training.
+  # Read in: loop.py:351 (build_loop_config), loop.py:136
+  cooldown_frac: 0.10
+
+
+  # Read in: loop.py:336 (build_loop_config), train.py:44 (_resolve_max_steps)
+  max_steps: 146485
+
+  # --- Gradient ---
+
+  # Gradient accumulation steps. Effective batch = batch_size × grad_accum.
+  # Read in: loop.py:340 (build_loop_config), loop.py:547
+  grad_accum_steps: 2
+
+  # Global gradient clipping (max L2 norm). Applied before optimizer step.
+  # DISABLED (1.0 -> 0): grad clipping is a crutch that masks a divergent numeric
+  # scheme. The root fixes — fp32 master weights (precision=bf16), Muon weight
+  # decay bounding ||W||, residual-scaled init — keep grads well-scaled so no
+  # clamp is needed. grad_norm is still measured for diagnostics. Re-enable only
+  # as a temporary diagnostic, never as a permanent guard.
+  # Read in: loop.py:341 (build_loop_config), train.py (clip_grad_norm_)
+  grad_clip: 0.0
+
+  # Gradient checkpointing in training loop (separate from model setting).
+  # When true, overrides model.gradient_checkpointing at runtime.
+  # RE-ENABLED: without GC, the teacher model (SmolLM2-360M, 722MB bf16) +
+  # fp32 grads (238MB) + all activations without recompute → OOM on 8GB.
+  # GC trades 2x forward recompute for ~2x less activation memory. After
+  # the teacher is freed (step 87891), GC can be turned off — but that
+  # requires runtime switching, so it stays on for simplicity. The ns_steps
+  # reduction (5→3) and stochastic depth partially offset the GC cost.
+  # Read in: loop.py:343 (build_loop_config), loop.py:410
+  gradient_checkpointing: true
+
+  # Per-blade gradient norm clip for GDR grade-decomposed weights.
+  # DISABLED (1.0 -> 0): crutch. GDR blade norms are bounded structurally by the
+  # residual-scaled init + Muon weight decay, so a per-blade clamp is unnecessary.
+  # Read in: loop.py:353 (build_loop_config), loop.py:199 (magic_norm_clip)
+  magic_norm_max: 0.0
+
+  # --- Precision ---
+
+  # Precision: "bf16" (autocast, fp32 master weights), "manual_bf16" (model cast
+  # to bf16, no autocast — faster, no autocast overhead), "fp16" (autocast +
+  # GradScaler), "fp32" (no mixed). KEPT manual_bf16: full bf16-autocast fp32
+  # master blew VRAM to 10GB (fp32 activations + autocast dispatch) and ran 6.7x
+  # slower on the 8GB RTX 3070 — infeasible. The bf16 grad-accum precision loss
+  # that fed the train_v1_1 divergence is instead fixed STRUCTURALLY: grads are
+  # accumulated in fp32 inside the loop (loss.backward into an fp32-reduced
+  # accumulator), so the master update sees fp32-precision gradients without
+  # paying for fp32 activations / autocast dispatch. This removes the need for
+  # grad clipping (clip_grad_norm_ is a crutch masking a divergent scheme).
+  # Read in: loop.py:342, loop.py:160
+  precision: manual_bf16
+
+  # --- Optimizer: Muon + AdamW hybrid ---
+
+  # Optimizer kind: "adamw", "muon_adamw", "schedule-free-adamw", etc.
+  # "muon_adamw" = Muon for 2D weights + AdamW for rest.
+  # Read in: loop.py:352 (build_loop_config), optim.py:534 (build_optimizer)
+  optimizer: muon_adamw
+
+  # Muon peak LR for reasoning-core 2D weights. Muon orthogonalizes updates
+  # via Newton-Schulz, so LR is independent of grad_clip.
+  # 0.02 (canonical Keller Jordan recipe): scale-invariant orthogonalized
+  # update means higher LR converges faster. Distillation stabilizes gradients,
+  # so 0.02 is safe. Was 0.015 (conservative), 0.02 is the proven canonical.
+  # Read in: optim.py:488 (cfg.get("muon_lr", 0.02))
+  muon_lr: 0.02
+
+  # Muon momentum (Nesterov-style).
+  # Raised 0.95->0.97: a longer momentum EMA smooths the per-step update
+  # direction, which matters more now that hrm_l_cycles=2 stacks two reasoning
+  # passes' gradients into one update — the noise from the doubled pass count
+  # is dampened rather than amplified. 0.97 is the standard Muon momentum for
+  # multi-billion-token runs (Keller Jordan recipe).
+  # Read in: optim.py:489 (cfg.get("muon_momentum", 0.95))
+  muon_momentum: 0.97
+
+  # Newton-Schulz iteration count for zero-power orthogonalization.
+  # 5 is canonical (Keller Jordan recipe). 10 adds ~50% opt time for marginal
+  # quality gain at this scale. 5 converges well for 2D hidden weights.
+  # Read in: optim.py:490 (cfg.get("muon_ns_steps", 5))
+  muon_ns_steps: 5
+
+  # Decoupled (AdamW-style) weight decay applied INSIDE Muon to the 2D hidden
+  # weights. 0 disables (legacy behavior, reproduces pre-fix runs). Muon
+  # orthogonalizes the update direction, which is scale-invariant and has no
+  # built-in shrinkage — without decay the 2D hidden weight norm grows
+  # monotonically under repeated orthogonalized steps, inflating the residual-
+  # stream forward gain (the root cause of the ||h|| exponential blowup). A
+  # small wd (0.05-0.1) directly counteracts that growth at the source. Applied
+  # as p *= (1 - lr*wd) before the orthogonalized update, so it is decoupled
+  # from the gradient/momentum path (AdamW semantics, not L2-on-loss).
+  # 0.05 chosen as a gentle start (half the AdamW weight_decay=0.1 on the 1D
+  # /embed/head params); raise toward 0.1 if weight norm still drifts.
+  # SET TO 0.5: with scale-aware wd (optim.py Muon.step multiplies wd by the
+  # per-shape Muon scale), weight_decay is now interpreted as 1/target_steady_
+  # norm. wd=0.5 -> ||W||_ss ≈ 2.0, matching the residual-scaled init, uniform
+  # across all 126 Muon 2D shapes (independent of fan ratio). This STRUCTURALLY
+  # bounds the 2D hidden ||W|| that grew unbounded under Muon and caused the
+  # train_v1_1 residual-stream divergence — no hidden_mag_cap crutch needed.
+  # Read in: optim.py Muon.__init__ (weight_decay default 0.0),
+  #          optim.py _build_muon_adamw (cfg.get("muon_weight_decay", 0.0))
+  muon_weight_decay: 0.5
+
+  # Weight decay (decoupled, AdamW style). Applied to ≥2D non-norm params.
+  # Read in: optim.py:479,538 (cfg.get("weight_decay", 0.1))
+  weight_decay: 0.1
+
+  # AdamW betas (beta1, beta2) for momentum and variance EMA.
+  # beta2 0.95->0.98: a longer variance EMA smooths the per-step grad scale
+  # estimate, damping the variance spike that (with bf16 grads + peak LR) drove
+  # grad_norm up at step 1275. 0.98 is standard for long small-LM runs.
+  # Read in: optim.py:539 (cfg.get("betas", (0.9, 0.95)))
+  betas: [0.9, 0.98]
+
+  # AdamW epsilon for numerical stability.
+  # Read in: optim.py:540 (cfg.get("eps", 1e-8))
+  eps: 1.0e-8
+
+  # Optional: override AdamW LR (defaults to learning_rate when unset).
+  # Read in: optim.py:478,509 (cfg.get("adamw_lr", cfg.get("learning_rate", 3e-4)))
+  # adamw_lr: 0.0006
+
+  # Schedule-Free AdamW: Polyak-Ruppert averaging decay.
+  # Used only when optimizer=schedule-free-adamw.
+  # Read in: optim.py:574 (cfg.get("schedule_free_avg_decay", 0.999))
+  # schedule_free_avg_decay: 0.999
+
+  # Adam-Mini: block size for block-wise optimizer state.
+  # Used only when optimizer=adam-mini.
+  # Read in: optim.py:587 (cfg.get("adam_mini_block_size", 128))
+  # adam_mini_block_size: 128
+
+  # AdEMAMix: slow momentum mixing coefficient (alpha).
+  # Used only when optimizer=muon_ademamix.
+  # Read in: optim.py:484 (cfg.get("ademamix_alpha", 0.5))
+  # ademamix_alpha: 0.5
+
+  # --- EMA (Exponential Moving Average) ---
+
+  # EMA decay rate. 0.9995 = slow average for Polyak-Ruppert averaging.
+  # Read in: loop.py:356 (build_loop_config), loop.py:171 (update_ema)
+  ema:
+    decay: 0.9995
+
+    # EMA stride: update EMA every N steps instead of every step. 4 = update
+    # every 4 steps with decay adjusted to 0.9995^4 ≈ 0.998, mathematically
+    # equivalent in expectation. Saves 75% of EMA update compute (foreach
+    # mul+add over 59.5M params).
+    # Read in: loop.py build_loop_config (ema_stride), loop.py train loop
+    stride: 4
+
+    # Start EMA from this step. 1000 (down from 3500): aligned with
+    # warmup_steps=1000 — begin averaging at warmup's end so the EMA only
+    # tracks the post-warmup stable regime. Starting at 3500 wasted 2500
+    # steps of EMA averaging; 1000 gives a longer Polyak-Ruppert average
+    # for eval/gen with no noise penalty (warmup is the only noisy region).
+    # Read in: loop.py:357 (build_loop_config), loop.py:469
+    start_step: 1000
+
+  # --- Evaluation ---
+
+  # In-loop eval interval (steps). KEPT AT 0: the sequential_cycles>0
+  # (mix_paths) dataloader has no held-out eval split — build_full_dataloader
+  # only creates an eval_loader when data.eval_path is set, and _on_eval
+  # no-ops when it is None. Setting eval_interval>0 would be dead config
+  # until an eval_path is wired. Quality is monitored via the loss trend
+  # (logged every log_interval) and post-hoc lm-eval-harness.
+  # Read in: train.py:691 (train_cfg.get("eval_interval", 0))
+  eval_interval: 0
+
+  # Number of samples held out for in-loop evaluation.
+  # Read in: train.py:692 (train_cfg.get("eval_samples", 500))
+  eval_samples: 500
+
+  # Number of eval iterations (batches) per eval round.
+  # Read in: loop.py:345 (build_loop_config)
+  eval_iters: 50
+
+  # --- Logging ---
+
+  # Log interval (steps). 0 = no logging.
+  # Read in: loop.py:348 (build_loop_config), loop.py:542
+  log_interval: 1
+
+  # NARS policy update interval (steps). Used only when use_nars=true.
+  # Read in: loop.py:349 (build_loop_config)
+  nars_policy_interval: 200
+
+  # --- Loss warmup ---
+
+  # Loss warmup mode: "linear" or "cosine" ramp for composite loss weights.
+  # Switched linear->cosine: a cosine ramp eases w_aux/w_iso/w_moe in gently
+  # (slow start, smooth mid) instead of a constant-slope linear ramp, which
+  # reduces the transient gradient disturbance when the auxiliary terms
+  # switch on. Long-run stability/quality win; the CE path is unaffected.
+  # Read in: loop.py:373 (build_loop_config), loop.py:155
+  loss_warmup_mode: cosine
+
+  # Warmup steps for L_aux (contrastive auxiliary loss). Aligned with new
+  # warmup_steps=1000. Composite-loss terms ramp during the short warmup +
+  # early stable phase.
+  # Read in: loop.py:364 (build_loop_config), loop.py:527
+  aux_warmup_steps: 1500
+
+  # Warmup steps for L_iso (isomorphic invariant loss). Aligned with new
+  # warmup_steps=1000. Composite-loss terms ramp during the short warmup +
+  # early stable phase.
+  # Read in: loop.py:368 (build_loop_config), loop.py:529
+  iso_warmup_steps: 2000
+
+  # Warmup steps for L_moe (MoE load-balance loss). Aligned with new
+  # warmup_steps=1000. Composite-loss terms ramp during the short warmup +
+  # early stable phase.
+  # Read in: loop.py:370 (build_loop_config), loop.py:533
+  moe_warmup_steps: 1000
+
+  # Warmup steps for L_msa_lb (MSA router load-balance loss). Aligned with new
+  # warmup_steps=1000. Composite-loss terms ramp during the short warmup +
+  # early stable phase.
+  # Read in: loop.py (build_loop_config), loop.py scheduled_weight(w_msa_lb)
+  msa_lb_warmup_steps: 1500
+
+  # Warmup steps for the learnable GDR grade-capacity router load-balance loss.
+  # Aligned with new warmup_steps=1000. Composite-loss terms ramp during the
+  # short warmup + early stable phase.
+  # Read in: loop.py (build_loop_config), loop.py train loop scheduled_weight
+  gdr_router_warmup_steps: 1500
+
+  # --- VRAM probe ---
+
+  # VRAM probing for automatic batch size / gradient checkpointing adjustment.
+  # Read in: train.py:788-790 (vram_probe safety/headroom)
+  vram_probe:
+    safety: 1.0       # Safety multiplier for VRAM budget
+    headroom: 0.85    # Fraction of VRAM to target (0.85 = 85% of total)
+
+  # --- Misc ---
+
+  # Random seed for reproducibility.
+  # Read in: train.py:174 (train_cfg.get("seed", 42))
+  seed: 42
+
+  # Prefix LM mode: pack multiple documents per sequence with attention mask.
+  # Read in: train.py:681 (train_cfg.get("use_prefix_lm", False))
+  use_prefix_lm: false
+
+# =============================================================================
+# DISTILLATION — online knowledge distillation from SmolLM2-135M
+# Teacher: SmolLM2-135M (same tokenizer, vocab=49152, hidden=576).
+# Phase 1 (0-distill_end_step): alpha*CE + (1-alpha)*T^2*KL(student||teacher)
+# Phase 2 (distill_end_step-end): CE only (teacher freed from VRAM)
+# Read in: scripts/train.py (teacher load + embedding transfer),
+#          src/hagi/train/loop.py (teacher forward + distill loss),
+#          src/hagi/train/distillation.py (implementation)
+# =============================================================================
+distillation:
+  enabled: true
+  # Teacher for online distillation (KL on logits). SmolLM2-360M (361M params,
+  # hidden=960, 32 layers) is 5x the student size — strong enough to provide
+  # meaningful soft targets. Same tokenizer (vocab=49152), so KL is computed
+  # on matching vocab dimensions. hidden_size mismatch (960 vs 576) is fine:
+  # KL projects each model's hidden through its own lm_head to [B,T,V] logits.
+  # VRAM bf16: 690MB weights + ~180MB peak activation (micro_batch=4) = ~870MB.
+  teacher_model: HuggingFaceTB/SmolLM2-360M
+  # Separate model for embedding transfer (must match student hidden_size=576).
+  # SmolLM2-135M has hidden=576, same as student. Used once at init, then freed.
+  embedding_model: HuggingFaceTB/SmolLM2-135M
+  embedding_transfer: true
+  temperature: 2.0
+  # Alpha schedule: CE weight = alpha, KL weight = (1-alpha).
+  # 0.5->0.3: start balanced (equal CE+KL), shift toward KL-dominant (70% KL)
+  # at the end. More teacher signal throughout — the point of distillation.
+  alpha_start: 0.5
+  alpha_end: 0.3
+  # 0 = auto (max_steps * 0.60). Teacher freed at 60% of training.
+  distill_end_step: 0
+  # 2048: KL chunk size. Peak VRAM per chunk = 2 * 2048 * 49152 * 6B ~ 1.2GB.
+  # Reduced from 4096 to 2048 to fit alongside the larger 360M teacher.
+  chunk_size: 1024
+  # Run teacher every 2 steps (not every step). Halves teacher forward cost
+  # and VRAM pressure. On non-teacher steps, pure CE is used. The KL signal
+  # is still fresh enough (teacher hidden doesn't change much between steps).
+  every: 2
+  # Teacher micro-batch: process B tokens in chunks of 4 to bound peak
+  # activation VRAM. At micro_batch=4, seq=1024, 32 layers, 15 heads:
+  # peak attention = 4 * 15 * 1024 * 1024 * 2B = 120MB per layer.
+  teacher_micro_batch: 0
+
+# =============================================================================
+# CURRICULUM — two-stage SFT (VibeThinker-inspired)
+# Stage 1: broad capability coverage (all data sources, sequential cycling)
+# Stage 2: hard-reasoning subset (math + edu + web, focused on long-horizon)
+# When enabled, train.py builds a second dataloader for stage 2 and switches
+# at stage2_start_step. The LR schedule (WSD) naturally decays during stage 2,
+# acting as a fine-tuning phase.
+# Read in: scripts/train.py (CurriculumBatchProvider, build_stage2_dataloader)
+# =============================================================================
+curriculum:
+  enabled: true
+  stage2_start: 100000  # Optimizer step to switch to hard-reasoning subset
+  stage2_mix_paths:
+  - name: openwebmath
+    path: v4_3b/openwebmath.bin
+    weight: 0.15
+  - name: edu
+    path: v4_3b/edu.bin
+    weight: 0.50
+  - name: slimpajama
+    path: v4_3b/slimpajama.bin
+    weight: 0.35
+  stage2_sequential_cycles: 2
+
+# =============================================================================
+# REASONING CACHE (RC) — iterative generate→summarize→cache decoding
+# Replaces standard autoregressive decoding with an iterative loop: each turn
+# generates a reasoning trace (H_R tokens), summarizes it into a compact
+# summary (H_S << H_R), and conditions the next turn on the summary. This
+# decouples the effective reasoning horizon (T × (H_R + H_S)) from the
+# per-step context length, enabling extrapolation beyond training lengths.
+# See: arXiv:2602.03773 (Wu et al., 2026).
+#
+# HAGI integration: at inference, generate_with_rc() wraps generate() with
+# the iterative loop. At training, rc_train_probability > 0 enables RC
+# training steps (two-forward: no-grad reasoning + grad summary-conditioned)
+# to teach summary-conditioned generation. The MSA slot registry serves as
+# the cross-iteration memory cache when use_msa_cache=true.
+# Read in: hagi.inference.reasoning_cache (RCConfig, generate_with_rc),
+#          hagi.inference.chat (ChatSession.rc_config),
+#          hagi.train.loop (rc_train_step integration)
+# =============================================================================
+rc:
+  # Master switch for RC training. When false, rc_train_probability is
+  # forced to 0 and no RC training steps run. Inference RC is controlled
+  # separately via ChatSession.enable_rc() / rc_config at call time.
+  enabled: true
+
+  # Inference: number of RC turns (generate→summarize cycles). More turns
+  # = longer effective reasoning horizon at the cost of more forward passes.
+  # 3 turns × (512 + 128) = 1920 effective tokens per response.
+  iterations: 3
+
+  # H_R: max new tokens per reasoning trace generation. Bounded context
+  # keeps each step close to the training distribution (seq_len=1024).
+  # 512 = half the training seq_len, leaving room for prompt + summary.
+  reasoning_budget: 512
+
+  # H_S: max new tokens per summary. H_S << H_R: the summary compresses
+  # the reasoning trace into a compact cache entry. 128 tokens is ~4x
+  # compression vs 512-token traces.
+  summary_budget: 128
+
+  # Training: probability of an RC training step (0.0 = never, 1.0 =
+  # always). 0.05 = ~1 in 20 steps uses RC training. Low probability
+  # keeps the primary next-token-prediction signal dominant while
+  # gradually teaching summary-conditioned generation.
+  train_probability: 0.0
+
+  # Training: number of RC iterations per RC training step. Fewer than
+  # inference (2 vs 3) to bound the extra forward cost per step.
+  train_iterations: 2

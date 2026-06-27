@@ -1,3 +1,0 @@
-[submodule "crates/cuda-oxide"]
-	path = crates/cuda-oxide
-	url = https://github.com/NVlabs/cuda-oxide.git
